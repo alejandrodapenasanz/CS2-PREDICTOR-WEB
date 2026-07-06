@@ -88,6 +88,74 @@ function Get-SystemPython {
     return $cmd.Source
 }
 
+function Get-ScraperBasePython {
+    # Scrapling (navegador stealth) soporta Python 3.10-3.13, NO 3.14.
+    # Preferimos 3.13/3.12/3.11 via el 'py' launcher; si no hay, caemos al
+    # Python del sistema (scrapling stealth podria no instalar; se degrada).
+    foreach ($v in @("3.13", "3.12", "3.11", "3.10")) {
+        try {
+            $out = & py "-$v" -c "import sys; print(sys.executable)" 2>$null
+            if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
+        } catch { }
+    }
+    Write-Host "AVISO: no se encontro Python 3.10-3.13; uso el del sistema. El navegador stealth de Scrapling podria no instalar (se usara solo el tier HTTP / requests)." -ForegroundColor Yellow
+    return (Get-SystemPython)
+}
+
+function Ensure-CaBundle {
+    # En redes con inspeccion TLS (proxy corporativo con CA propia), curl_cffi y
+    # requests fallan la verificacion. Exportamos el trust store de Windows a un
+    # bundle y lo publicamos por variables de entorno. En un PC sin restricciones
+    # no hace falta: si el probe pasa, no se genera nada.
+    param([string]$ScraperDir)
+    $bundle = Join-Path $ScraperDir "corp_ca_bundle.pem"
+
+    # Si ya existe un bundle, publicalo y termina.
+    if (Test-Path $bundle) {
+        Set-Item -Path "Env:HLTV_CA_BUNDLE" -Value $bundle
+        Set-Item -Path "Env:CURL_CA_BUNDLE" -Value $bundle
+        Set-Item -Path "Env:SSL_CERT_FILE" -Value $bundle
+        Set-Item -Path "Env:REQUESTS_CA_BUNDLE" -Value $bundle
+        Write-Host ("CA bundle en uso: " + $bundle) -ForegroundColor DarkGray
+        return
+    }
+
+    # Probe TLS: si la verificacion por defecto funciona, no hacemos nada.
+    $probe = 'try:
+    import urllib.request, ssl
+    urllib.request.urlopen("https://www.hltv.org/robots.txt", timeout=15)
+    print("TLS_OK")
+except ssl.SSLCertVerificationError:
+    print("TLS_MITM")
+except Exception:
+    print("TLS_OK")'
+    $result = & (Get-SystemPython) -c $probe 2>$null
+    if ($result -match "TLS_MITM") {
+        Write-Host "Inspeccion TLS detectada; exporto el trust store de Windows a corp_ca_bundle.pem..." -ForegroundColor Yellow
+        $stores = @('Cert:\LocalMachine\Root','Cert:\CurrentUser\Root','Cert:\LocalMachine\CA','Cert:\CurrentUser\CA')
+        $seen = @{}
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($s in $stores) {
+            Get-ChildItem $s -ErrorAction SilentlyContinue | ForEach-Object {
+                if (-not $seen.ContainsKey($_.Thumbprint)) {
+                    $seen[$_.Thumbprint] = $true
+                    $b64 = [System.Convert]::ToBase64String($_.RawData, 'InsertLineBreaks')
+                    [void]$sb.AppendLine("# $($_.Subject)")
+                    [void]$sb.AppendLine("-----BEGIN CERTIFICATE-----")
+                    [void]$sb.AppendLine($b64)
+                    [void]$sb.AppendLine("-----END CERTIFICATE-----")
+                }
+            }
+        }
+        [System.IO.File]::WriteAllText($bundle, $sb.ToString())
+        Set-Item -Path "Env:HLTV_CA_BUNDLE" -Value $bundle
+        Set-Item -Path "Env:CURL_CA_BUNDLE" -Value $bundle
+        Set-Item -Path "Env:SSL_CERT_FILE" -Value $bundle
+        Set-Item -Path "Env:REQUESTS_CA_BUNDLE" -Value $bundle
+        Write-Host ("CA bundle generado: " + $bundle) -ForegroundColor DarkGray
+    }
+}
+
 function Test-PythonImports($python, $imports) {
     $code = "import " + ($imports -join ", ")
     & $python -c $code 2>$null
@@ -113,6 +181,15 @@ function Configure-ScrapeGuards {
     Set-DefaultEnv "HLTV_FETCH_WARMUP" "1"
     Set-DefaultEnv "HLTV_URL_QUARANTINE_SECONDS" "900.0"
     Set-DefaultEnv "HLTV_MAX_HTTP_REQUESTS_PER_RUN" "2500"
+    # Scrapling: tier 1 HTTP impersonation + tier 2 navegador stealth.
+    Set-DefaultEnv "HLTV_USE_SCRAPLING" "1"
+    Set-DefaultEnv "HLTV_SOLVE_CLOUDFLARE" "1"
+    Set-DefaultEnv "HLTV_IMPERSONATE" "chrome"
+    Set-DefaultEnv "HLTV_STEALTH_HEADLESS" "1"
+    Set-DefaultEnv "HLTV_STEALTH_TIMEOUT_MS" "90000"
+    Set-DefaultEnv "HLTV_STEALTH_MAX_SOLVES_PER_RUN" "6"
+    Set-DefaultEnv "HLTV_SCRAPLING_TIER1_ATTEMPTS" "3"
+    # HLTV_PROXY vacio por defecto (sin proxy). Ej: http://user:pass@host:port
 }
 
 function Ensure-ModelPython {
@@ -134,24 +211,56 @@ function Ensure-ScraperPython {
     $VenvPython = Join-Path $ScraperDir ".venv\Scripts\python.exe"
     $Requirements = Join-Path $ScraperDir "requirements.txt"
 
+    # El venv debe crearse con un Python 3.10-3.13 para que Scrapling stealth
+    # instale. Si el venv ya existe con 3.14 (sin scrapling), se recrea.
+    $BasePython = Get-ScraperBasePython
+    $baseOk = Test-PythonImports $BasePython @("sys")
+
     $valid = $false
     if ((Test-Path $VenvPython) -and (-not $RecreateScraperVenv)) {
-        $valid = Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests")
+        # Valido core + scrapling (si el base soporta scrapling exigimos scrapling).
+        $valid = Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests", "scrapling", "curl_cffi")
+        if (-not $valid) {
+            $valid = Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests")
+            if ($valid) {
+                Write-Host "El venv del scraper no tiene Scrapling; se recreara para anadirlo." -ForegroundColor Yellow
+                $valid = $false
+            }
+        }
     }
 
     if (-not $valid) {
-        Write-Host "Preparando venv online del scraper..." -ForegroundColor Yellow
+        Write-Host ("Preparando venv online del scraper con: " + $BasePython) -ForegroundColor Yellow
         if (Test-Path (Join-Path $ScraperDir ".venv")) {
             Remove-Item -LiteralPath (Join-Path $ScraperDir ".venv") -Recurse -Force
         }
-        Invoke-Native $SystemPython @("-m", "venv", (Join-Path $ScraperDir ".venv")) "Creacion venv scraper"
+        Invoke-Native $BasePython @("-m", "venv", (Join-Path $ScraperDir ".venv")) "Creacion venv scraper"
         Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade pip scraper"
         Invoke-Native $VenvPython @("-m", "pip", "install", "-r", $Requirements) "Instalacion requirements scraper"
+        # Descarga de navegadores de Scrapling (patchright/chromium). Best-effort:
+        # si falla (p.ej. Python 3.14 sin wheels), seguimos con el tier HTTP.
+        try {
+            & $VenvPython -c "from scrapling.cli import install; install([], standalone_mode=False)"
+            if ($LASTEXITCODE -ne 0) { Write-Host "AVISO: 'scrapling install' devolvio error; el navegador stealth podria no estar disponible." -ForegroundColor Yellow }
+        } catch {
+            Write-Host ("AVISO: no se pudieron instalar los navegadores de Scrapling: " + $_.Exception.Message) -ForegroundColor Yellow
+        }
     }
 
     if (-not (Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests"))) {
-        throw "El venv del scraper no tiene las dependencias requeridas."
+        throw "El venv del scraper no tiene las dependencias base requeridas."
     }
+
+    # Estado de Scrapling: si no importa, desactivamos su uso y avisamos.
+    if (Test-PythonImports $VenvPython @("scrapling", "curl_cffi")) {
+        if (Test-PythonImports $VenvPython @("scrapling.fetchers")) {
+            Write-Host "Scrapling disponible (tier HTTP impersonation + navegador stealth)." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "AVISO: Scrapling no disponible en el venv; el scraper usara requests/cloudscraper. Instala Python 3.13 para el modo stealth." -ForegroundColor Yellow
+        Set-Item -Path "Env:HLTV_USE_SCRAPLING" -Value "0"
+    }
+
     return $VenvPython
 }
 
@@ -159,6 +268,7 @@ $ModelPython = Ensure-ModelPython
 $ScraperPython = $null
 if (-not $SkipScrape) {
     Configure-ScrapeGuards
+    Ensure-CaBundle -ScraperDir (Join-Path $Root "SCRAPPER\hltv-scraper-api")
     $ScraperPython = Ensure-ScraperPython -SystemPython $ModelPython
 }
 Write-Host ("Python modelo:  " + $ModelPython) -ForegroundColor DarkGray

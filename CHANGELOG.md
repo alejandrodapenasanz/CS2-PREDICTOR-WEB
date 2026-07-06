@@ -1,5 +1,33 @@
 # Changelog / registro de decisiones
 
+## 2026-07-06 - Scraper por tiers con Scrapling + candidatos de modelo
+
+Detalle completo en `LAST change.md` (raíz). Resumen:
+
+- **Scraper anti-bloqueo (Scrapling)**: `DAILY_SNAPSHOTS/start.py::fetch_html` pasa
+  a arquitectura por tiers sobre el choke point único: Tier 1 `Fetcher(impersonate=
+  "chrome")` (curl_cffi, fingerprint TLS/JA3 real) reutilizando `cf_clearance`;
+  Tier 2 `StealthyFetcher(solve_cloudflare=True)` que resuelve el challenge y acuña
+  cookie fresca (persistida en `cf_session.json`); Tiers 3-5 `requests`/`cloudscraper`/
+  `grab_cf` como red de seguridad. Validado en vivo: `requests` → 403, Scrapling
+  impersonate → 200 en HLTV.
+- **Detección de bloqueo** ampliada: header `cf-mitigated: challenge` + marcadores
+  (`challenge-platform`, `turnstile`, `__cf_chl`, …); UA por defecto Chrome 140.
+- **CA corporativa (redes con inspección TLS)**: `start.ps1::Ensure-CaBundle` hace
+  probe TLS y, si detecta MITM, exporta el trust store de Windows a
+  `corp_ca_bundle.pem` y lo publica por env. En red normal no genera nada (certifi).
+- **Orquestación**: `start.ps1` crea el venv del scraper con **Python 3.13**
+  (Scrapling no soporta 3.14), instala `scrapling[fetchers]` + navegadores, y degrada
+  a requests/cloudscraper con aviso si no hay Python soportado. Nuevas variables
+  `HLTV_USE_SCRAPLING`, `HLTV_SOLVE_CLOUDFLARE`, `HLTV_IMPERSONATE`, `HLTV_PROXY`, etc.
+- **Modelo (candidatos seguros por construcción)**: el trainer elige por menor log
+  loss walk-forward, así que se añaden candidatos que solo ganan si mejoran:
+  **CatBoost** (`catboost_cal`) y **ensemble de 3** (`ensemble3_cal`, opcional),
+  **restricciones monótonas** en GBDT, **early stopping**, calibración **beta**
+  (Kull & Flach) e **isotónica** además de Platt, **half-life de decay tunable**
+  (`--form-half-life`) y **gap temporal** en walk-forward (`--wf-gap`). Verificado con
+  smoke test sintético; falta reentrenar con datos reales en un PC sin restricciones.
+
 ## 2026-07-02 - HLTV betting analytics por defecto
 
 - **Analytics future-proof**: `DAILY_SNAPSHOTS/start.py` captura

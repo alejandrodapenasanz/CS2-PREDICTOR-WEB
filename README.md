@@ -160,6 +160,16 @@ python -m pip install -r requirements.txt
 
 SQLite va incluido en Python.
 
+**Scraper por tiers (anti-bloqueo Cloudflare).** El scraper usa
+[Scrapling](https://scrapling.readthedocs.io): Tier 1 HTTP con impersonation TLS/JA3
+(`curl_cffi`) y Tier 2 navegador stealth que resuelve el challenge, con
+`requests`/`cloudscraper` como red de seguridad. `start.ps1` crea el venv del scraper
+con **Python 3.13** (Scrapling **no** soporta 3.14) e instala `scrapling[fetchers]` +
+navegadores automáticamente. Si no hay Python 3.10-3.13, el scraper degrada a
+`requests`/`cloudscraper` con aviso. En redes con inspección TLS (proxy corporativo),
+`start.ps1` genera un CA bundle automáticamente. Todos los cambios de esta iteración
+están documentados en [`LAST change.md`](LAST%20change.md).
+
 **Una sola orden hace TODO** (scrape → update → modelo → enrich → BBDD → web):
 
 ```powershell

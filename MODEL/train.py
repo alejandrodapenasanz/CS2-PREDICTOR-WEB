@@ -130,36 +130,96 @@ def augment(X: np.ndarray, y: np.ndarray, cols: list[str]) -> tuple[np.ndarray, 
     return np.vstack([X, X_rev]), np.concatenate([y, 1 - y])
 
 
-def make_lgbm():
+# Features "ventaja de team1": a mayor valor, mas probable que gane team1. Se
+# imponen como restricciones monotonas crecientes en los GBDT: reducen overfitting
+# con ~7k series y mejoran la generalizacion (LightGBM monotone_constraints).
+MONOTONE_INCREASING = {
+    "glicko_prob_centered", "glicko_diff", "elo_prob_centered", "elo_diff",
+    "winrate_diff", "winrate_decay_diff", "last5_winrate_diff", "last10_winrate_diff",
+    "last20_winrate_diff", "last30_winrate_diff", "avg_score_diff", "last5_score_diff",
+    "last10_score_diff", "last20_score_diff", "streak_diff",
+    "format_winrate_diff", "format_avg_score_diff",
+    "h2h_winrate_centered", "format_h2h_winrate_centered",
+    "asset_map_winrate_diff", "asset_rating_l10_diff",
+}
+CALIBRATION_METHODS = ("sigmoid", "isotonic", "beta")
+
+
+def _monotone_vector(cols: list[str]) -> list[int]:
+    return [1 if c in MONOTONE_INCREASING else 0 for c in cols]
+
+
+def _catboost_available() -> bool:
+    try:
+        import catboost  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def make_lgbm(monotone: list[int] | None = None):
     try:
         from lightgbm import LGBMClassifier
 
-        return LGBMClassifier(
-            n_estimators=350,
-            learning_rate=0.03,
-            num_leaves=24,
+        params = dict(
+            n_estimators=2000,          # techo alto; el early stopping lo recorta
+            learning_rate=0.02,
+            num_leaves=31,
             max_depth=-1,
-            min_child_samples=50,
-            subsample=0.85,
+            min_child_samples=80,
+            subsample=0.8,
             subsample_freq=1,
-            colsample_bytree=0.85,
-            reg_lambda=3.0,
+            colsample_bytree=0.8,
+            reg_lambda=5.0,
             reg_alpha=0.0,
             objective="binary",
             n_jobs=-1,
             verbosity=-1,
         )
+        if monotone is not None and any(monotone):
+            params["monotone_constraints"] = monotone
+        return LGBMClassifier(**params)
     except ModuleNotFoundError:
         from sklearn.ensemble import HistGradientBoostingClassifier
 
-        return HistGradientBoostingClassifier(
-            max_iter=350,
+        kwargs = dict(
+            max_iter=600,
             learning_rate=0.03,
-            max_leaf_nodes=24,
-            min_samples_leaf=50,
-            l2_regularization=3.0,
+            max_leaf_nodes=31,
+            min_samples_leaf=80,
+            l2_regularization=5.0,
+            early_stopping=True,
+            validation_fraction=0.15,
+            n_iter_no_change=40,
             random_state=42,
         )
+        if monotone is not None and any(monotone):
+            kwargs["monotonic_cst"] = monotone
+        return HistGradientBoostingClassifier(**kwargs)
+
+
+def make_catboost(monotone: list[int] | None = None):
+    """CatBoost calibrado suele mejorar el log loss (ordered boosting, arboles
+    simetricos). Opcional: si no esta instalado devuelve None y se omite el
+    candidato (literatura: XGBoost/CatBoost/LightGBM boosting comparison)."""
+    try:
+        from catboost import CatBoostClassifier
+    except Exception:
+        return None
+    params = dict(
+        iterations=2000,
+        learning_rate=0.02,
+        depth=5,
+        l2_leaf_reg=6.0,
+        loss_function="Logloss",
+        eval_metric="Logloss",
+        random_seed=42,
+        allow_writing_files=False,
+        verbose=False,
+    )
+    if monotone is not None and any(monotone):
+        params["monotone_constraints"] = list(monotone)
+    return CatBoostClassifier(**params)
 
 
 def make_logistic():
@@ -177,39 +237,134 @@ def make_logistic():
     )
 
 
-def _new_estimator(kind: str):
-    return make_lgbm() if kind == "gbm" else make_logistic()
+def _new_estimator(kind: str, cols: list[str]):
+    if kind == "gbm":
+        return make_lgbm(_monotone_vector(cols))
+    if kind == "catboost":
+        return make_catboost(_monotone_vector(cols))
+    return make_logistic()
+
+
+class BetaCalibratedClassifier:
+    """Calibracion beta (Kull & Flach 2017): regresion logistica sobre
+    [ln p, -ln(1-p)]. Incluye la identidad como caso particular, asi que NO
+    descalibra un modelo ya bueno, y maneja score sesgado mejor que Platt.
+    Expone predict_proba -> se puede usar como estimador de un Component."""
+
+    def __init__(self, base) -> None:
+        self.base = base
+        self.lr = None
+
+    @staticmethod
+    def _feat(p: np.ndarray) -> np.ndarray:
+        p = np.clip(p, 1e-6, 1 - 1e-6)
+        return np.column_stack([np.log(p), -np.log(1.0 - p)])
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "BetaCalibratedClassifier":
+        from sklearn.linear_model import LogisticRegression
+
+        p = self.base.predict_proba(X)[:, 1]
+        self.lr = LogisticRegression(max_iter=1000).fit(self._feat(p), y)
+        return self
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        p = self.base.predict_proba(X)[:, 1]
+        p1 = self.lr.predict_proba(self._feat(p))[:, 1]
+        return np.column_stack([1.0 - p1, p1])
+
+
+def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str], random_state: int = 0):
+    """Ajusta el base con augmentacion por simetria y, en GBDT, early stopping
+    sobre un holdout interno por log loss (evita fijar n_estimators a mano)."""
+    est = _new_estimator(kind, cols)
+    if kind in ("gbm", "catboost"):
+        from sklearn.model_selection import train_test_split
+
+        try:
+            idx = np.arange(len(X_tr))
+            tr, va = train_test_split(idx, test_size=0.15, random_state=random_state, stratify=y_tr)
+            Xf, yf = augment(X_tr[tr], y_tr[tr], cols)
+            if kind == "gbm":
+                try:
+                    import lightgbm as lgb
+
+                    est.fit(
+                        Xf, yf,
+                        eval_set=[(X_tr[va], y_tr[va])],
+                        eval_metric="binary_logloss",
+                        callbacks=[lgb.early_stopping(80, verbose=False), lgb.log_evaluation(0)],
+                    )
+                    return est
+                except Exception:
+                    pass  # HistGB fallback (early stopping interno) o firma distinta
+            else:  # catboost
+                est.fit(Xf, yf, eval_set=(X_tr[va], y_tr[va]), use_best_model=True, verbose=False)
+                return est
+        except Exception:
+            pass
+        est = _new_estimator(kind, cols)  # fallback robusto sin early stopping
+        Xf, yf = augment(X_tr, y_tr, cols)
+        est.fit(Xf, yf)
+        return est
+    Xf, yf = augment(X_tr, y_tr, cols)
+    est.fit(Xf, yf)
+    return est
+
+
+def _make_calibrator(base, X_cal: np.ndarray, y_cal: np.ndarray, method: str):
+    if method == "beta":
+        return BetaCalibratedClassifier(base).fit(X_cal, y_cal)
+    from sklearn.calibration import CalibratedClassifierCV
+    from sklearn.frozen import FrozenEstimator
+
+    return CalibratedClassifierCV(FrozenEstimator(base), method=method).fit(X_cal, y_cal)
+
+
+def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
+                         methods: tuple[str, ...] = CALIBRATION_METHODS,
+                         cal_frac: float = 0.2, random_state: int = 0):
+    """Ajusta el base UNA vez y devuelve (base, {metodo: estimador_calibrado}).
+
+    El base se entrena sobre tr_idx (augmentado) y cada calibrador sobre cal_idx.
+    Compartir el base hace barato comparar sigmoid/isotonica/beta por fold.
+    """
+    from sklearn.model_selection import train_test_split
+
+    idx = np.arange(len(X_tr))
+    tr_idx, cal_idx = train_test_split(idx, test_size=cal_frac, random_state=random_state, stratify=y_tr)
+    base = _fit_base(kind, X_tr[tr_idx], y_tr[tr_idx], cols, random_state=random_state)
+    cals: dict[str, Any] = {}
+    for m in methods:
+        try:
+            cals[m] = _make_calibrator(base, X_tr[cal_idx], y_tr[cal_idx], m)
+        except Exception:
+            continue
+    return base, cals
 
 
 def fit_calibrated(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                    cal_frac: float = 0.2, random_state: int = 0, method: str = "sigmoid"):
-    """Ajusta un estimador base + un calibrado Platt (sigmoid) sobre holdout aleatorio.
+    """Compat de un solo metodo (usado por Model B): devuelve (base, calibrado)."""
+    base, cals = fit_calibrated_multi(kind, X_tr, y_tr, cols, methods=(method,),
+                                      cal_frac=cal_frac, random_state=random_state)
+    return base, (cals.get(method) or cals.get("sigmoid"))
 
-    Devuelve (base, calibrated):
-      - base:       estimador crudo (predict_proba sin calibrar).
-      - calibrated: CalibratedClassifierCV(prefit) — probabilidades calibradas.
 
-    El holdout es ALEATORIO estratificado para no perder recencia. Platt es de
-    baja varianza (2 parámetros): rara vez degrada un modelo ya calibrado, a
-    diferencia de la isotónica con holdouts pequeños (PROJECT.md §7.4).
-    """
-    from sklearn.calibration import CalibratedClassifierCV
-    from sklearn.frozen import FrozenEstimator
-    from sklearn.model_selection import train_test_split
-
-    idx = np.arange(len(X_tr))
-    tr_idx, cal_idx = train_test_split(
-        idx, test_size=cal_frac, random_state=random_state, stratify=y_tr
-    )
-    base = _new_estimator(kind)
-    Xf, yf = augment(X_tr[tr_idx], y_tr[tr_idx], cols)
-    base.fit(Xf, yf)
-
-    # FrozenEstimator: calibra sobre el base ya entrenado sin reentrenarlo
-    # (sustituye al antiguo cv='prefit', retirado en sklearn 1.8).
-    calibrated = CalibratedClassifierCV(FrozenEstimator(base), method=method)
-    calibrated.fit(X_tr[cal_idx], y_tr[cal_idx])
-    return base, calibrated
+def candidate_specs(has_catboost: bool) -> dict[str, tuple[list[str], str]]:
+    """name -> (kinds, metodo_calibracion). Cada candidato es una media de
+    estimadores calibrados, reproducible como Components del artefacto. La
+    seleccion por log loss decide cual va a produccion (seguro por construccion)."""
+    specs: dict[str, tuple[list[str], str]] = {
+        "logistic_cal": (["logistic"], "sigmoid"),
+        "lightgbm_cal": (["gbm"], "sigmoid"),
+        "ensemble_cal": (["logistic", "gbm"], "sigmoid"),
+        "ensemble_iso": (["logistic", "gbm"], "isotonic"),
+        "ensemble_beta": (["logistic", "gbm"], "beta"),
+    }
+    if has_catboost:
+        specs["catboost_cal"] = (["catboost"], "sigmoid")
+        specs["ensemble3_cal"] = (["logistic", "gbm", "catboost"], "sigmoid")
+    return specs
 
 
 def _proba(est, X: np.ndarray) -> np.ndarray:
@@ -224,8 +379,15 @@ def walk_forward(
     cols: list[str],
     warmup_weeks: int,
     min_train: int,
+    gap: int = 0,
+    has_catboost: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Walk-forward semanal. Devuelve predicciones por modelo."""
+    """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
+
+    `gap` deja periodos de separacion entre el fin del entrenamiento y el test
+    (endurece contra fuga temporal). Los candidatos vienen de `candidate_specs`
+    y se eligen despues por menor log loss (seguro por construccion).
+    """
     preds: dict[str, list[dict[str, Any]]] = defaultdict(list)
     uniq_periods = sorted(set(periods.tolist()))
     test_periods = uniq_periods[warmup_weeks:]
@@ -233,8 +395,11 @@ def walk_forward(
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
 
+    specs = candidate_specs(has_catboost)
+    kinds = sorted({k for spec in specs.values() for k in spec[0]})
+
     for wi, period in enumerate(test_periods):
-        train_mask = periods < period
+        train_mask = periods < (period - gap)
         test_mask = periods == period
         if train_mask.sum() < min_train or len(np.unique(y_all[train_mask])) < 2:
             continue
@@ -247,15 +412,34 @@ def walk_forward(
         elo_p = np.clip(X_te[:, elo_idx] + 0.5, 1e-4, 1 - 1e-4)
         glicko_p = np.clip(X_te[:, glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
 
-        # componentes (logística + GBM): crudo y calibrado (Platt)
-        log_base, log_cal = fit_calibrated("logistic", X_tr, y_tr, cols, random_state=wi)
-        gbm_base, gbm_cal = fit_calibrated("gbm", X_tr, y_tr, cols, random_state=wi)
-        cand = {
-            "logistic_cal": _proba(log_cal, X_te),
-            "lightgbm_cal": _proba(gbm_cal, X_te),
-            "ensemble_cal": np.clip(0.5 * _proba(log_cal, X_te) + 0.5 * _proba(gbm_cal, X_te), 1e-4, 1 - 1e-4),
-            "ensemble_raw": np.clip(0.5 * _proba(log_base, X_te) + 0.5 * _proba(gbm_base, X_te), 1e-4, 1 - 1e-4),
-        }
+        # Ajusta cada tipo de base una vez (con sus calibradores) y reusa.
+        fitted: dict[str, Any] = {}
+        for kind in kinds:
+            try:
+                fitted[kind] = fit_calibrated_multi(kind, X_tr, y_tr, cols, random_state=wi)
+            except Exception:
+                fitted[kind] = None
+
+        def _cand_pred(spec: tuple[list[str], str]) -> np.ndarray | None:
+            est_kinds, method = spec
+            arrs = []
+            for k in est_kinds:
+                fk = fitted.get(k)
+                if not fk:
+                    return None
+                est = fk[1].get(method) or fk[1].get("sigmoid")
+                if est is None:
+                    return None
+                arrs.append(_proba(est, X_te))
+            if not arrs:
+                return None
+            return np.clip(np.mean(arrs, axis=0), 1e-4, 1 - 1e-4)
+
+        cand: dict[str, np.ndarray] = {}
+        for name, spec in specs.items():
+            arr = _cand_pred(spec)
+            if arr is not None:
+                cand[name] = arr
 
         for i, m in enumerate(te_meta):
             common = {
@@ -621,7 +805,15 @@ def main() -> int:
     parser.add_argument("--warmup-weeks", type=int, default=10)
     parser.add_argument("--min-train", type=int, default=800)
     parser.add_argument("--no-cs2-filter", action="store_true")
+    parser.add_argument("--form-half-life", type=float, default=120.0,
+                        help="Vida media (dias) del decaimiento de la forma. Tunable.")
+    parser.add_argument("--wf-gap", type=int, default=0,
+                        help="Periodos de separacion train->test en walk-forward (anti-fuga).")
+    parser.add_argument("--no-catboost", action="store_true",
+                        help="No usar CatBoost como candidato aunque este instalado.")
     args = parser.parse_args()
+
+    has_catboost = (not args.no_catboost) and _catboost_available()
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -635,7 +827,7 @@ def main() -> int:
 
     print("[2/6] Construyendo features point-in-time…")
     t0 = time.time()
-    X_dicts, y_list, meta, state = build_training_frame(rows)
+    X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
     model_columns, feature_policies = select_feature_columns(X_dicts)
     analytics_policy = feature_policies["analytics"]
     context_policy = feature_policies["context"]
@@ -660,19 +852,24 @@ def main() -> int:
     )
 
     print("[3/6] Walk-forward semanal…")
+    print(f"      candidatos: {'con' if has_catboost else 'sin'} CatBoost · half_life={args.form_half_life:.0f}d · wf_gap={args.wf_gap}")
     t0 = time.time()
-    preds = walk_forward(X_all, y_all, periods, meta, model_columns, args.warmup_weeks, args.min_train)
+    preds = walk_forward(X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
+                         args.min_train, gap=args.wf_gap, has_catboost=has_catboost)
     metrics = summarize(preds)
     print(f"      hecho en {time.time()-t0:.1f}s; n_test={metrics.get('ensemble_cal',{}).get('n',0)}")
-    model_order = ["base_rate", "elo", "glicko", "logistic_cal", "lightgbm_cal", "ensemble_raw", "ensemble_cal"]
+    specs = candidate_specs(has_catboost)
+    model_order = ["base_rate", "elo", "glicko"] + list(specs.keys())
     for model in model_order:
         m = metrics.get(model)
         if m:
-            print(f"      {model:14s} acc={m['accuracy']:.4f} logloss={m['log_loss']:.4f} "
+            print(f"      {model:16s} acc={m['accuracy']:.4f} logloss={m['log_loss']:.4f} "
                   f"brier={m['brier']:.4f} auc={m['roc_auc']:.4f} ece={m['ece_10']:.4f}")
 
     # Selección del modelo de producción por menor log loss walk-forward.
-    candidates = {k: metrics[k] for k in ("logistic_cal", "lightgbm_cal", "ensemble_raw", "ensemble_cal") if k in metrics}
+    candidates = {k: metrics[k] for k in specs if k in metrics}
+    if not candidates:
+        raise SystemExit("Sin candidatos evaluables en walk-forward (revisa min-train/warmup).")
     best_name = min(candidates, key=lambda k: candidates[k]["log_loss"])
     print(f"      -> modelo de producción elegido por log loss: {best_name}")
 
@@ -701,22 +898,20 @@ def main() -> int:
     )
 
     print("[4/6] Ajuste final sobre todo el histórico…")
-    log_base, log_cal = fit_calibrated("logistic", X_all, y_all, model_columns, cal_frac=0.18, random_state=7)
-    gbm_base, gbm_cal = fit_calibrated("gbm", X_all, y_all, model_columns, cal_frac=0.18, random_state=7)
-    cal_use = best_name in ("logistic_cal", "lightgbm_cal", "ensemble_cal")
-    log_est = log_cal if cal_use else log_base
-    gbm_est = gbm_cal if cal_use else gbm_base
-    if best_name in ("ensemble_cal", "ensemble_raw"):
-        components = [
-            Component("logistic", log_est, None, 0.5),
-            Component("lightgbm", gbm_est, None, 0.5),
-        ]
-    elif best_name == "logistic_cal":
-        components = [Component("logistic", log_est, None, 1.0)]
-    else:
-        components = [Component("lightgbm", gbm_est, None, 1.0)]
+    best_kinds, best_method = specs[best_name]
+    fitted_full: dict[str, Any] = {}
+    for kind in sorted(set(best_kinds) | {"gbm"}):  # gbm siempre, para SHAP
+        fitted_full[kind] = fit_calibrated_multi(kind, X_all, y_all, model_columns,
+                                                 cal_frac=0.18, random_state=7)
+    _component_kind = {"logistic": "logistic", "gbm": "lightgbm", "catboost": "catboost"}
+    weight = 1.0 / len(best_kinds)
+    components = []
+    for kind in best_kinds:
+        est = fitted_full[kind][1].get(best_method) or fitted_full[kind][1].get("sigmoid")
+        components.append(Component(_component_kind.get(kind, kind), est, None, weight))
 
     print("[5/6] Importancia SHAP…")
+    gbm_base = fitted_full["gbm"][0]
     shap_rows = shap_importance(gbm_base, X_all, model_columns)
 
     print("[6/6] Guardando artefacto y resultados…")
@@ -741,10 +936,19 @@ def main() -> int:
             "production_model": best_name,
             "model": "Glicko-2 features + " + {
                 "ensemble_cal": "LightGBM ⊕ Logística (Platt)",
-                "ensemble_raw": "LightGBM ⊕ Logística",
+                "ensemble_iso": "LightGBM ⊕ Logística (isotónica)",
+                "ensemble_beta": "LightGBM ⊕ Logística (beta)",
+                "ensemble3_cal": "LightGBM ⊕ Logística ⊕ CatBoost (Platt)",
                 "logistic_cal": "Logística (Platt)",
                 "lightgbm_cal": "LightGBM (Platt)",
+                "catboost_cal": "CatBoost (Platt)",
             }.get(best_name, best_name),
+            "production_calibration": best_method,
+            "production_components": [c.name for c in components],
+            "form_half_life_days": args.form_half_life,
+            "walk_forward_gap": args.wf_gap,
+            "catboost_enabled": has_catboost,
+            "monotone_features": sorted(MONOTONE_INCREASING),
             "period_days": 7,
         },
     )
@@ -827,8 +1031,11 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         row("glicko", "Glicko-2 (baseline)"),
         row("logistic_cal", "Logística (Platt)"),
         row("lightgbm_cal", "LightGBM (Platt)"),
-        row("ensemble_raw", "Ensemble sin calibrar"),
-        row("ensemble_cal", "**Ensemble (Platt)**"),
+        row("catboost_cal", "CatBoost (Platt)"),
+        row("ensemble_cal", "Ensemble LGBM⊕Log (Platt)"),
+        row("ensemble_iso", "Ensemble (isotónica)"),
+        row("ensemble_beta", "Ensemble (beta)"),
+        row("ensemble3_cal", "**Ensemble +CatBoost (Platt)**"),
         f"\n> Modelo de producción elegido por menor log loss: **{artifact.metadata.get('production_model')}**.\n",
         "\n> Log loss y Brier son el objetivo (probabilidades calibradas), no solo accuracy.\n",
         "> El baseline 'elige al favorito' (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si lo supera en log loss/Brier/AUC.\n",

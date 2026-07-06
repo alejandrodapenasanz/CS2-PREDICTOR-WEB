@@ -365,8 +365,11 @@ def _laplace_winrate(wins: int, n: int) -> float:
 class ChronologicalState:
     """Acumula la verdad de los partidos en orden y emite features point-in-time."""
 
-    def __init__(self, glicko_tau: float = 0.5) -> None:
+    def __init__(self, glicko_tau: float = 0.5, form_half_life: float = FORM_HALF_LIFE) -> None:
         self.glicko = Glicko2(tau=glicko_tau)
+        # Vida media (dias) del decaimiento temporal de la forma. Tunable como
+        # hiperparametro (PROJECT.md; Dixon-Coles time-weighting).
+        self.form_half_life = float(form_half_life) if form_half_life and form_half_life > 0 else FORM_HALF_LIFE
         self.ratings: dict[str, Rating] = {}
         self.current_period: int | None = None
         self.period_buffer: dict[str, list[_Match]] = defaultdict(list)
@@ -451,7 +454,7 @@ class ChronologicalState:
                 w = 0.5
             else:
                 age = max(0.0, (as_of - date).days)
-                w = 0.5 ** (age / FORM_HALF_LIFE)
+                w = 0.5 ** (age / self.form_half_life)
             num += w * won
             den += w
         return (num + 0.5) / (den + 1.0) if den else 0.5
@@ -795,13 +798,17 @@ class ChronologicalState:
         }
 
 
-def build_training_frame(rows: list[dict[str, Any]]) -> tuple[list[dict[str, float]], list[int], list[dict[str, Any]], ChronologicalState]:
+def build_training_frame(
+    rows: list[dict[str, Any]],
+    form_half_life: float = FORM_HALF_LIFE,
+) -> tuple[list[dict[str, float]], list[int], list[dict[str, Any]], ChronologicalState]:
     """Itera el histórico cronológicamente y devuelve (X, y, meta, estado_final).
 
     Para cada partido: emite features con el estado previo, registra la etiqueta
     y luego observa el resultado. El estado final sirve para predecir en vivo.
+    `form_half_life` (dias) controla el decaimiento temporal de la forma.
     """
-    state = ChronologicalState()
+    state = ChronologicalState(form_half_life=form_half_life)
     X: list[dict[str, float]] = []
     y: list[int] = []
     meta: list[dict[str, Any]] = []

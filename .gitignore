@@ -18,6 +18,13 @@ SCRAPPER/hltv-scraper-api/hltv_scraper/*session*.json
 # Local virtual environments
 SCRAPPER/hltv-scraper-api/.venv/
 
+# CA bundle especifico de maquina (redes con inspeccion TLS); no versionar
+SCRAPPER/hltv-scraper-api/corp_ca_bundle.pem
+
+# Clon local de Scrapling (14M, con .git anidado). Scrapling se instala desde
+# PyPI via requirements; el clon no es necesario y no debe versionarse.
+SCRAPPER/Scrapling/
+
 # Scraped/generated data
 SCRAPPER/hltv-scraper-api/hltv_scraper/data/raw/
 DAILY_SNAPSHOTS/runs/

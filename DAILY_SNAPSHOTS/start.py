@@ -56,8 +56,13 @@ BLOCK_HTTP_CODES = {403, 429, 500, 502, 503, 504, 522, 524}
 CHALLENGE_MARKERS = (
     "Just a moment",
     "cf-chl",
+    "cf_chl_",
+    "__cf_chl",
+    "challenge-platform",
     "Checking your browser",
     "Enable JavaScript and cookies",
+    "Attention Required",
+    "turnstile",
 )
 FETCH_MAX_ATTEMPTS = int(os.environ.get("HLTV_FETCH_MAX_ATTEMPTS", "8"))
 FETCH_BASE_DELAY = float(os.environ.get("HLTV_FETCH_BASE_DELAY", "3.0"))
@@ -71,6 +76,44 @@ FETCH_CIRCUIT_BREAKER_SLEEP = float(os.environ.get("HLTV_CIRCUIT_BREAKER_SLEEP",
 FETCH_WARMUP_ENABLED = os.environ.get("HLTV_FETCH_WARMUP", "1").strip().lower() not in {"0", "false", "no"}
 FETCH_URL_QUARANTINE_SECONDS = float(os.environ.get("HLTV_URL_QUARANTINE_SECONDS", "900.0"))
 FETCH_MAX_HTTP_REQUESTS_PER_RUN = int(os.environ.get("HLTV_MAX_HTTP_REQUESTS_PER_RUN", "2500"))
+
+# --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
+# Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
+# stealth que resuelve el challenge de Cloudflare y acuña cf_clearance. Ambos
+# son opcionales: si scrapling no esta instalado, el fetch cae a requests/
+# cloudscraper igual que antes. Ver LAST change.md.
+def _env_bool(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", ""}
+
+
+SCRAPLING_ENABLED = _env_bool("HLTV_USE_SCRAPLING", "1")
+SCRAPLING_STEALTH_ENABLED = _env_bool("HLTV_SOLVE_CLOUDFLARE", "1")
+SCRAPLING_IMPERSONATE = os.environ.get("HLTV_IMPERSONATE", "chrome").strip() or "chrome"
+SCRAPLING_PROXY = os.environ.get("HLTV_PROXY", "").strip() or None
+SCRAPLING_STEALTH_TIMEOUT_MS = int(os.environ.get("HLTV_STEALTH_TIMEOUT_MS", "90000"))
+SCRAPLING_STEALTH_HEADLESS = _env_bool("HLTV_STEALTH_HEADLESS", "1")
+SCRAPLING_STEALTH_MAX_SOLVES = int(os.environ.get("HLTV_STEALTH_MAX_SOLVES_PER_RUN", "6"))
+SCRAPLING_TIER1_ATTEMPTS = int(os.environ.get("HLTV_SCRAPLING_TIER1_ATTEMPTS", "3"))
+
+# CA bundle para redes con inspeccion TLS (proxy corporativo con CA propia).
+# En un PC sin restricciones no hace falta: certifi funciona por defecto.
+_DEFAULT_CORP_BUNDLE = SCRAPER_PROJECT / "corp_ca_bundle.pem"
+HLTV_CA_BUNDLE = (
+    os.environ.get("HLTV_CA_BUNDLE")
+    or os.environ.get("CURL_CA_BUNDLE")
+    or os.environ.get("SSL_CERT_FILE")
+    or os.environ.get("REQUESTS_CA_BUNDLE")
+    or (str(_DEFAULT_CORP_BUNDLE) if _DEFAULT_CORP_BUNDLE.exists() else None)
+)
+
+try:  # scrapling es opcional; el scraper funciona sin el (requests/cloudscraper)
+    from scrapling.fetchers import Fetcher as _ScraplingFetcher, StealthyFetcher as _ScraplingStealthy
+except Exception:  # pragma: no cover - scrapling no instalado / Python no soportado
+    _ScraplingFetcher = None
+    _ScraplingStealthy = None
+
+_CA_ENV_APPLIED = False
+_STEALTH_SOLVES = 0
 
 _HTTP_SESSION: requests.Session | None = None
 _LAST_FETCH_AT = 0.0
@@ -95,6 +138,10 @@ _FETCH_STATS: dict[str, Any] = {
     "cooldown_seconds": 0.0,
     "requests_successes": 0,
     "cloudscraper_successes": 0,
+    "scrapling_successes": 0,
+    "scrapling_stealth_successes": 0,
+    "stealth_solves": 0,
+    "ca_bundle": None,
 }
 VERBOSE = False
 
@@ -235,7 +282,10 @@ def wait_for_domain_cooldown() -> None:
 def register_fetch_success(source: str, url: str) -> None:
     global _FETCH_BLOCK_STREAK
     _FETCH_STATS["successes"] += 1
-    if source == "cloudscraper":
+    key = f"{source}_successes"
+    if key in _FETCH_STATS:
+        _FETCH_STATS[key] += 1
+    elif source == "cloudscraper":
         _FETCH_STATS["cloudscraper_successes"] += 1
     else:
         _FETCH_STATS["requests_successes"] += 1
@@ -495,7 +545,7 @@ def polite_fetch_wait(min_interval: float) -> None:
 def default_headers(referer: str = "https://www.hltv.org/") -> dict[str, str]:
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
@@ -645,6 +695,205 @@ def parse_results_fallback(html: str) -> list[dict[str, Any]]:
     return parsed
 
 
+def _apply_ca_env() -> None:
+    """Propaga el CA bundle corporativo a curl_cffi/requests via variables de entorno.
+
+    Solo actua si HLTV_CA_BUNDLE apunta a un fichero existente (redes con
+    inspeccion TLS). En un PC sin restricciones no hay bundle y se usa certifi.
+    """
+    global _CA_ENV_APPLIED
+    if _CA_ENV_APPLIED:
+        return
+    _CA_ENV_APPLIED = True
+    if HLTV_CA_BUNDLE and Path(HLTV_CA_BUNDLE).exists():
+        for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            os.environ.setdefault(var, HLTV_CA_BUNDLE)
+        _FETCH_STATS["ca_bundle"] = HLTV_CA_BUNDLE
+        log(f"CA bundle corporativo activo: {HLTV_CA_BUNDLE}", force=True)
+
+
+def _scrapling_response_parts(resp: Any) -> tuple[int | None, str]:
+    """Extrae (status, html) de una Response de scrapling de forma defensiva."""
+    status = getattr(resp, "status", None)
+    html = getattr(resp, "html_content", None)
+    if html is None:
+        body = getattr(resp, "body", None)
+        if isinstance(body, bytes):
+            html = body.decode("utf-8", "replace")
+        elif isinstance(body, str):
+            html = body
+        else:
+            html = str(resp) if resp is not None else ""
+    return status, (html or "")
+
+
+def _persist_cf_from_response(resp: Any) -> None:
+    """Guarda cf_clearance + user_agent acuñados por el navegador stealth.
+
+    Asi los tiers HTTP posteriores (scrapling impersonate, requests) reusan la
+    cookie. El binding cf_clearance <-> IP + UA + JA3 exige reusar la misma UA.
+    """
+    try:
+        cf_value = None
+        cookies = getattr(resp, "cookies", None)
+        if isinstance(cookies, dict):
+            cf_value = cookies.get("cf_clearance")
+        elif cookies:
+            for c in cookies:
+                name = getattr(c, "name", None) or (c.get("name") if isinstance(c, dict) else None)
+                if name == "cf_clearance":
+                    cf_value = getattr(c, "value", None) or (c.get("value") if isinstance(c, dict) else None)
+                    break
+        if not cf_value:
+            return
+        ua = None
+        req = getattr(resp, "request", None)
+        req_headers = getattr(req, "headers", None) if req is not None else None
+        if isinstance(req_headers, dict):
+            ua = req_headers.get("User-Agent") or req_headers.get("user-agent")
+        payload = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+        payload["cf_clearance"] = cf_value
+        if ua:
+            payload["user_agent"] = ua
+        payload["captured_at"] = now_utc()
+        payload["source"] = "scrapling_stealth"
+        write_json(CF_SESSION, payload)
+        log("cf_clearance acuñado por navegador stealth y guardado en cf_session.json", force=True)
+    except Exception as exc:  # pragma: no cover - best effort
+        log(f"no se pudo persistir cf_clearance del navegador: {exc}")
+
+
+def _scrapling_impersonate_get(url: str, cookies: dict[str, str] | None, timeout: int) -> tuple[int | None, str]:
+    kwargs: dict[str, Any] = {
+        "impersonate": SCRAPLING_IMPERSONATE,
+        "stealthy_headers": True,
+        "timeout": timeout,
+    }
+    if SCRAPLING_PROXY:
+        kwargs["proxy"] = SCRAPLING_PROXY
+    if cookies:
+        kwargs["cookies"] = cookies
+    try:
+        resp = _ScraplingFetcher.get(url, **kwargs)
+    except TypeError:
+        # Firma distinta segun version: reintenta sin cookies/proxy.
+        resp = _ScraplingFetcher.get(url, impersonate=SCRAPLING_IMPERSONATE, stealthy_headers=True, timeout=timeout)
+    return _scrapling_response_parts(resp)
+
+
+def _scrapling_stealth_solve(url: str) -> tuple[int | None, str] | None:
+    """Tier 2: navegador stealth que resuelve Cloudflare y acuña cf_clearance."""
+    global _STEALTH_SOLVES
+    if _ScraplingStealthy is None or _STEALTH_SOLVES >= SCRAPLING_STEALTH_MAX_SOLVES:
+        return None
+    _STEALTH_SOLVES += 1
+    _FETCH_STATS["stealth_solves"] += 1
+    kwargs: dict[str, Any] = {
+        "headless": SCRAPLING_STEALTH_HEADLESS,
+        "solve_cloudflare": True,
+        "block_webrtc": True,
+        "disable_resources": True,
+        "network_idle": False,
+        "timeout": SCRAPLING_STEALTH_TIMEOUT_MS,
+    }
+    if SCRAPLING_PROXY:
+        kwargs["proxy"] = SCRAPLING_PROXY
+        kwargs["geoip"] = True
+    log(f"STEALTH solve_cloudflare (#{_STEALTH_SOLVES}): {url}", force=True)
+    resp = _ScraplingStealthy.fetch(url, **kwargs)
+    _persist_cf_from_response(resp)
+    return _scrapling_response_parts(resp)
+
+
+def _scrapling_fetch(
+    url: str,
+    cookies: dict[str, str] | None,
+    timeout: int,
+    base: float,
+    max_wait: float,
+    interval: float,
+) -> str | None:
+    """Tiers 1 (impersonate) y 2 (stealth solve). Devuelve HTML o None (fall-through).
+
+    Reutiliza todas las guardas compartidas (presupuesto, cooldown, backoff,
+    deteccion de bloqueo, cache). Si no obtiene HTML valido, devuelve None y el
+    fetch principal cae a requests/cloudscraper.
+    """
+    if not SCRAPLING_ENABLED or _ScraplingFetcher is None:
+        return None
+    _apply_ca_env()
+
+    # Tier 1: HTTP con impersonation TLS (rapido).
+    attempts = max(2, SCRAPLING_TIER1_ATTEMPTS)
+    for attempt in range(attempts):
+        ensure_fetch_budget(url)
+        try:
+            log(f"GET scrapling {attempt + 1}/{attempts}: {url}")
+            started = time.monotonic()
+            wait_for_domain_cooldown()
+            polite_fetch_wait(interval)
+            _FETCH_STATS["http_attempts"] += 1
+            status, text = _scrapling_impersonate_get(url, cookies, timeout)
+            challenge = is_cloudflare_challenge(text)
+            elapsed = time.monotonic() - started
+            if status == 200 and text and not challenge:
+                register_fetch_success("scrapling", url)
+                fetch_cache_put(url, text)
+                log(f"OK scrapling HTTP 200 {len(text)} bytes {elapsed:.1f}s: {url}")
+                return text
+            if (status in BLOCK_HTTP_CODES) or challenge:
+                reason = "cloudflare_challenge" if challenge else f"HTTP {status}"
+                delay = backoff_delay(attempt, None, base_delay=base, max_delay=max_wait)
+                delay = max(delay, register_fetch_block("scrapling", url, reason))
+                log(f"BLOCK scrapling {reason}; wait {delay:.1f}s: {url}")
+                time.sleep(delay)
+                continue
+            if text:
+                register_fetch_success("scrapling", url)
+                fetch_cache_put(url, text)
+                return text
+        except FetchBudgetExceeded:
+            raise
+        except Exception as exc:
+            register_fetch_error("scrapling", url, exc)
+            if attempt < attempts - 1:
+                time.sleep(backoff_delay(attempt, None, base_delay=base, max_delay=max_wait))
+
+    # Tier 2: navegador stealth que resuelve el challenge y acuña cookie.
+    if SCRAPLING_STEALTH_ENABLED and _ScraplingStealthy is not None:
+        try:
+            ensure_fetch_budget(url)
+            wait_for_domain_cooldown()
+            result = _scrapling_stealth_solve(url)
+            if result is not None:
+                status, text = result
+                if status in (None, 200) and text and not is_cloudflare_challenge(text):
+                    register_fetch_success("scrapling_stealth", url)
+                    fetch_cache_put(url, text)
+                    log(f"OK scrapling_stealth {len(text)} bytes: {url}")
+                    return text
+                # Cookie acuñada: reintenta el tier 1 barato con la nueva cf_clearance.
+                fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+                cookies2 = {"cf_clearance": fresh["cf_clearance"]} if fresh.get("cf_clearance") else None
+                if cookies2:
+                    try:
+                        polite_fetch_wait(interval)
+                        _FETCH_STATS["http_attempts"] += 1
+                        status, text = _scrapling_impersonate_get(url, cookies2, timeout)
+                        if status == 200 and text and not is_cloudflare_challenge(text):
+                            register_fetch_success("scrapling", url)
+                            fetch_cache_put(url, text)
+                            return text
+                    except Exception as exc:
+                        register_fetch_error("scrapling", url, exc)
+        except FetchBudgetExceeded:
+            raise
+        except Exception as exc:
+            register_fetch_error("scrapling_stealth", url, exc)
+
+    return None
+
+
 def fetch_html(
     link: str,
     timeout: int = 45,
@@ -679,6 +928,18 @@ def fetch_html(
     cookies = {"cf_clearance": cf_payload["cf_clearance"]} if cf_payload.get("cf_clearance") else None
     last_error: Exception | None = None
 
+    # Tiers 1/2: Scrapling (impersonate TLS -> navegador stealth). Si devuelve
+    # None, cae al camino clasico requests -> cloudscraper de mas abajo.
+    scrapling_html = _scrapling_fetch(url, cookies, timeout, base, max_wait, interval)
+    if scrapling_html is not None:
+        return scrapling_html
+    # El navegador stealth pudo acuñar una cf_clearance nueva: reutilizala.
+    if not cookies:
+        cf_payload = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+        if cf_payload.get("user_agent"):
+            headers["User-Agent"] = cf_payload["user_agent"]
+        cookies = {"cf_clearance": cf_payload["cf_clearance"]} if cf_payload.get("cf_clearance") else None
+
     for attempt in range(attempts):
         ensure_fetch_budget(url)
         try:
@@ -689,7 +950,9 @@ def fetch_html(
             _FETCH_STATS["http_attempts"] += 1
             response = http_session().get(url, timeout=timeout, headers=headers, cookies=cookies)
             text = response.text or ""
-            challenge = is_cloudflare_challenge(text)
+            challenge = is_cloudflare_challenge(text) or (
+                str(response.headers.get("cf-mitigated", "")).strip().lower() == "challenge"
+            )
             elapsed = time.monotonic() - started
             if response.status_code == 200 and not challenge:
                 register_fetch_success("requests", url)
@@ -749,7 +1012,9 @@ def fetch_html(
             _FETCH_STATS["http_attempts"] += 1
             response = scraper.get(url, timeout=timeout, headers=headers)
             text = response.text or ""
-            challenge = is_cloudflare_challenge(text)
+            challenge = is_cloudflare_challenge(text) or (
+                str(response.headers.get("cf-mitigated", "")).strip().lower() == "challenge"
+            )
             elapsed = time.monotonic() - started
             if response.status_code == 200 and not challenge:
                 register_fetch_success("cloudscraper", url)
