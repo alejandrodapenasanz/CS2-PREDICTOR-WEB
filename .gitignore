@@ -1,0 +1,44 @@
+# Python / tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets / local sessions
+.env
+*.env
+cf_session.json
+cookies*.json
+SCRAPPER/hltv-scraper-api/hltv_scraper/cf_session.json
+SCRAPPER/hltv-scraper-api/hltv_scraper/*session*.json
+
+# Local virtual environments
+SCRAPPER/hltv-scraper-api/.venv/
+
+# Scraped/generated data
+SCRAPPER/hltv-scraper-api/hltv_scraper/data/raw/
+DAILY_SNAPSHOTS/runs/
+DAILY_SNAPSHOTS/master/*.json
+DAILY_SNAPSHOTS/master/*.jsonl
+DAILY_SNAPSHOTS/logs/
+BBDD/*.db
+BBDD/backups/
+MODEL/artifacts/*.pkl
+MODEL/artifacts/registry/
+MODEL/results/*.json
+MODEL/results/*.csv
+context_calibration.json
+WEB/data.js
+tests/graphs/
+tmp_results.json
+SCRAPPER/hltv-scraper-api/tmp_results.json
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+**/.git.local-backup/

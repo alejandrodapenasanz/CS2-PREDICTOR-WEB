@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CS2 PREDICTOR // NEURAL ODDS</title>
+  <script src="./data.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #07080b;
+      --bg2: #0c0e13;
+      --panel: #0e1117;
+      --panel2: #12161e;
+      --line: #1c2230;
+      --line2: #2a3344;
+      --text: #e7ecf3;
+      --muted: #7d8aa0;
+      --red: #ff2740;
+      --red-soft: #ff5a6e;
+      --red-deep: #b3091f;
+      --cyan: #19e6ff;
+      --amber: #ffb340;
+      --green: #36e07f;
+      --glow-red: 0 0 12px rgba(255,39,64,.55), 0 0 2px rgba(255,39,64,.9);
+      --grad-red: linear-gradient(135deg, #ff2740, #b3091f);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; }
+    body {
+      background:
+        radial-gradient(1200px 600px at 80% -10%, rgba(255,39,64,.10), transparent 60%),
+        radial-gradient(900px 500px at -10% 10%, rgba(25,230,255,.05), transparent 55%),
+        var(--bg);
+      color: var(--text);
+      font: 14px/1.5 'Segoe UI', system-ui, -apple-system, sans-serif;
+      min-height: 100vh;
+    }
+    /* scanline overlay */
+    body::after {
+      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+      background: repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 1px, transparent 1px 3px);
+      mix-blend-mode: overlay;
+    }
+    .mono { font-family: ui-monospace, 'Cascadia Code', 'Consolas', monospace; }
+    .wrap { max-width: 1560px; margin: 0 auto; padding: 0 22px; }
+
+    header {
+      position: sticky; top: 0; z-index: 40;
+      background: linear-gradient(180deg, rgba(7,8,11,.97), rgba(7,8,11,.82));
+      border-bottom: 1px solid var(--line2);
+      box-shadow: 0 1px 0 rgba(255,39,64,.25), 0 10px 30px rgba(0,0,0,.5);
+      backdrop-filter: blur(8px);
+    }
+    .topbar { display: flex; align-items: center; gap: 18px; padding: 14px 0 0; flex-wrap: wrap; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .logo {
+      width: 38px; height: 38px; display: grid; place-items: center;
+      background: var(--grad-red); border-radius: 7px; font-weight: 900; font-size: 20px;
+      clip-path: polygon(0 0, 100% 0, 100% 72%, 80% 100%, 0 100%);
+      box-shadow: var(--glow-red);
+    }
+    h1 {
+      margin: 0; font-size: 22px; letter-spacing: 3px; font-weight: 800; text-transform: uppercase;
+      font-family: ui-monospace, 'Cascadia Code', monospace;
+    }
+    h1 .accent { color: var(--red); text-shadow: var(--glow-red); }
+    .sub { color: var(--muted); font-size: 12px; letter-spacing: 1px; }
+    .model-badge {
+      margin-left: auto; font-size: 11px; color: var(--cyan); border: 1px solid rgba(25,230,255,.35);
+      padding: 5px 10px; border-radius: 5px; letter-spacing: 1px; text-transform: uppercase;
+      background: rgba(25,230,255,.05); white-space: nowrap;
+    }
+    .tabs { display: flex; gap: 4px; margin-top: 14px; }
+    .tab {
+      appearance: none; border: 1px solid var(--line2); border-bottom: none; cursor: pointer;
+      background: var(--panel); color: var(--muted); padding: 11px 20px; font: inherit;
+      font-weight: 700; letter-spacing: 1px; text-transform: uppercase; font-size: 12px;
+      border-radius: 8px 8px 0 0; transition: .15s; position: relative; top: 1px;
+    }
+    .tab:hover { color: var(--text); border-color: var(--red-deep); }
+    .tab.active {
+      color: #fff; background: linear-gradient(180deg, rgba(255,39,64,.20), var(--panel));
+      border-color: var(--red); box-shadow: inset 0 2px 0 var(--red);
+    }
+    .tab .dot { color: var(--red); }
+
+    .controls { display: grid; grid-template-columns: minmax(220px,1.4fr) repeat(4, auto); gap: 10px; padding: 16px 0; align-items: center; }
+    input, select, button {
+      background: var(--panel2); color: var(--text); border: 1px solid var(--line2);
+      border-radius: 6px; padding: 10px 12px; font: inherit;
+    }
+    input:focus, select:focus { outline: none; border-color: var(--red); box-shadow: 0 0 0 2px rgba(255,39,64,.18); }
+    .btn { cursor: pointer; text-transform: uppercase; letter-spacing: 1px; font-size: 12px; font-weight: 700; }
+    .btn:hover { border-color: var(--red); color: var(--red-soft); }
+
+    main { padding: 8px 0 60px; }
+    .layout { display: grid; grid-template-columns: 1fr 440px; gap: 18px; align-items: start; }
+
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px,1fr)); gap: 10px; margin-bottom: 16px; }
+    .kpi {
+      background: linear-gradient(160deg, var(--panel), var(--bg2)); border: 1px solid var(--line);
+      border-left: 3px solid var(--red); border-radius: 8px; padding: 12px 14px;
+    }
+    .kpi b { display: block; font-size: 23px; font-weight: 800; font-family: ui-monospace, monospace; }
+    .kpi span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
+
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+    .panel-title { padding: 11px 14px; font-size: 12px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+    .panel-title .accent { color: var(--red); }
+
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: middle; text-align: left; }
+    th { color: var(--muted); font-weight: 700; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; background: var(--panel2); }
+    tbody tr { cursor: pointer; transition: background .12s; }
+    tbody tr:hover { background: rgba(255,39,64,.06); }
+    tbody tr.sel { background: rgba(255,39,64,.10); box-shadow: inset 3px 0 0 var(--red); }
+
+    .matchcell { display: flex; flex-direction: column; gap: 3px; }
+    .vs { font-weight: 700; display:flex; align-items:center; gap:7px; }
+    .vs .mid { color: var(--red); font-weight: 800; font-size: 11px; }
+    .ev { color: var(--muted); font-size: 11px; }
+    .logo-sm { width: 18px; height: 18px; object-fit: contain; border-radius: 3px; background:#000; vertical-align:middle; }
+    .tinitial { display:inline-grid; place-items:center; width:18px; height:18px; border-radius:3px; background:var(--line2); font-size:10px; font-weight:700; }
+
+    .predcell { min-width: 150px; }
+    .fav { font-weight: 800; }
+    .confnum { font-family: ui-monospace, monospace; font-weight: 800; }
+    .bar { height: 7px; background: #1a1f2b; border-radius: 99px; overflow: hidden; margin-top: 6px; position: relative; }
+    .bar > i { display:block; height: 100%; background: var(--grad-red); box-shadow: var(--glow-red); }
+    .bar.cyan > i { background: linear-gradient(90deg, #0bbcd6, var(--cyan)); box-shadow: 0 0 8px rgba(25,230,255,.5); }
+    .bar.green > i { background: linear-gradient(90deg, #1f9d5a, var(--green)); box-shadow:none; }
+
+    .flags { display: flex; flex-wrap: wrap; gap: 5px; }
+    .flag { border: 1px solid var(--line2); border-radius: 5px; padding: 2px 7px; font-size: 10px; letter-spacing:.4px; white-space: nowrap; font-family: ui-monospace, monospace; }
+    .flag.warning { color: var(--amber); border-color: rgba(255,179,64,.4); background: rgba(255,179,64,.06); }
+    .flag.info { color: var(--cyan); border-color: rgba(25,230,255,.3); background: rgba(25,230,255,.05); }
+    .flag.danger { color: var(--red-soft); border-color: rgba(255,39,64,.45); background: rgba(255,39,64,.07); }
+    .flag.ok { color: var(--green); border-color: rgba(54,224,127,.35); }
+
+    /* Best opportunity cards */
+    .opps { display: grid; grid-template-columns: repeat(auto-fill, minmax(360px,1fr)); gap: 16px; }
+    .opp {
+      position: relative; background: linear-gradient(165deg, var(--panel), var(--bg2));
+      border: 1px solid var(--line2); border-radius: 12px; padding: 16px; cursor: pointer;
+      overflow: hidden; transition: .15s;
+    }
+    .opp::before { content:""; position:absolute; inset:0; border-radius:12px; padding:1px; background: linear-gradient(135deg, rgba(255,39,64,.5), transparent 40%); -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; mask-composite: exclude; pointer-events:none; opacity:.0; transition:.15s;}
+    .opp:hover { transform: translateY(-2px); border-color: var(--red); box-shadow: 0 10px 30px rgba(255,39,64,.12); }
+    .opp:hover::before { opacity:1; }
+    .opp .rank { position:absolute; top:12px; right:14px; font-family: ui-monospace, monospace; font-weight:900; font-size:30px; color: rgba(255,39,64,.18); }
+    .opp .ev { margin-bottom: 6px; }
+    .opp .winner { font-size: 19px; font-weight: 800; }
+    .opp .winner .arrow { color: var(--red); }
+    .opp .loser { color: var(--muted); font-size: 13px; }
+    .opp-stats { display:grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-top: 12px; }
+    .opp-stat { font-size: 12px; }
+    .opp-stat b { display:block; font-family: ui-monospace, monospace; font-size: 18px; font-weight: 800; }
+    .opp-stat span { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing:.5px; }
+    .meter { height:6px; background:#1a1f2b; border-radius:99px; overflow:hidden; margin-top:4px; }
+    .meter > i { display:block; height:100%; }
+
+    /* detail */
+    aside { position: sticky; top: 150px; max-height: calc(100vh - 168px); overflow: auto; }
+    aside::-webkit-scrollbar { width: 8px; } aside::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 8px; }
+    .detail { padding: 0; }
+    .dhead { padding: 16px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, rgba(255,39,64,.08), transparent); }
+    .dhead h2 { margin: 0 0 4px; font-size: 17px; }
+    .box { background: var(--panel2); border: 1px solid var(--line); border-radius: 9px; padding: 12px; margin: 12px; }
+    .box > b { font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: var(--red-soft); display:block; margin-bottom: 8px; }
+    .row2 { display: grid; grid-template-columns: 110px 1fr 64px; gap: 8px; align-items: center; margin: 7px 0; font-size: 12px; }
+    .row2 .lab { color: var(--muted); }
+    .row2 .val { font-family: ui-monospace, monospace; text-align: right; }
+    .small { font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+    .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .player { display: flex; justify-content: space-between; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,.05); font-size: 12px; }
+    .player:last-child { border: 0; }
+    .chip { display:inline-block; font-family: ui-monospace, monospace; font-size:11px; padding:1px 6px; border-radius:4px; background:var(--line); }
+    a { color: var(--cyan); text-decoration: none; } a:hover { text-decoration: underline; }
+    .empty { padding: 60px 20px; text-align:center; color: var(--muted); }
+
+    /* model view */
+    .mgrid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; align-items:start; }
+    .shapbar { display:grid; grid-template-columns: 200px 1fr 56px; gap:10px; align-items:center; margin:7px 0; font-size:12px; }
+    .shapbar .lab { color: var(--muted); font-family: ui-monospace, monospace; }
+    canvas { width: 100%; max-width: 420px; }
+    .hidden { display: none !important; }
+    .winrow td { font-family: ui-monospace, monospace; }
+    .winrow.best td { color:#fff; background: rgba(255,39,64,.08); }
+    @media (max-width: 1100px) { .layout, .mgrid { grid-template-columns: 1fr; } aside { position: static; max-height: none; } .controls { grid-template-columns: 1fr 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <div class="topbar">
+        <div class="brand">
+          <div class="logo">⟁</div>
+          <div>
+            <h1>CS2<span class="accent">·</span>PREDICTOR</h1>
+            <div class="sub mono" id="runInfo">cargando…</div>
+          </div>
+        </div>
+        <div class="model-badge mono" id="modelBadge"></div>
+      </div>
+      <div class="tabs">
+        <button class="tab active" data-view="matches">▤ Partidos</button>
+        <button class="tab" data-view="best">★ Best Opportunity <span class="dot" id="bestCount"></span></button>
+        <button class="tab" data-view="model">◈ Modelo</button>
+      </div>
+      <div class="controls" id="controls">
+        <input id="search" placeholder="▷ Buscar equipo, torneo, partido…">
+        <select id="flagFilter"></select>
+        <select id="oddsFilter">
+          <option value="">Odds: todas</option>
+          <option value="yes">Con odds</option>
+          <option value="no">Sin odds</option>
+        </select>
+        <select id="sortBy">
+          <option value="confidence">Orden: confianza</option>
+          <option value="opportunity">Orden: oportunidad</option>
+          <option value="time">Orden: hora</option>
+          <option value="value">Orden: value edge</option>
+          <option value="stake">Orden: stake</option>
+          <option value="flags">Orden: red flags</option>
+          <option value="upset">Orden: fav. upset</option>
+        </select>
+        <button class="btn" id="reset">Reset</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- VIEW: MATCHES -->
+    <section id="view-matches">
+      <div class="kpis" id="kpis"></div>
+      <div class="layout">
+        <div class="panel">
+          <div class="panel-title"><span>// Cartelera <span class="accent">[</span><span id="rowCount">0</span><span class="accent">]</span></span><span class="small">click para detalle</span></div>
+          <table><thead><tr><th>Hora</th><th>Partido</th><th>Decisión</th><th>Fav. upset</th><th>Mercado</th><th>Stake</th><th>Fiab.</th><th>Señales</th></tr></thead><tbody id="rows"></tbody></table>
+        </div>
+        <aside class="panel detail" id="detail"><div class="empty">Selecciona un partido</div></aside>
+      </div>
+    </section>
+
+    <!-- VIEW: BEST -->
+    <section id="view-best" class="hidden">
+      <div class="panel" style="margin-bottom:16px;background:linear-gradient(160deg,rgba(255,39,64,.10),var(--panel))">
+        <div class="panel-title"><span>★ BEST OPPORTUNITY — máxima confianza operativa</span></div>
+        <div class="small" style="padding:12px 14px">
+          Ranking por <b>confianza ajustada en el ganador previsto</b>, penalizada por fiabilidad de los datos
+          (historial de ambos equipos, incertidumbre Glicko RD, BO1, rival por definir). No es consejo de apuesta.
+        </div>
+      </div>
+      <div class="opps" id="opps"></div>
+    </section>
+
+    <!-- VIEW: MODEL -->
+    <section id="view-model" class="hidden">
+      <div class="mgrid">
+        <div class="panel">
+          <div class="panel-title"><span>// Rendimiento walk-forward</span><span class="small">paso semanal · ventana expansiva</span></div>
+          <table><thead><tr><th>Modelo</th><th>N</th><th>Acc</th><th>LogLoss</th><th>Brier</th><th>AUC</th><th>ECE</th></tr></thead><tbody id="metricsRows"></tbody></table>
+          <div class="small" style="padding:10px 14px">
+            Objetivo de entrenamiento = <b>log loss</b> (probabilidades calibradas), no solo accuracy.
+            El baseline "elige al favorito" (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si baja el log loss/Brier.
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Importancia de features (SHAP)</span></div>
+          <div style="padding:12px 14px" id="shapBox"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// ¿Hay skill o son palizas? — acierto por competitividad</span></div>
+          <table><thead><tr><th>Banda (confianza)</th><th>% partidos</th><th>Accuracy</th><th>Log loss</th></tr></thead><tbody id="segRows"></tbody></table>
+          <div class="small" id="marketBox" style="padding:10px 14px"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Curva de calibración (resultados reales diarios)</span></div>
+          <div style="padding:14px;display:flex;gap:18px;align-items:center;flex-wrap:wrap">
+            <canvas id="calCanvas" width="420" height="320"></canvas>
+            <div class="small" id="calStats"></div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Metodología</span></div>
+          <div class="small" style="padding:14px;line-height:1.8">
+            ◆ <b>Cero fuga temporal</b>: cada feature usa solo partidos anteriores.<br>
+            ◆ <b>Glicko-2</b> con periodos semanales (rating + RD + volatilidad); la RD crece con la inactividad.<br>
+            ◆ <b>Calibración Platt</b> sobre holdout; se compara con isotónica/sin-calibrar y se elige por log loss.<br>
+            ◆ <b>Augmentación A↔B</b> para frontera antisimétrica sin sesgo de lado.<br>
+            ◆ Predice el ganador de la <b>serie</b> directamente; la composición Bo3 queda como extensión.<br>
+            ◆ Las stats de roster son <b>contexto</b> (la web las muestra), no entrada del modelo: el histórico de HLTV
+            no trae stats de jugador fechadas, así que meterlas sería leakage.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {} };
+    const M = DATA.matches || [];
+    const state = { view: "matches", selected: null };
+    const $ = (id) => document.getElementById(id);
+
+    // ---------- helpers ----------
+    const pct = (x) => x == null || isNaN(x) ? "—" : `${(x*100).toFixed(1)}%`;
+    const sg = (x) => x == null || isNaN(x) ? "—" : `${x>=0?"+":""}${(x*100).toFixed(1)}%`;
+    const num = (x,d=2) => x == null || isNaN(x) ? "—" : Number(x).toFixed(d);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const tn = (m,s) => m[s]?.name || "TBD";
+    const sideName = (m,s) => s==="team1" ? tn(m,"team1") : tn(m,"team2");
+    function logo(m,s){ const u=m[s]?.logo, n=tn(m,s); return u ? `<img class="logo-sm" src="${esc(u)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'tinitial',textContent:'${esc((n||'?')[0])}'}))">` : `<span class="tinitial">${esc((n||'?')[0])}</span>`; }
+    const isTBD = (n) => !n || /tbd|winner|\/|^\s*$/i.test(n);
+
+    // reliability score 0..1 : qué tan respaldada por datos está la predicción
+    function reliability(m){
+      const stored = m.prediction?.reliability_score;
+      if (stored != null && !isNaN(stored)) return Math.max(0.05, Math.min(1, Number(stored)));
+      const f = m.features || {};
+      let r = 1;
+      const mm = Math.min(f.matches_team1 ?? 0, f.matches_team2 ?? 0);
+      if (mm < 5) r *= 0.35; else if (mm < 12) r *= 0.6; else if (mm < 25) r *= 0.85;
+      const rd = ((f.glicko_rd_team1 ?? 160) + (f.glicko_rd_team2 ?? 160)) / 2;
+      if (rd > 140) r *= 0.55; else if (rd > 110) r *= 0.78; else if (rd > 90) r *= 0.92;
+      if (m.format === "bo1") r *= 0.82;
+      if (isTBD(tn(m,"team1")) || isTBD(tn(m,"team2"))) r *= 0.25;
+      if (!(m.data_quality?.real_pre_match_snapshot)) r *= 0.85;
+      const cov = Math.min(f.player_coverage_team1 ?? 1, f.player_coverage_team2 ?? 1);
+      if (cov < 0.6) r *= 0.92;
+      return Math.max(0.05, Math.min(1, r));
+    }
+    const decisionProb = (m) => m.prediction?.decision_prob_team1 ?? m.prediction?.risk_adjusted_prob_team1 ?? m.prediction?.model_prob_team1 ?? .5;
+    const decisionConfidence = (m) => Math.max(decisionProb(m), 1 - decisionProb(m));
+    const decisionSide = (m) => (m.prediction?.decision_favorite_side || (decisionProb(m) >= .5 ? "team1" : "team2"));
+    const decisionFavorite = (m) => m.prediction?.decision_favorite || sideName(m, decisionSide(m));
+    const opportunity = (m) => decisionConfidence(m) * reliability(m);
+    function relLabel(r){ return r>=.8?["ALTA","var(--green)"]:r>=.55?["MEDIA","var(--amber)"]:["BAJA","var(--red-soft)"]; }
+    function stakeView(st,m){
+      const reason = String(st.reason || "").toLowerCase();
+      const missingOdds = st.reason_code === "missing_odds"
+        || reason.includes("sin odds")
+        || reason.includes("odds suficientes")
+        || !m.odds?.available;
+      if (st.action === "bet") {
+        return {
+          label: `BET ${st.team || ""}`.trim(),
+          row: st.team || "bet",
+          pct: `${num(st.recommended_pct_bankroll,2)}%`,
+          color: "var(--green)",
+          roi: sg(st.expected_roi),
+          note: (st.risk_notes||[]).join(" · ") || "EV positivo con cuota disponible."
+        };
+      }
+      if (missingOdds) {
+        const side = decisionSide(m);
+        const dp = decisionProb(m);
+        const p = side === "team1" ? dp : 1 - dp;
+        const breakeven = p > 0 ? 1 / p : null;
+        return {
+          label: "SIN ODDS",
+          row: "esperar cuota",
+          pct: "-",
+          color: "var(--cyan)",
+          roi: "-",
+          note: `No se calcula stake hasta tener cuota. Break-even aprox: ${breakeven ? num(breakeven,2) : "-"} decimal.`
+        };
+      }
+      return {
+        label: "MARGEN BAJO",
+        row: "margen insuf.",
+        pct: "0%",
+        color: "var(--muted)",
+        roi: sg(st.expected_roi),
+        note: st.reason || "La cuota disponible no deja margen esperado suficiente."
+      };
+    }
+    function valueOddsView(m){
+      const dp = decisionProb(m);
+      const market = m.controls?.market || {};
+      const latest = market.latest || m.odds?.average || {};
+      const readOdds = side => {
+        const v = latest?.[`${side}_decimal`] ?? m.odds?.average?.[`${side}_decimal`];
+        return v == null || isNaN(v) ? null : Number(v);
+      };
+      const row = (side, prob) => {
+        const min = prob > 0 ? 1 / prob : null;
+        const current = readOdds(side);
+        const ev = current != null && min != null ? (prob * current) - 1 : null;
+        const prudent = min != null ? min * 1.02 : null;
+        let label = "sin cuota";
+        if (current != null && prudent != null) {
+          if (current >= prudent) label = "value";
+          else if (current > min) label = "justo";
+          else label = "margen bajo";
+        }
+        return { side, name: sideName(m, side), prob, min, prudent, current, ev, label };
+      };
+      const team1 = row("team1", dp);
+      const team2 = row("team2", 1 - dp);
+      const fav = decisionSide(m) === "team1" ? team1 : team2;
+      return { team1, team2, favorite: fav };
+    }
+    function upsetView(m){
+      const u = m.controls?.favorite_upset || m.prediction?.favorite_upset_90d || {};
+      const losses = u.favorite_losses ?? 0;
+      const favs = u.favorite_matches ?? 0;
+      const played = u.played_matches ?? 0;
+      const rate = u.favorite_loss_rate;
+      let color = "var(--muted)";
+      let label = u.risk_label || "sin datos";
+      if (favs >= 3 && rate != null) {
+        if (rate >= .35) color = "var(--red-soft)";
+        else if (rate >= .20) color = "var(--amber)";
+        else color = "var(--green)";
+      }
+      return {
+        main: favs ? `${losses}/${favs}` : "s/d",
+        row: `${label} · ${favs}/${played} mkt fav/jug.`,
+        color,
+        rate,
+        raw: u
+      };
+    }
+
+    // ---------- flag filter options ----------
+    (function buildFlagFilter(){
+      const codes = new Map();
+      M.forEach(m => (m.flags||[]).forEach(f => codes.set(f.code, f.level)));
+      const sel = $("flagFilter");
+      sel.innerHTML = '<option value="">Todas las señales</option><option value="__warn">Solo warnings</option>'
+        + [...codes.keys()].sort().map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    })();
+
+    // ---------- matches view ----------
+    function filtered(){
+      const q = $("search").value.toLowerCase().trim();
+      const ff = $("flagFilter").value, of = $("oddsFilter").value;
+      let list = M.filter(m => {
+        const t = `${tn(m,'team1')} ${tn(m,'team2')} ${m.event||""}`.toLowerCase();
+        if (q && !t.includes(q)) return false;
+        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning")) return false;
+        if (ff && ff!=="__warn" && !(m.flags||[]).some(f=>f.code===ff)) return false;
+        if (of==="yes" && !m.odds?.available) return false;
+        if (of==="no" && m.odds?.available) return false;
+        return true;
+      });
+      const s = $("sortBy").value;
+      const c = m => decisionConfidence(m);
+      if (s==="confidence") list.sort((a,b)=>c(b)-c(a));
+      else if (s==="opportunity") list.sort((a,b)=>opportunity(b)-opportunity(a));
+      else if (s==="flags") list.sort((a,b)=>(b.flags?.length||0)-(a.flags?.length||0));
+      else if (s==="value") list.sort((a,b)=>(Math.abs(b.controls?.market?.model_edge_team1||0))-(Math.abs(a.controls?.market?.model_edge_team1||0)));
+      else if (s==="stake") list.sort((a,b)=>(b.staking?.recommended_fraction||0)-(a.staking?.recommended_fraction||0));
+      else if (s==="upset") list.sort((a,b)=>{
+        const ua = upsetView(a).raw, ub = upsetView(b).raw;
+        const sa = (ua.favorite_matches||0) >= 3 ? (ua.favorite_loss_rate ?? -1) : -1;
+        const sb = (ub.favorite_matches||0) >= 3 ? (ub.favorite_loss_rate ?? -1) : -1;
+        return sb - sa;
+      });
+      else list.sort((a,b)=>`${a.date} ${a.hour}`.localeCompare(`${b.date} ${b.hour}`));
+      return list;
+    }
+    function renderKpis(list){
+      const odds = list.filter(m=>m.odds?.available).length;
+      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning")).length;
+      const high = list.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
+      const val = list.filter(m=>Math.abs(m.controls?.market?.model_edge_team1||0)>=.08).length;
+      const avg = list.length ? list.reduce((s,m)=>s+decisionConfidence(m),0)/list.length : 0;
+      const cal = DATA.calibration?.all || {};
+      $("kpis").innerHTML = [
+        [list.length,"partidos"],[high,"oportunidades sólidas"],[odds,"con odds"],[val,"value edge"],
+        [warn,"con warning"],[pct(avg),"confianza media"],
+        [cal.n?pct(cal.accuracy):"—","acc. real diaria"]
+      ].map(([a,b])=>`<div class="kpi"><b>${a}</b><span>${b}</span></div>`).join("");
+    }
+    function renderRows(){
+      const list = filtered(); renderKpis(list); $("rowCount").textContent = list.length;
+      $("rows").innerHTML = list.map(m=>{
+        const p = m.prediction||{}, f = m.features||{};
+        const p1 = decisionProb(m);
+        const favSide = decisionSide(m);
+        const favT1 = favSide==="team1";
+        const favName = decisionFavorite(m);
+        const conf = decisionConfidence(m);
+        const rel = reliability(m); const [rl,rc] = relLabel(rel);
+        const edge = m.controls?.market?.model_edge_team1;
+        const st = m.staking || {};
+        const sv = stakeView(st,m);
+        const uv = upsetView(m);
+        return `<tr data-id="${esc(m.id)}" class="${state.selected===m.id?'sel':''}">
+          <td><b class="mono">${esc(m.hour||"")}</b><div class="ev">${esc(m.date||"")}</div></td>
+          <td><div class="matchcell"><div class="vs">${logo(m,'team1')} ${esc(tn(m,'team1'))} <span class="mid">VS</span> ${logo(m,'team2')} ${esc(tn(m,'team2'))}</div><div class="ev">${esc(m.event||"")} · ${esc((m.format||"").toUpperCase())}</div></div></td>
+          <td class="predcell"><span class="fav">${esc(favName||"—")}</span> <span class="confnum">${pct(conf)}</span>
+            <div class="bar"><i style="width:${Math.round((favT1?p1:1-p1)*100)}%"></i></div></td>
+          <td><span class="mono" style="font-weight:900;color:${uv.color}">${esc(uv.main)}</span>
+            <div class="ev">${esc(uv.row)}</div></td>
+          <td><span class="mono">${m.odds?.average?`${num(m.odds.average.team1_decimal)}/${num(m.odds.average.team2_decimal)}`:"—"}</span>
+            <div class="ev">${edge!=null?`edge ${sg(edge)}`:"sin mercado"}</div></td>
+          <td><span class="mono" style="font-weight:900;color:${sv.color}">${esc(sv.pct)}</span>
+            <div class="ev">${esc(sv.row)}</div></td>
+          <td><span class="mono" style="color:${rc};font-weight:800">${rl}</span><div class="meter"><i style="width:${Math.round(rel*100)}%;background:${rc}"></i></div></td>
+          <td><div class="flags">${(m.flags||[]).slice(0,3).map(fl=>`<span class="flag ${fl.level}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">OK</span>'}</div></td>
+        </tr>`;
+      }).join("") || `<tr><td colspan="8" class="empty">Sin partidos que coincidan</td></tr>`;
+      document.querySelectorAll("tr[data-id]").forEach(tr=>tr.onclick=()=>selectMatch(tr.dataset.id));
+      if(!state.selected && list[0]) selectMatch(list[0].id);
+    }
+
+    // ---------- detail ----------
+    function statBar(lab,a,b,fmt=pct,cls=""){
+      const t = (Math.abs(a||0)+Math.abs(b||0))||1;
+      const w = Math.max(2, Math.min(98, (Math.abs(a||0)/t)*100));
+      return `<div class="row2"><span class="lab">${esc(lab)}</span><div class="bar ${cls}"><i style="width:${w}%"></i></div><span class="val">${fmt(a)} / ${fmt(b)}</span></div>`;
+    }
+    function selectMatch(id){
+      state.selected = id;
+      document.querySelectorAll("tr[data-id]").forEach(tr=>tr.classList.toggle("sel",tr.dataset.id===id));
+      const m = M.find(x=>x.id===id); if(!m) return;
+      const p=m.prediction||{}, f=m.features||{}, ctl=m.controls||{}, mk=ctl.market||{}, mp=ctl.map_pool||{}, ctx=ctl.tournament_context||{};
+      const st=m.staking||{};
+      const sv=stakeView(st,m);
+      const vv=valueOddsView(m);
+      const stakeOdds = st.side && vv[st.side] ? vv[st.side] : null;
+      const uv=upsetView(m);
+      const rel=reliability(m); const [rl,rc]=relLabel(rel);
+      const dp=decisionProb(m), ds=decisionSide(m), dfav=decisionFavorite(m), dconf=decisionConfidence(m);
+      const avg=m.odds?.average;
+      const rosterRow = s => { const r=(ctl.roster_stability||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: ${num(r.days_with_current_roster,1)}d con roster · cambios30d ${r.changes_30d??"—"} · size ${r.roster_size??"—"} ${r.standin_risk?"· ⚠ stand-in":""}</div>`; };
+      const formRow = s => { const fr=(ctl.player_form||{})[s]||{}, l5=(fr.team_windows||{}).last5||{}, se=fr.season_avg||{}; return `<div class="small">${esc(sideName(m,s))}: R season ${num(se.rating)} · L5 ${num(l5.rating)} · KAST ${num(se.kast,1)} · cobertura real ${pct(fr.real_form_coverage)}</div>`; };
+      const playerEdgeRow = s => {
+        const r=m.rosters?.[s]||{}, d=r.distribution||{}, met=(d.metrics||{}).rating||{}, top=(d.top||{}).rating||{}, bot=(d.bottom||{}).rating||{};
+        return `<div class="small">${esc(sideName(m,s))}: ventana ${esc(r.preferred_time_filter||"n/a")} · media ${num(met.avg)} · estrella ${esc(top.name||"—")} ${num(top.value)} · weak link ${esc(bot.name||"—")} ${num(bot.value)} · dispersión ${num(met.spread)}</div>`;
+      };
+      const fatigueRow = s => { const ff=(ctl.fatigue||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: 24h ${ff.last24_count??0} · 48h ${ff.last48_count??0} · mismo día ${ff.same_day_total??0} ${ff.back_to_back?"· ⚠ back-to-back":""}</div>`; };
+      const players = roster => (roster?.players||[]).map(pl=>{const s=pl.stats?.stats||{};return `<div class="player"><span>${esc(pl.name)}</span><span class="chip">R ${esc(s["Rating 3.0"]||"—")} · KAST ${esc(s.KAST||"—")}</span></div>`;}).join("") || '<div class="small">Sin roster</div>';
+
+      $("detail").innerHTML = `
+        <div class="dhead">
+          <h2>${esc(tn(m,'team1'))} <span style="color:var(--red)">vs</span> ${esc(tn(m,'team2'))}</h2>
+          <div class="small mono">${esc(m.date)} ${esc(m.hour)} · ${esc(m.event)} · ${esc((m.format||"").toUpperCase())} · <a href="https://www.hltv.org${esc(m.link)}" target="_blank">HLTV ↗</a></div>
+          <div style="margin-top:8px"><span class="flag" style="color:${rc};border-color:${rc}">FIABILIDAD ${rl} ${Math.round(rel*100)}%</span> <span class="flag info">snapshot ${m.data_quality?.real_pre_match_snapshot?"real":"legacy"}</span></div>
+        </div>
+        <div class="box"><b>Predicción del modelo (stats)</b>
+          ${statBar("Decisión", dp, 1-dp, pct, "green")}
+          ${statBar("Modelo", p.model_prob_team1, 1-(p.model_prob_team1??.5), pct)}
+          ${statBar("Mercado (odds)", p.odds_prob_team1, p.odds_prob_team1==null?null:1-p.odds_prob_team1, pct, "cyan")}
+          ${statBar("Blend mkt", p.blended_prob_team1, 1-(p.blended_prob_team1??.5), pct, "green")}
+          <div class="small">Favorito decisión: <b style="color:var(--green)">${esc(dfav)}</b> · confianza <b class="mono">${pct(dconf)}</b> · fuente ${esc(p.decision_probability_source||"modelo")} · peso mercado ${pct(p.decision_market_weight)}</div>
+          <div class="small">Favorito modelo: <b style="color:var(--red-soft)">${esc(p.favorite)}</b> · confianza <b class="mono">${pct(p.confidence)}</b></div>
+          <div class="small">Bucket histórico fav-pierde: ${pct(p.similar_probability_bucket?.favorite_loss_rate)} (${p.similar_probability_bucket?.n||0} casos similares)</div>
+        </div>
+        <div class="box"><b>Fav. upset potencial</b>
+          <div class="small">Favorito actual: <b style="color:${uv.color}">${esc(dfav)}</b> · riesgo <b class="mono" style="color:${uv.color}">${esc(uv.raw.risk_label||"sin datos")}</b></div>
+          <div class="small">Ultimos ${uv.raw.window_days||90}d: perdio como favorito de mercado <b class="mono">${uv.raw.favorite_losses??0}/${uv.raw.favorite_matches??0}</b> veces.</div>
+          <div class="small">Fue favorito de mercado en <b class="mono">${uv.raw.favorite_matches??0}/${uv.raw.played_matches??0}</b> partidos jugados; odds disponibles en <b class="mono">${uv.raw.market_odds_matches??0}/${uv.raw.played_matches??0}</b>. Fuente: odds pre-partido guardadas.</div>
+        </div>
+        <div class="box"><b>Stake recomendado</b>
+          <div class="small">Accion: <b style="color:${sv.color}">${esc(sv.label)}</b> · cartera <b class="mono">${esc(sv.pct)}</b> · ROI esperado ${esc(sv.roi)}</div>
+          <div class="small">Kelly bruto ${pct(st.raw_kelly_fraction)} · fracción ${pct(st.fractional_kelly)} · fiabilidad ${pct(st.reliability_factor)} · consenso ${pct(st.consensus_factor)} · calibración ${pct(st.calibration_factor)}</div>
+          <div class="small">Cuota mínima EV&gt;0: <b class="mono">${esc(tn(m,"team1"))} ${num(vv.team1.min)}</b> · <b class="mono">${esc(tn(m,"team2"))} ${num(vv.team2.min)}</b></div>
+          <div class="small">Favorito decisión ${esc(vv.favorite.name)}: buscar &gt; <b class="mono">${num(vv.favorite.min)}</b> decimal; prudente +2% &gt; <b class="mono">${num(vv.favorite.prudent)}</b>${vv.favorite.current!=null?` · actual ${num(vv.favorite.current)} · margen ${sg(vv.favorite.ev)}`:" · sin cuota actual"}</div>
+          ${stakeOdds?`<div class="small">Lado stake ${esc(stakeOdds.name)}: actual <b class="mono">${num(stakeOdds.current)}</b> · mínimo <b class="mono">${num(stakeOdds.min)}</b> · margen ${sg(stakeOdds.ev)}</div>`:""}
+          <div class="small">${esc(sv.note || st.reason || "ok")}</div>
+        </div>
+        <div class="box"><b>Ratings &amp; control</b>
+          ${statBar("Glicko", f.glicko_rating_team1 ?? f.elo_team1, f.glicko_rating_team2 ?? f.elo_team2, x=>num(x,0))}
+          ${statBar("Glicko RD (incert.)", f.glicko_rd_team1, f.glicko_rd_team2, x=>num(x,0), "cyan")}
+          ${statBar("Elo", f.elo_team1, f.elo_team2, x=>num(x,0))}
+          ${statBar("Winrate", f.winrate_team1, f.winrate_team2, pct)}
+          ${statBar("Partidos", f.matches_team1, f.matches_team2, x=>num(x,0))}
+          ${statBar("Rating roster", f.player_rating_team1, f.player_rating_team2, x=>num(x,2))}
+        </div>
+        <div class="box"><b>Señales / flags</b><div class="flags">${(m.flags||[]).map(fl=>`<span class="flag ${fl.level}" title="${esc(fl.message)}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">Sin flags</span>'}</div></div>
+        <div class="box"><b>Mercado</b>
+          <div class="small">Favorito mercado: ${mk.market_favorite_side?esc(sideName(m,mk.market_favorite_side)):"—"} · casas ${m.odds?.bookmaker_count||0} · consenso ${esc(mk.consensus_label||"n/a")}</div>
+          <div class="small">Drift T1: ${sg(mk.drift_team1_prob)} · edge modelo T1: ${sg(mk.model_edge_team1)} · value: ${esc(mk.value_label||"n/a")}</div>
+          <div class="small">${avg?`Odds ${num(avg.team1_decimal)}/${num(avg.team2_decimal)} · overround ${num(avg.overround)}`:"Sin odds"}</div>
+        </div>
+        <div class="box"><b>Pool de mapas (estimado pre-veto)</b>
+          <div class="small">Confianza ${esc(mp.confidence||"n/a")} · cobertura ${pct(mp.coverage)} · ventaja T1 ${sg(mp.map_pool_advantage_team1)}</div>
+          <div class="small">${esc(tn(m,"team1"))} mejor: ${mp.team1_best_map?`${esc(mp.team1_best_map.map)} (${sg(mp.team1_best_map.diff_team1)})`:"—"} · ${esc(tn(m,"team2"))} mejor: ${mp.team2_best_map?`${esc(mp.team2_best_map.map)}`:"—"}</div>
+        </div>
+        <div class="box"><b>Roster · forma · fatiga</b>${rosterRow("team1")}${rosterRow("team2")}<div style="height:6px"></div>${playerEdgeRow("team1")}${playerEdgeRow("team2")}<div style="height:6px"></div>${formRow("team1")}${formRow("team2")}<div style="height:6px"></div>${fatigueRow("team1")}${fatigueRow("team2")}</div>
+        <div class="box"><b>Contexto torneo</b>
+          <div class="small">Stage ${esc(ctx.stage||"?")} · ${esc(ctx.environment||"?")} · high-stakes ${ctx.high_stakes?"sí":"no"} · incentivo ${esc(ctx.incentive_label||ctx.incentive_uncertainty||"?")} · fuente ${esc(ctx.source||"n/a")}</div>
+          ${ctx.stage_detail?`<div class="small">${esc(ctx.stage_detail)}</div>`:""}
+          ${(ctx.winner_advances||ctx.loser_eliminated||ctx.swiss_record)?`<div class="small">${ctx.swiss_record?`Swiss record ${esc(ctx.swiss_record)} · `:""}${ctx.winner_advances?"ganador avanza · ":""}${ctx.loser_eliminated?"eliminación · ":""}incertidumbre ${esc(ctx.incentive_uncertainty||"n/a")}</div>`:""}
+          ${(ctx.substitution_notes||[]).length?`<div class="small">${esc((ctx.substitution_notes||[]).join(" | "))}</div>`:""}
+        </div>
+        <div class="box"><div class="grid2"><div><b style="color:var(--red-soft)">${esc(tn(m,'team1'))}</b>${players(m.rosters?.team1)}</div><div><b style="color:var(--red-soft)">${esc(tn(m,'team2'))}</b>${players(m.rosters?.team2)}</div></div></div>`;
+    }
+
+    // ---------- best opportunity ----------
+    function renderBest(){
+      const list = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
+                    .map(m=>({m, opp:opportunity(m), rel:reliability(m)}))
+                    .filter(x=>decisionConfidence(x.m)>=.6 && x.rel>=.45)
+                    .sort((a,b)=>b.opp-a.opp).slice(0,18);
+      $("bestCount").textContent = list.length ? `(${list.length})` : "";
+      $("opps").innerHTML = list.map((x,i)=>{
+        const m=x.m, p=m.prediction||{}, f=m.features||{};
+        const [rl,rc]=relLabel(x.rel);
+        const favSide = decisionSide(m), favName = decisionFavorite(m), conf = decisionConfidence(m);
+        const gd = (f.glicko_rating_team1!=null&&f.glicko_rating_team2!=null)? (favSide==="team1"?f.glicko_rating_team1-f.glicko_rating_team2:f.glicko_rating_team2-f.glicko_rating_team1):null;
+        const edge=m.controls?.market?.model_edge_team1;
+        const st=m.staking||{};
+        const sv=stakeView(st,m);
+        return `<div class="opp" data-id="${esc(m.id)}">
+          <div class="rank mono">${String(i+1).padStart(2,'0')}</div>
+          <div class="ev mono">${esc(m.date)} ${esc(m.hour)} · ${esc((m.format||'').toUpperCase())}</div>
+          <div class="winner"><span class="arrow">▶</span> ${esc(favName)}</div>
+          <div class="loser">sobre ${esc(favSide==="team1"?tn(m,'team2'):tn(m,'team1'))} · ${esc(m.event)}</div>
+          <div class="opp-stats">
+            <div class="opp-stat"><b style="color:var(--red-soft)">${pct(conf)}</b><span>confianza ajustada</span><div class="meter"><i style="width:${Math.round(conf*100)}%;background:var(--grad-red)"></i></div></div>
+            <div class="opp-stat"><b style="color:${rc}">${rl}</b><span>fiabilidad ${Math.round(x.rel*100)}%</span><div class="meter"><i style="width:${Math.round(x.rel*100)}%;background:${rc}"></i></div></div>
+            <div class="opp-stat"><b>${gd!=null?(gd>0?"+":"")+gd.toFixed(0):"—"}</b><span>Δ Glicko a favor</span></div>
+            <div class="opp-stat"><b style="color:var(--cyan)">${edge!=null?sg(edge):"—"}</b><span>value vs mercado</span></div>
+            <div class="opp-stat"><b style="color:${sv.color}">${esc(sv.pct)}</b><span>${esc(sv.row)}</span></div>
+          </div>
+        </div>`;
+      }).join("") || `<div class="empty">No hay oportunidades con confianza y fiabilidad suficientes hoy.</div>`;
+      document.querySelectorAll(".opp[data-id]").forEach(el=>el.onclick=()=>{ setView("matches"); selectMatch(el.dataset.id); window.scrollTo({top:0,behavior:"smooth"}); });
+    }
+
+    // ---------- model view ----------
+    function renderModel(){
+      const mm = DATA.model?.metrics || {};
+      const order = [["base_rate","Base rate"],["elo","Elo"],["glicko","Glicko-2"],["logistic_cal","Logística (Platt)"],["lightgbm_cal","LightGBM (Platt)"],["ensemble_raw","Ensemble"],["ensemble_cal","Ensemble (Platt)"]];
+      const best = Object.entries(mm).filter(([k])=>["logistic_cal","lightgbm_cal","ensemble_cal","ensemble_raw"].includes(k)).sort((a,b)=>a[1].log_loss-b[1].log_loss)[0]?.[0];
+      $("metricsRows").innerHTML = order.filter(([k])=>mm[k]).map(([k,lab])=>{const d=mm[k];return `<tr class="winrow ${k===best?'best':''}"><td>${lab}${k===best?' ★':''}</td><td>${d.n}</td><td>${num(d.accuracy,3)}</td><td>${num(d.log_loss,4)}</td><td>${num(d.brier,4)}</td><td>${num(d.roc_auc,3)}</td><td>${num(d.ece_10,4)}</td></tr>`;}).join("") || '<tr><td colspan="7" class="empty">Sin métricas. Ejecuta MODEL/train.py</td></tr>';
+      const shap = DATA.model?.shap_top||[]; const mx = Math.max(...shap.map(s=>s.mean_abs_shap),0.0001);
+      $("shapBox").innerHTML = shap.map(s=>`<div class="shapbar"><span class="lab">${esc(s.feature)}</span><div class="bar"><i style="width:${Math.round(s.mean_abs_shap/mx*100)}%"></i></div><span class="val mono">${num(s.mean_abs_shap,3)}</span></div>`).join("") || '<div class="small">Sin SHAP.</div>';
+      // desglose por competitividad
+      const seg = DATA.model?.segments||[];
+      $("segRows").innerHTML = seg.map(s=>{
+        const c = s.log_loss>=0.685?"var(--red-soft)":s.log_loss>=0.64?"var(--amber)":"var(--green)";
+        return `<tr class="winrow"><td>${esc(s.band)}</td><td>${(s.share*100).toFixed(1)}%</td><td>${(s.accuracy*100).toFixed(1)}%</td><td style="color:${c}">${num(s.log_loss,3)}</td></tr>`;
+      }).join("") || '<tr><td colspan="4" class="empty">Sin datos</td></tr>';
+      const mk = DATA.model?.market||{};
+      $("marketBox").innerHTML = mk.n ?
+        `Benchmark de mercado (odds apertura, n=${mk.n}, ilustrativo): modelo log loss <b class="mono">${num(mk.model_log_loss,3)}</b> vs mercado <b class="mono" style="color:var(--cyan)">${num(mk.market_log_loss,3)}</b>. ${esc(mk.note||"")}`
+        : `${esc(mk.note||"Aún sin odds suficientes para el benchmark de mercado.")}`;
+      $("marketBox").innerHTML += `<br><span style="color:var(--muted)">Log loss de un coinflip puro = ln(2) ≈ 0.693. El mérito del modelo está en la banda 55-80%; los partidos parejos son incertidumbre irreducible.</span>`;
+      drawCalibration();
+    }
+    function drawCalibration(){
+      const cv = $("calCanvas"); if(!cv) return; const ctx = cv.getContext("2d");
+      const W=cv.width,H=cv.height,pad=42; ctx.clearRect(0,0,W,H);
+      const X=v=>pad+v*(W-pad-12), Y=v=>H-pad-v*(H-pad-12);
+      // grid
+      ctx.strokeStyle="#1c2230"; ctx.lineWidth=1;
+      for(let i=0;i<=10;i++){const t=i/10; ctx.beginPath();ctx.moveTo(X(t),Y(0));ctx.lineTo(X(t),Y(1));ctx.moveTo(X(0),Y(t));ctx.lineTo(X(1),Y(t));ctx.stroke();}
+      // diagonal ideal
+      ctx.strokeStyle="#2a3344"; ctx.setLineDash([5,4]); ctx.beginPath();ctx.moveTo(X(0),Y(0));ctx.lineTo(X(1),Y(1));ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle="#7d8aa0"; ctx.font="11px monospace"; ctx.fillText("prob. predicha →",pad,H-14); ctx.save();ctx.translate(14,H-pad);ctx.rotate(-Math.PI/2);ctx.fillText("frecuencia real →",0,0);ctx.restore();
+      const bins=(DATA.calibration?.all?.bins)||[];
+      if(!bins.length){ ctx.fillStyle="#7d8aa0"; ctx.fillText("Aún sin resultados reales suficientes.",pad,H/2); return; }
+      ctx.strokeStyle="#ff2740"; ctx.lineWidth=2; ctx.shadowColor="rgba(255,39,64,.6)"; ctx.shadowBlur=8; ctx.beginPath();
+      bins.forEach((b,i)=>{const x=X(b.avg_prob),y=Y(b.empirical_winrate); i?ctx.lineTo(x,y):ctx.moveTo(x,y);}); ctx.stroke(); ctx.shadowBlur=0;
+      ctx.fillStyle="#ff5a6e"; bins.forEach(b=>{ctx.beginPath();ctx.arc(X(b.avg_prob),Y(b.empirical_winrate),3+Math.min(6,b.n/3),0,7);ctx.fill();});
+      const c=DATA.calibration?.all||{};
+      $("calStats").innerHTML = `<div class="row2"><span class="lab">muestras</span><span></span><span class="val">${c.n||0}</span></div>
+        <div class="row2"><span class="lab">accuracy</span><span></span><span class="val">${pct(c.accuracy)}</span></div>
+        <div class="row2"><span class="lab">Brier</span><span></span><span class="val">${num(c.brier,4)}</span></div>
+        <div class="row2"><span class="lab">log loss</span><span></span><span class="val">${num(c.log_loss,4)}</span></div>
+        <div class="row2"><span class="lab">ECE</span><span></span><span class="val">${num(c.ece,4)}</span></div>
+        <div class="small" style="margin-top:8px">Cuanto más pegada a la diagonal, mejor calibrado. Validado solo con resultados reales post-snapshot.</div>`;
+    }
+
+    // ---------- views ----------
+    function setView(v){
+      state.view=v;
+      document.querySelectorAll(".tab").forEach(t=>t.classList.toggle("active",t.dataset.view===v));
+      $("view-matches").classList.toggle("hidden",v!=="matches");
+      $("view-best").classList.toggle("hidden",v!=="best");
+      $("view-model").classList.toggle("hidden",v!=="model");
+      $("controls").style.display = v==="matches" ? "" : "none";
+      if(v==="best") renderBest(); if(v==="model") renderModel();
+    }
+
+    function init(){
+      const man = DATA.manifest||{};
+      $("runInfo").textContent = `RUN ${man.run_id||man.last_run_id||"?"} · ${M.length} partidos · ${DATA.generatedAt||man.finished_at||""}`;
+      $("modelBadge").textContent = "◈ " + (DATA.model?.production_model || "modelo no cargado");
+      document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setView(t.dataset.view));
+      ["search","flagFilter","oddsFilter","sortBy"].forEach(id=>$(id).oninput=renderRows);
+      $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");$("sortBy").value="confidence";renderRows();};
+      $("sortBy").value="confidence";
+      renderRows();
+      // pre-cuenta best
+      const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&m.prediction?.confidence>=.6&&reliability(m)>=.45).length;
+      $("bestCount").textContent = n?`(${n})`:"";
+    }
+    init();
+  </script>
+</body>
+</html>
