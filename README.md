@@ -91,8 +91,8 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
 ### 4.3. Modelos, calibración y selección
 
 Walk-forward semanal (ventana expansiva, nunca k-fold aleatorio). Se evalúan
-baselines (base-rate, Elo, Glicko-2), logística y LightGBM (ambos calibrados con
-Platt) y su ensemble; se elige el de producción por **menor log loss**.
+baselines (base-rate, Elo, Glicko-2), logística, LightGBM y ensembles calibrados
+con Platt/isotónica/beta; se elige el de producción por **menor log loss**.
 
 ### 4.4. Resultados (era CS2, 9.444 series, 7.008 de test)
 
@@ -102,26 +102,26 @@ Platt) y su ensemble; se elige el de producción por **menor log loss**.
 | Elo | 0.603 | 0.657 | 0.233 | 0.642 | 0.042 |
 | Glicko-2 | 0.609 | 0.660 | 0.233 | 0.649 | 0.050 |
 | Logística calibrada | 0.640 | 0.633 | 0.221 | 0.684 | 0.016 |
-| LightGBM calibrado | 0.638 | 0.635 | 0.222 | 0.682 | 0.017 |
-| **Ensemble calibrado (producción)** | **0.648** | **0.630** | **0.220** | **0.689** | **0.017** |
+| LightGBM calibrado | 0.641 | 0.632 | 0.221 | 0.686 | 0.015 |
+| **Ensemble beta (producción)** | **0.647** | **0.629** | **0.220** | **0.690** | **0.016** |
 
 > Hallazgo honesto: con features de resultados (relaciones monótonas tipo
 > "diferencia de rating"), la logística calibrada casi iguala al ensemble. Tras
-> añadir forma específica por formato, el ensemble calibrado queda ligeramente
+> añadir forma específica por formato y calibración beta, el ensemble queda ligeramente
 > por delante en log loss y pasa a producción. La elección sigue siendo
 > data-driven.
 
-### 4.5. ¿Tiene mérito el 64.8%? (acierto por competitividad)
+### 4.5. ¿Tiene mérito el 64.7%? (acierto por competitividad)
 
-Desglose del acierto por confianza del modelo — el 64.8% **no** está inflado por
-palizas (solo el 5.8% lo son):
+Desglose del acierto por confianza del modelo — el 64.7% **no** está inflado por
+palizas (solo el 7.0% lo son):
 
 | Banda (confianza) | % partidos | Accuracy | Log loss |
 |---|---:|---:|---:|
-| coinflip (<55%) | 21.2% | 55.0% | 0.691 (≈ azar, ln2≈0.693) |
-| parejos (55-65%) | 37.1% | 60.7% | 0.668 |
-| claros (65-80%) | 36.0% | 71.5% | 0.591 |
-| palizas (≥80%) | 5.8% | 85.2% | 0.415 |
+| coinflip (<55%) | 23.5% | 53.9% | 0.691 (≈ azar, ln2≈0.693) |
+| parejos (55-65%) | 36.9% | 61.6% | 0.665 |
+| claros (65-80%) | 32.6% | 71.4% | 0.593 |
+| palizas (≥80%) | 7.0% | 85.8% | 0.401 |
 
 El valor está en la banda 55-80%; en los coinflips genuinos la incertidumbre es
 irreducible. **El techo de mejora está en la banda 55-65%** (37% de los
@@ -131,7 +131,7 @@ más scraping.
 ### 4.6. Benchmark de mercado (odds)
 
 Con odds de apertura guardadas (hoy n=69, ilustrativo): el **mercado** queda en
-log loss 0.645 vs 0.665 del modelo en esos mismos partidos. Confirma que las odds son muy
+log loss 0.645 vs 0.662 del modelo en esos mismos partidos. Confirma que las odds son muy
 informativas (PROJECT.md §6.5): se usan como **benchmark a batir** y como blend
 de mercado en la web, no como feature única (canibalizaría el interés
 académico). El modelo entrenado es "Model A" (solo stats) por diseño.

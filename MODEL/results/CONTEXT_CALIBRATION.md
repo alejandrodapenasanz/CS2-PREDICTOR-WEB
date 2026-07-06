@@ -1,6 +1,6 @@
 # Context Calibration Diagnostic
 
-Generado: 2026-07-06T09:43:27Z  
+Generado: 2026-07-06T13:34:06Z  
 Muestras cerradas con prediccion pre-partido: **90**  
 Muestras con contexto HLTV: **90**  
 
@@ -25,26 +25,24 @@ Muestras con contexto HLTV: **90**
 
 | Hora | Partido | Env | Stage | Favorito | Conf | HLTV |
 |---|---|---|---|---|---:|---|
-| 2026-07-06 12:30 | illwill vs WBT | online | Group A opening match | illwill | 0.6076 | [link](https://www.hltv.org/matches/2395519/illwill-vs-wbt-european-pro-league-series-8) |
-| 2026-07-06 15:00 | Imperial vs ALKA | online | Round of 16 | Imperial | 0.7658 | [link](https://www.hltv.org/matches/2395587/imperial-vs-alka-cct-2026-south-america-series-3) |
-| 2026-07-06 18:00 | Fluxo vs paiN Academy | online | Round of 16 | Fluxo | 0.6544 | [link](https://www.hltv.org/matches/2395588/fluxo-vs-pain-academy-cct-2026-south-america-series-3) |
-| 2026-07-06 21:00 | Fake do Biru vs VEXA | online | Round of 16 | Fake do Biru | 0.7434 | [link](https://www.hltv.org/matches/2395589/fake-do-biru-vs-vexa-cct-2026-south-america-series-3) |
-| 2026-07-07 00:00 | Keyd Stars vs GameHunters | online | Round of 16 | Keyd Stars | 0.6604 | [link](https://www.hltv.org/matches/2395590/keyd-stars-vs-gamehunters-cct-2026-south-america-series-3) |
-| 2026-07-07 10:00 | BASEMENT BOYS vs The Last Resort | online | Group B opening match | The Last Resort | 0.5301 | [link](https://www.hltv.org/matches/2395520/basement-boys-vs-the-last-resort-european-pro-league-series-8) |
-| 2026-07-07 12:30 | PsychoFace vs Enjoy | online | Group B opening match | Enjoy | 0.5831 | [link](https://www.hltv.org/matches/2395521/psychoface-vs-enjoy-european-pro-league-series-8) |
-| 2026-07-07 15:00 | Isurus vs Yawara | online | Round of 16 | Yawara | 0.5722 | [link](https://www.hltv.org/matches/2395591/isurus-vs-yawara-cct-2026-south-america-series-3) |
-| 2026-07-07 18:00 | LP vs BESTIA Academy | online | Round of 16 | LP | 0.7823 | [link](https://www.hltv.org/matches/2395592/lp-vs-bestia-academy-cct-2026-south-america-series-3) |
-| 2026-07-07 21:00 | UNO MILLE vs Patins da Ferrari | online | Round of 16 | UNO MILLE | 0.5296 | [link](https://www.hltv.org/matches/2395593/uno-mille-vs-patins-da-ferrari-cct-2026-south-america-series-3) |
-| 2026-07-08 00:00 | Bounty Hunters vs MIBR Academy | online | Round of 16 | Bounty Hunters | 0.8011 | [link](https://www.hltv.org/matches/2395594/bounty-hunters-vs-mibr-academy-cct-2026-south-america-series-3) |
-| 2026-07-08 10:00 | Atreides vs eternal premium | online | Group C opening match | Atreides | 0.6238 | [link](https://www.hltv.org/matches/2395522/atreides-vs-eternal-premium-european-pro-league-series-8) |
-| 2026-07-08 12:30 | SPARTA vs ENCE | online | Group C opening match | SPARTA | 0.5997 | [link](https://www.hltv.org/matches/2395523/sparta-vs-ence-european-pro-league-series-8) |
-| 2026-07-09 10:00 | TYLOO vs 9z | lan | Quarter-final | 9z | 0.6418 | [link](https://www.hltv.org/matches/2395486/tyloo-vs-9z-xse-pro-league-guangzhou-2026) |
-| 2026-07-09 10:00 | GenOne vs BRUTE | online | Group D opening match | GenOne | 0.6648 | [link](https://www.hltv.org/matches/2395524/genone-vs-brute-european-pro-league-series-8) |
-| 2026-07-09 12:30 | RUSTEC vs Honvéd | online | Group D opening match | RUSTEC | 0.5205 | [link](https://www.hltv.org/matches/2395525/rustec-vs-honvd-european-pro-league-series-8) |
-| 2026-07-09 13:40 | Alliance vs Nemesis | lan | Quarter-final | Nemesis | 0.6136 | [link](https://www.hltv.org/matches/2395487/alliance-vs-nemesis-xse-pro-league-guangzhou-2026) |
-| 2026-07-10 02:00 | regain vs Club 333 | online | Grand final | regain | 0.6202 | [link](https://www.hltv.org/matches/2395626/regain-vs-club-333-crossfire-season-5) |
-| 2026-07-10 10:00 | PARIVISION vs BIG | lan | Quarter-final | PARIVISION | 0.7219 | [link](https://www.hltv.org/matches/2395488/parivision-vs-big-xse-pro-league-guangzhou-2026) |
-| 2026-07-10 13:40 | FaZe vs BetBoom | lan | Quarter-final | BetBoom | 0.7469 | [link](https://www.hltv.org/matches/2395489/faze-vs-betboom-xse-pro-league-guangzhou-2026) |
+| 2026-07-06 18:00 | Fluxo vs paiN Academy | online | Round of 16 | Fluxo | 0.6545 | [link](https://www.hltv.org/matches/2395588/fluxo-vs-pain-academy-cct-2026-south-america-series-3) |
+| 2026-07-06 21:00 | Fake do Biru vs VEXA | online | Round of 16 | Fake do Biru | 0.7605 | [link](https://www.hltv.org/matches/2395589/fake-do-biru-vs-vexa-cct-2026-south-america-series-3) |
+| 2026-07-07 00:00 | Keyd Stars vs GameHunters | online | Round of 16 | Keyd Stars | 0.6911 | [link](https://www.hltv.org/matches/2395590/keyd-stars-vs-gamehunters-cct-2026-south-america-series-3) |
+| 2026-07-07 10:00 | BASEMENT BOYS vs The Last Resort | online | Group B opening match | The Last Resort | 0.5139 | [link](https://www.hltv.org/matches/2395520/basement-boys-vs-the-last-resort-european-pro-league-series-8) |
+| 2026-07-07 12:30 | PsychoFace vs Enjoy | online | Group B opening match | Enjoy | 0.5811 | [link](https://www.hltv.org/matches/2395521/psychoface-vs-enjoy-european-pro-league-series-8) |
+| 2026-07-07 15:00 | Isurus vs Yawara | online | Round of 16 | Yawara | 0.5713 | [link](https://www.hltv.org/matches/2395591/isurus-vs-yawara-cct-2026-south-america-series-3) |
+| 2026-07-07 18:00 | LP vs BESTIA Academy | online | Round of 16 | LP | 0.7878 | [link](https://www.hltv.org/matches/2395592/lp-vs-bestia-academy-cct-2026-south-america-series-3) |
+| 2026-07-07 21:00 | UNO MILLE vs Patins da Ferrari | online | Round of 16 | UNO MILLE | 0.5253 | [link](https://www.hltv.org/matches/2395593/uno-mille-vs-patins-da-ferrari-cct-2026-south-america-series-3) |
+| 2026-07-08 00:00 | Bounty Hunters vs MIBR Academy | online | Round of 16 | Bounty Hunters | 0.8136 | [link](https://www.hltv.org/matches/2395594/bounty-hunters-vs-mibr-academy-cct-2026-south-america-series-3) |
+| 2026-07-08 10:00 | Atreides vs eternal premium | online | Group C opening match | Atreides | 0.6408 | [link](https://www.hltv.org/matches/2395522/atreides-vs-eternal-premium-european-pro-league-series-8) |
+| 2026-07-08 12:30 | SPARTA vs ENCE | online | Group C opening match | SPARTA | 0.5831 | [link](https://www.hltv.org/matches/2395523/sparta-vs-ence-european-pro-league-series-8) |
+| 2026-07-09 10:00 | TYLOO vs 9z | lan | Quarter-final | 9z | 0.6447 | [link](https://www.hltv.org/matches/2395486/tyloo-vs-9z-xse-pro-league-guangzhou-2026) |
+| 2026-07-09 10:00 | GenOne vs BRUTE | online | Group D opening match | GenOne | 0.6691 | [link](https://www.hltv.org/matches/2395524/genone-vs-brute-european-pro-league-series-8) |
+| 2026-07-09 12:30 | RUSTEC vs Honvéd | online | Group D opening match | RUSTEC | 0.5188 | [link](https://www.hltv.org/matches/2395525/rustec-vs-honvd-european-pro-league-series-8) |
+| 2026-07-09 13:40 | Alliance vs Nemesis | lan | Quarter-final | Nemesis | 0.5894 | [link](https://www.hltv.org/matches/2395487/alliance-vs-nemesis-xse-pro-league-guangzhou-2026) |
+| 2026-07-10 02:00 | regain vs Club 333 | online | Grand final | regain | 0.6082 | [link](https://www.hltv.org/matches/2395626/regain-vs-club-333-crossfire-season-5) |
+| 2026-07-10 10:00 | PARIVISION vs BIG | lan | Quarter-final | PARIVISION | 0.7095 | [link](https://www.hltv.org/matches/2395488/parivision-vs-big-xse-pro-league-guangzhou-2026) |
+| 2026-07-10 13:40 | FaZe vs BetBoom | lan | Quarter-final | BetBoom | 0.7535 | [link](https://www.hltv.org/matches/2395489/faze-vs-betboom-xse-pro-league-guangzhou-2026) |
 
 ## Calibrador Contextual Diagnostico
 

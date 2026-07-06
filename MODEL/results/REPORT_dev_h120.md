@@ -1,6 +1,6 @@
 # Informe de entrenamiento — modelo CS2 (Glicko-2 + LightGBM)
 
-Generado: 2026-07-06T13:23:48Z  
+Generado: 2026-07-06T13:19:06Z  
 Histórico: 2025-09-11 → 2026-07-06 (9444 series, era CS2)
 
 ## Politica de features opcionales
@@ -15,11 +15,11 @@ Histórico: 2025-09-11 → 2026-07-06 (9444 series, era CS2)
 | Base rate (baseline) | 7008 | 0.5622 | 0.6855 | 0.2462 | 0.4864 | 0.0006 |
 | Elo (baseline) | 7008 | 0.6025 | 0.6569 | 0.2325 | 0.6423 | 0.0425 |
 | Glicko-2 (baseline) | 7008 | 0.6092 | 0.6596 | 0.2330 | 0.6493 | 0.0498 |
-| Logística (Platt) | 7008 | 0.6406 | 0.6323 | 0.2212 | 0.6848 | 0.0148 |
-| LightGBM (Platt) | 7008 | 0.6410 | 0.6320 | 0.2210 | 0.6860 | 0.0153 |
-| Ensemble LGBM⊕Log (Platt) | 7008 | 0.6450 | 0.6294 | 0.2199 | 0.6902 | 0.0158 |
-| Ensemble (isotónica) | 7008 | 0.6444 | 0.6389 | 0.2206 | 0.6888 | 0.0168 |
-| Ensemble (beta) | 7008 | 0.6467 | 0.6293 | 0.2199 | 0.6901 | 0.0159 |
+| Logística (Platt) | 7008 | 0.6404 | 0.6329 | 0.2214 | 0.6838 | 0.0162 |
+| LightGBM (Platt) | 7008 | 0.6383 | 0.6328 | 0.2214 | 0.6847 | 0.0134 |
+| Ensemble LGBM⊕Log (Platt) | 7008 | 0.6428 | 0.6302 | 0.2202 | 0.6889 | 0.0169 |
+| Ensemble (isotónica) | 7008 | 0.6380 | 0.6424 | 0.2213 | 0.6864 | 0.0191 |
+| Ensemble (beta) | 7008 | 0.6434 | 0.6302 | 0.2203 | 0.6888 | 0.0150 |
 
 > Modelo de producción elegido por menor log loss: **ensemble_beta**.
 
@@ -30,30 +30,30 @@ Histórico: 2025-09-11 → 2026-07-06 (9444 series, era CS2)
 
 | Feature | mean |SHAP| |
 |---|---:|
-| glicko_prob_centered | 0.1143 |
-| glicko_rd_diff | 0.1076 |
-| avg_score_diff | 0.1066 |
-| opp_elo_last20_diff | 0.0874 |
-| matches_log_diff | 0.0851 |
-| format_avg_score_diff | 0.0730 |
-| last10_score_diff | 0.0590 |
-| recent_opponent_elo_diff | 0.0574 |
-| streak_diff | 0.0444 |
-| format_last5_winrate_diff | 0.0348 |
-| elo_diff | 0.0309 |
-| event_matches_diff | 0.0308 |
-| opp_elo_last5_diff | 0.0296 |
-| glicko_diff | 0.0264 |
-| h2h_winrate_centered | 0.0230 |
+| glicko_prob_centered | 0.1150 |
+| glicko_rd_diff | 0.1126 |
+| avg_score_diff | 0.1088 |
+| opp_elo_last20_diff | 0.0899 |
+| matches_log_diff | 0.0844 |
+| format_avg_score_diff | 0.0778 |
+| last10_score_diff | 0.0633 |
+| recent_opponent_elo_diff | 0.0604 |
+| streak_diff | 0.0502 |
+| format_last5_winrate_diff | 0.0405 |
+| event_matches_diff | 0.0322 |
+| opp_elo_last5_diff | 0.0291 |
+| elo_diff | 0.0289 |
+| glicko_diff | 0.0255 |
+| h2h_winrate_centered | 0.0248 |
 
 ## Acierto por competitividad (¿hay skill o son palizas?)
 
 | Banda (confianza) | N | % | Accuracy | Log loss |
 |---|---:|---:|---:|---:|
-| coinflip (<55%) | 1648 | 23.5% | 0.539 | 0.691 |
-| parejos (55-65%) | 2585 | 36.9% | 0.616 | 0.665 |
-| claros (65-80%) | 2288 | 32.6% | 0.714 | 0.593 |
-| palizas (>=80%) | 487 | 7.0% | 0.858 | 0.401 |
+| coinflip (<55%) | 1643 | 23.4% | 0.524 | 0.692 |
+| parejos (55-65%) | 2591 | 37.0% | 0.620 | 0.663 |
+| claros (65-80%) | 2293 | 32.7% | 0.712 | 0.594 |
+| palizas (>=80%) | 481 | 6.9% | 0.852 | 0.411 |
 
 > Log loss de un coinflip puro = ln(2) ≈ 0.693. El valor del modelo se concentra en la banda 55-80%; en los partidos genuinamente parejos la incertidumbre es irreducible.
 
@@ -61,7 +61,7 @@ Histórico: 2025-09-11 → 2026-07-06 (9444 series, era CS2)
 
 Sobre 69 partidos con odds guardadas (ILUSTRATIVO, n pequeño):
 
-- Modelo: log loss 0.6615 · accuracy 0.5797
+- Modelo: log loss 0.6612 · accuracy 0.5652
 - Mercado (odds apertura): log loss 0.6454 · accuracy 0.6957
 
 > Ilustrativo (n pequeño). El modelo NO usa odds como feature; esto mide si bate al mercado.
@@ -74,17 +74,17 @@ Sobre 69 partidos con odds guardadas (ILUSTRATIVO, n pequeño):
 
 - Apuestas simuladas: 56
 - Hit rate: 0.44642857142857145
-- ROI sobre stake: 0.02892860063435969
-- Profit sobre banca inicial: 0.0335890216211816
-- Max drawdown: 0.13271468269380077
+- ROI sobre stake: 0.05678036144799564
+- Profit sobre banca inicial: 0.06778760583138577
+- Max drawdown: 0.1339251145689285
 - Staking: quarter_kelly_cap_2_5pct
 
 > Solo usa odds de apertura guardadas; n pequeno hasta acumular mas mercado.
 
 ## Model registry
 
-- Artefacto versionado: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_132348Z\model.pkl`
-- Carpeta: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_132348Z`
+- Artefacto versionado: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_131906Z\model.pkl`
+- Carpeta: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_131906Z`
 
 ## Notas metodológicas
 

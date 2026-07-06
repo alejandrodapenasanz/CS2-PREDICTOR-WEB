@@ -57,6 +57,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 function Step($n, $total, $msg) {
@@ -70,8 +73,27 @@ function Invoke-Native {
         [string[]]$Arguments = @(),
         [string]$Description = ""
     )
-    & $FilePath @Arguments
-    $exit = $LASTEXITCODE
+    $stderrFile = New-TemporaryFile
+    $oldErrorActionPreference = $ErrorActionPreference
+    $oldNativeErrorPreference = $null
+    if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+        $oldNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    $ErrorActionPreference = "Continue"
+    try {
+        & $FilePath @Arguments 2> $stderrFile.FullName | ForEach-Object { Write-Host $_ }
+        $exit = $LASTEXITCODE
+        if (($exit -ne 0) -and (Test-Path $stderrFile.FullName)) {
+            Get-Content -LiteralPath $stderrFile.FullName -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
+        }
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        if ($null -ne $oldNativeErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativeErrorPreference
+        }
+        Remove-Item -LiteralPath $stderrFile.FullName -Force -ErrorAction SilentlyContinue
+    }
     if ($exit -ne 0) {
         if ($Description) {
             throw "$Description fallo con exit code $exit."
@@ -121,14 +143,16 @@ function Ensure-CaBundle {
     }
 
     # Probe TLS: si la verificacion por defecto funciona, no hacemos nada.
-    $probe = 'try:
-    import urllib.request, ssl
-    urllib.request.urlopen("https://www.hltv.org/robots.txt", timeout=15)
-    print("TLS_OK")
+    $probe = @'
+import urllib.request, ssl
+try:
+    urllib.request.urlopen('https://www.hltv.org/robots.txt', timeout=15)
+    print('TLS_OK')
 except ssl.SSLCertVerificationError:
-    print("TLS_MITM")
+    print('TLS_MITM')
 except Exception:
-    print("TLS_OK")'
+    print('TLS_OK')
+'@
     $result = & (Get-SystemPython) -c $probe 2>$null
     if ($result -match "TLS_MITM") {
         Write-Host "Inspeccion TLS detectada; exporto el trust store de Windows a corp_ca_bundle.pem..." -ForegroundColor Yellow
@@ -157,8 +181,8 @@ except Exception:
 }
 
 function Test-PythonImports($python, $imports) {
-    $code = "import " + ($imports -join ", ")
-    & $python -c $code 2>$null
+    $code = "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in sys.argv[1:]) else 1)"
+    & $python -c $code @imports *> $null
     return ($LASTEXITCODE -eq 0)
 }
 

@@ -46,6 +46,7 @@ from cs2model.features import (
 )
 from cs2model.metrics import metric_dict, calibration_bins
 from cs2model.artifacts import ModelArtifact, Component, ARTIFACT_PATH
+from cs2model.calibration import BetaCalibratedClassifier
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RAW = (
@@ -243,34 +244,6 @@ def _new_estimator(kind: str, cols: list[str]):
     if kind == "catboost":
         return make_catboost(_monotone_vector(cols))
     return make_logistic()
-
-
-class BetaCalibratedClassifier:
-    """Calibracion beta (Kull & Flach 2017): regresion logistica sobre
-    [ln p, -ln(1-p)]. Incluye la identidad como caso particular, asi que NO
-    descalibra un modelo ya bueno, y maneja score sesgado mejor que Platt.
-    Expone predict_proba -> se puede usar como estimador de un Component."""
-
-    def __init__(self, base) -> None:
-        self.base = base
-        self.lr = None
-
-    @staticmethod
-    def _feat(p: np.ndarray) -> np.ndarray:
-        p = np.clip(p, 1e-6, 1 - 1e-6)
-        return np.column_stack([np.log(p), -np.log(1.0 - p)])
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "BetaCalibratedClassifier":
-        from sklearn.linear_model import LogisticRegression
-
-        p = self.base.predict_proba(X)[:, 1]
-        self.lr = LogisticRegression(max_iter=1000).fit(self._feat(p), y)
-        return self
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        p = self.base.predict_proba(X)[:, 1]
-        p1 = self.lr.predict_proba(self._feat(p))[:, 1]
-        return np.column_stack([1.0 - p1, p1])
 
 
 def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str], random_state: int = 0):

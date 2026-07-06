@@ -1,6 +1,6 @@
 # Informe de entrenamiento — modelo CS2 (Glicko-2 + LightGBM)
 
-Generado: 2026-07-06T13:23:48Z  
+Generado: 2026-07-06T13:16:58Z  
 Histórico: 2025-09-11 → 2026-07-06 (9444 series, era CS2)
 
 ## Politica de features opcionales
@@ -83,8 +83,8 @@ Sobre 69 partidos con odds guardadas (ILUSTRATIVO, n pequeño):
 
 ## Model registry
 
-- Artefacto versionado: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_132348Z\model.pkl`
-- Carpeta: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_132348Z`
+- Artefacto versionado: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_131658Z\model.pkl`
+- Carpeta: `C:\Users\aleja\OneDrive - Universitat Oberta de Catalunya\CS2-Predictor\MODEL\artifacts\registry\20260706_131658Z`
 
 ## Notas metodológicas
 
