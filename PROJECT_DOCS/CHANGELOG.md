@@ -1,8 +1,41 @@
 # Changelog / registro de decisiones
 
+## 2026-07-07 - BBDD viva e ingest incremental
+
+- **SQLite como fuente de verdad viva**: `BBDD/build_db.py` pasa a crear/migrar
+  esquema y sembrar solo si `matches` esta vacia. Ya no se reconstruye la base
+  desde cero en cada ejecucion normal.
+- **Ingest incremental**: nuevo `BBDD/ingest.py` aplica cada run con upserts:
+  partidos, odds, predicciones, raw snapshots, rankings, rosters y assets HLTV
+  normalizados (`maps`, `veto`, `match_lineups`, `map_player_stats`,
+  `map_player_side_stats`).
+- **Freshness compartida**: nueva tabla `fetch_state` y lectura desde
+  `DAILY_SNAPSHOTS/start.py` para saltar perfiles/stats/rankings/assets frescos
+  y reintentar pronto bloqueos o errores sin borrar informacion buena previa.
+- **Auditoria**: nueva tabla `ingest_runs` y flags en `matches` para cobertura
+  (`has_prematch_odds`, `has_player_snapshot`, `has_ranking_snapshot`,
+  `has_analytics`, `has_context`, `has_box_score`, `has_veto`).
+- **Compatibilidad**: nuevo `BBDD/export_master_json.py` regenera
+  `DAILY_SNAPSHOTS/master/matches.json` desde SQLite mientras la web/scraper
+  conservan consumidores JSON.
+- **Entrenamiento**: `MODEL/train.py` lee de `BBDD/cs2.db` por defecto; `--raw`
+  queda como modo legacy/debug. Tests nuevos cubren esquema, TTL, odds de
+  apertura y auditoria de fuga temporal.
+- **Orquestacion**: `start.ps1` ingiere el run antes de entrenar cuando se usa
+  `-Retrain`, y vuelve a ingerir al final para congelar predicciones/staking y
+  exportar el master JSON de compatibilidad.
+- **Resultados dirigidos por BBDD**: la fase `/results` de `start.py` ya no pagina
+  offsets antiguos a ciegas; primero lee los `hltv_match_id` pendientes de
+  SQLite, salta la fase si no hay pendientes y solo llega a `offset=100/200` si
+  esos IDs no aparecieron antes.
+- **Diagnostico y bloqueo**: `start.ps1` deja transcript en `logs/start_*.log`
+  con comandos, exit code y duracion. Si el navegador stealth queda bloqueado,
+  se lanza `grab_cf.py` para renovar `cf_clearance` con una ventana visible y se
+  marca `fetch_state` para no repetir inmediatamente assets bloqueados.
+
 ## 2026-07-06 - Scraper por tiers con Scrapling + candidatos de modelo
 
-Detalle completo en `LAST change.md` (raíz). Resumen:
+Detalle completo en `PROJECT_DOCS/runbooks/LAST_CHANGE_2026-07-06.md`. Resumen:
 
 - **Scraper anti-bloqueo (Scrapling)**: `DAILY_SNAPSHOTS/start.py::fetch_html` pasa
   a arquitectura por tiers sobre el choke point único: Tier 1 `Fetcher(impersonate=

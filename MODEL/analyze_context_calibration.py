@@ -31,8 +31,6 @@ from cs2model.metrics import metric_dict
 DEFAULT_MASTER = ROOT / "DAILY_SNAPSHOTS" / "master" / "matches.json"
 DEFAULT_RUNS = ROOT / "DAILY_SNAPSHOTS" / "runs"
 DEFAULT_OUT = ROOT / "MODEL" / "results"
-ROOT_REPORT_MD = ROOT / "context_calibration.md"
-ROOT_REPORT_JSON = ROOT / "context_calibration.json"
 PRODUCTION_MIN_SAMPLES = 200
 PRODUCTION_MIN_GROUP_SAMPLES = 30
 DIAGNOSTIC_MIN_TRAIN = 40
@@ -450,8 +448,6 @@ def main() -> int:
     markdown = markdown_report(report)
     write_json(out_dir / "context_calibration.json", report)
     (out_dir / "CONTEXT_CALIBRATION.md").write_text(markdown, encoding="utf-8")
-    write_json(ROOT_REPORT_JSON, report)
-    ROOT_REPORT_MD.write_text(markdown, encoding="utf-8")
     print(
         json.dumps(
             {
@@ -459,8 +455,6 @@ def main() -> int:
                 "recommendation": report["recommendation"],
                 "json": str(out_dir / "context_calibration.json"),
                 "report": str(out_dir / "CONTEXT_CALIBRATION.md"),
-                "root_json": str(ROOT_REPORT_JSON),
-                "root_report": str(ROOT_REPORT_MD),
             },
             indent=2,
             ensure_ascii=False,

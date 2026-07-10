@@ -6,18 +6,19 @@
      1) Instala/repara el venv del scraper si hace falta.
      2) Scrapea HLTV en vivo, actualiza pendientes y reintenta huecos recientes
         de odds/detalle/Analytics. Si el scrape no produce datos, la pipeline falla.
-     3) Entrena el modelo si falta el artefacto (o si se pasa -Retrain), ya
-        con el master actualizado.
-     4) Enriquece predicciones con el modelo calibrado, odds y flags.
-     5) Analiza si el contexto HLTV ayuda a calibrar el modelo.
-     6) Reconstruye la BBDD SQLite.
-     7) Genera WEB\data.js para el dashboard.
+     3) Ingest pre-entreno a la BBDD viva (hechos/odds/assets/snapshots).
+     4) Entrena el modelo si falta el artefacto (o si se pasa -Retrain), ya
+        con SQLite actualizado.
+     5) Enriquece predicciones con el modelo calibrado, odds y flags.
+     6) Analiza si el contexto HLTV ayuda a calibrar el modelo.
+     7) Ingest final a la BBDD viva SQLite y export compat JSON.
+     8) Genera WEB\data.js para el dashboard.
 
   Flags:
      -SkipScrape             No scrapear; usa el ultimo run existente.
      -AllowOfflineFallback   Si el scrape falla, continuar con el ultimo run.
      -Retrain                Forzar reentrenamiento del modelo.
-     -NoDb                   No reconstruir la BBDD.
+     -NoDb                   No inicializar ni ingerir en la BBDD.
      -MaxMatches N           Limitar numero de partidos a scrapear (debug; no publica master).
      -PlayerDelay S          Retardo entre peticiones de stats de jugador.
      -SkipPlayerStats        No scrapear stats de jugadores.
@@ -44,7 +45,7 @@ param(
     [switch]$SkipPlayerStats,
     [switch]$SkipTeamProfiles,
     [switch]$SkipMatchAssets,
-    [int]$MatchAssetsLimit = 50,
+    [int]$MatchAssetsLimit = 20,
     [double]$MatchAssetsDelay = 1.5,
     [switch]$SkipAnalytics,
     [switch]$SkipRankings,
@@ -61,6 +62,33 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
     $PSNativeCommandUseErrorActionPreference = $false
 }
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LogDir = Join-Path $Root "logs"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
+$script:StartPs1Log = Join-Path $LogDir ("start_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+$script:TranscriptStarted = $false
+try {
+    Start-Transcript -Path $script:StartPs1Log -Force | Out-Null
+    $script:TranscriptStarted = $true
+    Write-Host ("Log start.ps1: " + $script:StartPs1Log) -ForegroundColor DarkGray
+} catch {
+    Write-Host ("AVISO: no se pudo iniciar transcript: " + $_.Exception.Message) -ForegroundColor Yellow
+}
+
+trap {
+    Write-Host ""
+    Write-Host ("ERROR start.ps1: " + $_.Exception.Message) -ForegroundColor Red
+    Write-Host ("Log completo: " + $script:StartPs1Log) -ForegroundColor Yellow
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
+    if ($script:TranscriptStarted) {
+        try {
+            Stop-Transcript | Out-Null
+            $script:TranscriptStarted = $false
+        } catch { }
+    }
+    exit 1
+}
 
 function Step($n, $total, $msg) {
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
@@ -73,9 +101,14 @@ function Invoke-Native {
         [string[]]$Arguments = @(),
         [string]$Description = ""
     )
+    $label = if ($Description) { $Description } else { Split-Path -Leaf $FilePath }
+    $started = Get-Date
+    Write-Host (">> " + $label) -ForegroundColor DarkGray
+    Write-Host ("   " + $FilePath + " " + ($Arguments -join " ")) -ForegroundColor DarkGray
     $stderrFile = New-TemporaryFile
     $oldErrorActionPreference = $ErrorActionPreference
     $oldNativeErrorPreference = $null
+    $exit = $null
     if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
         $oldNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
         $PSNativeCommandUseErrorActionPreference = $false
@@ -94,12 +127,15 @@ function Invoke-Native {
         }
         Remove-Item -LiteralPath $stderrFile.FullName -Force -ErrorAction SilentlyContinue
     }
+    $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
     if ($exit -ne 0) {
+        Write-Host ("<< " + $label + " FAILED exit=" + $exit + " elapsed=" + $elapsed + "s") -ForegroundColor Red
         if ($Description) {
             throw "$Description fallo con exit code $exit."
         }
         throw "Comando fallo con exit code ${exit}: $FilePath $($Arguments -join ' ')"
     }
+    Write-Host ("<< " + $label + " OK exit=0 elapsed=" + $elapsed + "s") -ForegroundColor DarkGray
 }
 
 function Get-SystemPython {
@@ -210,9 +246,16 @@ function Configure-ScrapeGuards {
     Set-DefaultEnv "HLTV_SOLVE_CLOUDFLARE" "1"
     Set-DefaultEnv "HLTV_IMPERSONATE" "chrome"
     Set-DefaultEnv "HLTV_STEALTH_HEADLESS" "1"
-    Set-DefaultEnv "HLTV_STEALTH_TIMEOUT_MS" "90000"
+    Set-DefaultEnv "HLTV_STEALTH_TIMEOUT_MS" "45000"
     Set-DefaultEnv "HLTV_STEALTH_MAX_SOLVES_PER_RUN" "6"
     Set-DefaultEnv "HLTV_SCRAPLING_TIER1_ATTEMPTS" "3"
+    Set-DefaultEnv "HLTV_AUTO_REFRESH_CF_ON_BLOCK" "1"
+    Set-DefaultEnv "HLTV_CF_REFRESH_TIMEOUT_SECONDS" "240"
+    Set-DefaultEnv "HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS" "900"
+    Set-DefaultEnv "BBDD_TEAM_PROFILE_TTL_DAYS" "7"
+    Set-DefaultEnv "BBDD_PLAYER_STATS_TTL_DAYS" "3"
+    Set-DefaultEnv "BBDD_RANKING_TTL_DAYS" "7"
+    Set-DefaultEnv "BBDD_ASSETS_BACKFILL_LIMIT" "20"
     # HLTV_PROXY vacio por defecto (sin proxy). Ej: http://user:pass@host:port
 }
 
@@ -299,7 +342,7 @@ Write-Host ("Python modelo:  " + $ModelPython) -ForegroundColor DarkGray
 if ($ScraperPython) {
     Write-Host ("Python scraper: " + $ScraperPython) -ForegroundColor DarkGray
     Write-Host (
-        "Guardas HLTV: min_interval={0}s attempts={1} base_delay={2}s max_delay={3}s cache_ttl={4}s block_cooldown={5}-{6}s circuit={7}s url_quarantine={8}s max_requests={9}" -f
+        "Guardas HLTV: min_interval={0}s attempts={1} base_delay={2}s max_delay={3}s cache_ttl={4}s block_cooldown={5}-{6}s circuit={7}s url_quarantine={8}s max_requests={9} stealth_timeout={10}ms auto_cf_refresh={11}" -f
         $env:HLTV_FETCH_MIN_INTERVAL,
         $env:HLTV_FETCH_MAX_ATTEMPTS,
         $env:HLTV_FETCH_BASE_DELAY,
@@ -309,7 +352,9 @@ if ($ScraperPython) {
         $env:HLTV_BLOCK_COOLDOWN_MAX,
         $env:HLTV_CIRCUIT_BREAKER_SLEEP,
         $env:HLTV_URL_QUARANTINE_SECONDS,
-        $env:HLTV_MAX_HTTP_REQUESTS_PER_RUN
+        $env:HLTV_MAX_HTTP_REQUESTS_PER_RUN,
+        $env:HLTV_STEALTH_TIMEOUT_MS,
+        $env:HLTV_AUTO_REFRESH_CF_ON_BLOCK
     ) -ForegroundColor DarkGray
 }
 
@@ -319,14 +364,22 @@ $BuildWeb = Join-Path $Root "WEB\build_web.py"
 $Train = Join-Path $Root "MODEL\train.py"
 $ContextCalibration = Join-Path $Root "MODEL\analyze_context_calibration.py"
 $BuildDb = Join-Path $Root "BBDD\build_db.py"
+$IngestDb = Join-Path $Root "BBDD\ingest.py"
+$ExportMaster = Join-Path $Root "BBDD\export_master_json.py"
 $Artifact = Join-Path $Root "MODEL\artifacts\model.pkl"
 $MasterMani = Join-Path $Root "DAILY_SNAPSHOTS\master\manifest.json"
 
 $total = 4
-if (-not $NoDb) { $total++ }
+if (-not $NoDb) { $total += 3 }
 $needTrain = $Retrain -or (-not (Test-Path $Artifact))
 if ($needTrain) { $total++ }
 $n = 0
+
+if (-not $NoDb) {
+    $n++
+    Step $n $total "Inicializando/sembrando BBDD viva si hace falta"
+    Invoke-Native $ModelPython @($BuildDb) "Semilla BBDD"
+}
 
 $n++
 if (-not $SkipScrape) {
@@ -370,6 +423,12 @@ if (-not (Test-Path $RunDir)) {
     throw "El run $($Manifest.last_run_id) no existe en disco."
 }
 
+if (-not $NoDb) {
+    $n++
+    Step $n $total "Ingest pre-entreno a BBDD viva (hechos, odds, assets, snapshots)"
+    Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir, "--no-backup", "--no-mirror-backup") "Ingest pre-entreno BBDD"
+}
+
 if ($needTrain) {
     $n++
     Step $n $total "Entrenando modelo (Glicko-2 + calibracion) con master actualizado"
@@ -386,8 +445,9 @@ Invoke-Native $ModelPython @($ContextCalibration) "Analisis calibracion contexto
 
 if (-not $NoDb) {
     $n++
-    Step $n $total "Reconstruyendo BBDD SQLite (fuente de verdad)"
-    Invoke-Native $ModelPython @($BuildDb) "Reconstruccion BBDD"
+    Step $n $total "Ingest final a BBDD viva (predicciones) + export master JSON compat"
+    Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir) "Ingest incremental BBDD"
+    Invoke-Native $ModelPython @($ExportMaster) "Export master JSON compat"
 }
 
 $n++
@@ -400,3 +460,9 @@ Write-Host ("  Run:       " + $RunDir)
 Write-Host ("  Dashboard: " + (Join-Path $Root "WEB\index.html"))
 Write-Host ("  Contexto:  " + (Join-Path $Root "MODEL\results\CONTEXT_CALIBRATION.md"))
 Write-Host "  Abrir:     start .\WEB\index.html"
+Write-Host ("  Log:       " + $script:StartPs1Log)
+
+if ($script:TranscriptStarted) {
+    Stop-Transcript | Out-Null
+    $script:TranscriptStarted = $false
+}

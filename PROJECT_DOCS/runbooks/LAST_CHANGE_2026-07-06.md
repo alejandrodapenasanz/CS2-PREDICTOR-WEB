@@ -7,7 +7,7 @@
 
 Rama: `dev`. Origen de los cambios: iteración del 2026-07-06.
 Repo: predictor pre-partido de CS2 (HLTV → Glicko-2 + GBDT calibrado → web). Detalle
-de diseño en `PROJECT.md`; features latentes en `extra_features.md`.
+de diseño en `../../PROJECT.md`; features latentes en `../extra_features.md`.
 
 ---
 
@@ -253,7 +253,7 @@ Descartado a propósito: **stacking meta-aprendido** (el artefacto reproduce med
 ponderadas de componentes, no un meta-modelo); `ensemble3_cal` captura casi todo el
 beneficio de forma reproducible. Los ítems estructurales de mayor impacto de la
 literatura (composicional Bo3 por mapa/veto; ratings por jugador TrueSkill/WHR) **no**
-se incluyen: build mayor y *gated* por muestra point-in-time (ver `extra_features.md`).
+se incluyen: build mayor y *gated* por muestra point-in-time (ver `../extra_features.md`).
 
 Selección/guardado: `candidate_specs(has_catboost)` define `name -> (kinds, método)`;
 `walk_forward` los evalúa; `main` elige el de menor log loss y reconstruye el candidato

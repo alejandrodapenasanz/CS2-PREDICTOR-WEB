@@ -1,56 +1,92 @@
 # Verificacion modelo rama dev - 2026-07-06
 
-## Resumen
+## Resumen ejecutivo
 
-- Datos: 9.444 series (2025-09-11 -> 2026-07-06).
-- CatBoost: instalado, pero el smoke exacto con CatBoost agoto 20 min y se descarto para esta verificacion. El A/B final se hizo con `--no-catboost`.
-- Smoke test sintetico sin CatBoost: OK. Mejor candidato sintetico: `ensemble_beta`.
-- Scraper online: OK en run debug `2026-07-06_133146Z`, `scrapling_successes=44`, bloqueos=0, errores=0, Analytics=3/3.
+- Datos: 9.444 series (2025-09-11 -> 2026-07-06), 7.008 filas de test walk-forward.
+- CatBoost: instalado y validado en el sweep profesional completo.
+- Modelo de produccion final: `ensemble3_cal`.
+- Componentes: `logistic + lightgbm + catboost`.
+- Calibracion: `sigmoid` (Platt).
+- Configuracion final: `--form-half-life 90 --wf-gap 0`.
+- Artefacto final: `MODEL/artifacts/model.pkl`, validado con `load_artifact()`.
+- Predicciones/web/BBDD: regeneradas con el artefacto `ensemble3_cal`.
 
-## A/B principal
+La metrica de seleccion es **log loss walk-forward**, no accuracy bruta. Para un sistema
+de apuestas importa que las probabilidades esten calibradas, porque EV/Kelly dependen de
+la calidad probabilistica.
+
+## Resultado final con CatBoost
+
+| Config | Modelo produccion | Log loss | Brier | ROC-AUC | ECE 10 | Accuracy |
+|---|---|---:|---:|---:|---:|---:|
+| `h90_gap0` | `ensemble3_cal` | 0.629060 | 0.219697 | 0.691178 | 0.019894 | 0.644977 |
+
+Accuracy final: **64.4977%**.
+
+## Barrido profesional half-life / gap con CatBoost
+
+| Config | Modelo | Log loss | Brier | ROC-AUC | ECE 10 | Accuracy |
+|---|---|---:|---:|---:|---:|---:|
+| `h90_gap0` | `ensemble3_cal` | 0.629060 | 0.219697 | 0.691178 | 0.019894 | 0.644977 |
+| `h60_gap0` | `ensemble3_cal` | 0.629241 | 0.219785 | 0.690732 | 0.018490 | 0.644264 |
+| `h45_gap0` | `ensemble3_cal` | 0.629294 | 0.219814 | 0.690574 | 0.017982 | 0.643693 |
+| `h180_gap0` | `ensemble3_cal` | 0.629481 | 0.219874 | 0.690607 | 0.018541 | 0.643550 |
+| `h120_gap0` | `ensemble3_cal` | 0.629681 | 0.219983 | 0.689929 | 0.018696 | 0.641695 |
+| `h60_gap1` | `ensemble3_cal` | 0.630500 | 0.220364 | 0.688376 | 0.017363 | 0.644121 |
+| `h45_gap1` | `ensemble_beta` | 0.630551 | 0.220432 | 0.687727 | 0.012745 | 0.643550 |
+| `h180_gap1` | `ensemble3_cal` | 0.630650 | 0.220431 | 0.688078 | 0.017739 | 0.645263 |
+| `h90_gap1` | `ensemble3_cal` | 0.630687 | 0.220454 | 0.687969 | 0.015533 | 0.644264 |
+| `h120_gap1` | `ensemble3_cal` | 0.630755 | 0.220485 | 0.687803 | 0.017425 | 0.643836 |
+
+Nota: `h180_gap1` tiene una accuracy ligeramente mayor (64.5263%), pero peor log loss
+que `h90_gap0`. Por eso no pasa a produccion.
+
+## Comparacion contra verificaciones anteriores
 
 | Variante | Modelo produccion | Log loss | Brier | ROC-AUC | ECE 10 | Accuracy |
 |---|---|---:|---:|---:|---:|---:|
 | Baseline `main` | `ensemble_cal` | 0.630430 | 0.220316 | 0.688625 | 0.016633 | 0.648116 |
-| Dev default h120 | `ensemble_beta` | 0.630166 | 0.220256 | 0.688767 | 0.014963 | 0.643408 |
-| Dev final h45 | `ensemble_beta` | 0.629296 | 0.219890 | 0.690081 | 0.015874 | 0.646689 |
+| Dev sin CatBoost h45 | `ensemble_beta` | 0.629296 | 0.219890 | 0.690081 | 0.015874 | 0.646689 |
+| Dev profesional CatBoost h90 | `ensemble3_cal` | 0.629060 | 0.219697 | 0.691178 | 0.019894 | 0.644977 |
 
-Delta final vs baseline:
+Delta final CatBoost vs baseline `main`:
 
-- Log loss: -0.001134 (mejora; menor es mejor).
-- Brier: -0.000426.
-- ROC-AUC: +0.001456.
-- ECE 10: -0.000759.
-- Accuracy: -0.001427.
+- Log loss: -0.001370 (mejora; menor es mejor).
+- Brier: -0.000619.
+- ROC-AUC: +0.002553.
+- ECE 10: +0.003261.
+- Accuracy: -0.003139.
 
-Veredicto: **MEJORA**. El objetivo principal es log loss/calibracion; la caida de accuracy es de 0.14 puntos porcentuales y queda compensada por mejor log loss, Brier, AUC y ECE.
-
-## Barrido de half-life / gap
-
-| Config | Modelo | Log loss | Brier | ROC-AUC | ECE 10 | Accuracy |
-|---|---|---:|---:|---:|---:|---:|
-| `--form-half-life 45` | `ensemble_beta` | 0.629296 | 0.219890 | 0.690081 | 0.015874 | 0.646689 |
-| `--form-half-life 60` | `ensemble_beta` | 0.629595 | 0.219998 | 0.689827 | 0.015684 | 0.644692 |
-| `--form-half-life 90` | `ensemble_beta` | 0.629549 | 0.219977 | 0.689897 | 0.014715 | 0.644406 |
-| `--form-half-life 120` | `ensemble_beta` | 0.630166 | 0.220256 | 0.688767 | 0.014963 | 0.643408 |
-| `--form-half-life 180` | `ensemble_beta` | 0.629857 | 0.220115 | 0.689455 | 0.014720 | 0.644549 |
-| `--wf-gap 1` | `ensemble_beta` | 0.631095 | 0.220672 | 0.686782 | 0.013939 | 0.642694 |
-
-Seleccion final: `--form-half-life 45 --no-catboost --wf-gap 0`.
+Veredicto: **MEJORA PROFESIONAL EN LOG LOSS / BRIER / AUC**. La accuracy baja frente
+al baseline por 0.31 puntos porcentuales, pero la seleccion correcta para betting es la
+probabilidad calibrada. La ECE empeora ligeramente, aunque queda dentro del margen
+aceptable definido por el runbook (`ECE_dev <= ECE_baseline + 0.01`).
 
 ## Artefacto final
 
-- `production_model`: `ensemble_beta`
-- `production_calibration`: `beta`
-- `production_components`: `['logistic', 'lightgbm']`
-- `catboost_enabled`: `False`
-- `form_half_life_days`: `45.0`
+- `production_model`: `ensemble3_cal`
+- `production_calibration`: `sigmoid`
+- `production_components`: `['logistic', 'lightgbm', 'catboost']`
+- `catboost_enabled`: `True`
+- `form_half_life_days`: `90.0`
 - `walk_forward_gap`: `0`
+- `n_train_rows`: `9444`
+- `date_min`: `2025-09-11`
+- `date_max`: `2026-07-06`
 
-El artefacto se verifico con `load_artifact()` y una prediccion minima (`p_zero_row=0.525456063657838`). `DAILY_SNAPSHOTS/enrich_predictions.py` tambien cargo el modelo correctamente y genero 18 predicciones.
+## Regeneracion posterior
 
-## Notas
+- `DAILY_SNAPSHOTS/enrich_predictions.py`: OK, cargo `ensemble3_cal` y genero 17 predicciones.
+- `MODEL/analyze_context_calibration.py`: OK, contexto sigue en `insufficient_sample` (90 muestras, minimo 200).
+- `BBDD/build_db.py`: OK, `predictions_rows=17`, `odds_rows=484`, `player_stat_snapshots_rows=3712`.
+- `WEB/build_web.py`: OK, `WEB/data.js` generado con 17 partidos y modelo `ensemble3_cal`.
 
-- El fallo inicial de carga del artefacto con `ensemble_beta` revelo que `BetaCalibratedClassifier` estaba serializado como `__main__`. Se corrigio moviendolo a `MODEL/cs2model/calibration.py`.
-- La prueba online del scraper detecto y corrigio problemas de PowerShell en `start.ps1`: quoting de `python -c`, tracebacks de import probing y contaminacion del pipeline por stdout/stderr nativo.
-- El run debug con `-MaxMatches 3` no promueve master, por diseno.
+## Archivos de auditoria
+
+- Output completo: `MODEL/results/professional_train_20260706_173628/professional_training_output.md`.
+- Copia timestamped: `MODEL/results/professional_train_20260706_173628/professional_training_output_20260706_173628.md`.
+- Reportes por configuracion: `MODEL/results/professional_train_20260706_173628/`.
+- Reporte final activo: `MODEL/results/REPORT.md`.
+
+Los logs grandes quedan ignorados por git para no versionar artefactos pesados, pero se
+mantienen en disco para estudiar el entrenamiento.

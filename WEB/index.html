@@ -181,13 +181,37 @@
 
     /* model view */
     .mgrid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; align-items:start; }
+    .dbgrid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; align-items:start; }
+    .dbwide { grid-column: 1 / -1; }
+    .table-scroll { overflow-x: auto; }
+    .sample-low td { color: var(--muted); }
+    .cal-gap.good { color: var(--green); }
+    .cal-gap.watch { color: var(--amber); }
     .shapbar { display:grid; grid-template-columns: 200px 1fr 56px; gap:10px; align-items:center; margin:7px 0; font-size:12px; }
     .shapbar .lab { color: var(--muted); font-family: ui-monospace, monospace; }
+    .health { font-family: ui-monospace, monospace; font-weight: 900; text-transform: uppercase; }
+    .health.ok { color: var(--green); }
+    .health.warning { color: var(--amber); }
+    .health.error, .health.missing { color: var(--red-soft); }
+    .dbline { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.05); }
+    .dbline:last-child { border-bottom:0; }
+    .dbline .key { color: var(--muted); }
+    .dbline .val { font-family: ui-monospace, monospace; text-align:right; overflow-wrap:anywhere; }
     canvas { width: 100%; max-width: 420px; }
     .hidden { display: none !important; }
     .winrow td { font-family: ui-monospace, monospace; }
     .winrow.best td { color:#fff; background: rgba(255,39,64,.08); }
-    @media (max-width: 1100px) { .layout, .mgrid { grid-template-columns: 1fr; } aside { position: static; max-height: none; } .controls { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 1100px) { .layout, .mgrid, .dbgrid { grid-template-columns: 1fr; } aside { position: static; max-height: none; } .controls { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 600px) {
+      body { overflow-x: hidden; }
+      .wrap { padding: 0 12px; }
+      .topbar { gap: 10px; }
+      .model-badge { margin-left: 0; width: 100%; white-space: normal; overflow-wrap: anywhere; font-size: 10px; }
+      .tabs { overflow-x: auto; max-width: 100%; }
+      .tab { flex: 0 0 auto; padding: 10px 14px; }
+      .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .dbgrid, .panel, .table-scroll { min-width: 0; max-width: 100%; }
+    }
   </style>
 </head>
 <body>
@@ -207,6 +231,7 @@
         <button class="tab active" data-view="matches">▤ Partidos</button>
         <button class="tab" data-view="best">★ Best Opportunity <span class="dot" id="bestCount"></span></button>
         <button class="tab" data-view="model">◈ Modelo</button>
+        <button class="tab" data-view="database">BBDD <span class="dot" id="dbHealthDot"></span></button>
       </div>
       <div class="controls" id="controls">
         <input id="search" placeholder="▷ Buscar equipo, torneo, partido…">
@@ -296,11 +321,58 @@
         </div>
       </div>
     </section>
+
+    <!-- VIEW: DATABASE -->
+    <section id="view-database" class="hidden">
+      <div class="kpis" id="dbKpis"></div>
+      <div class="dbgrid">
+        <div class="panel dbwide">
+          <div class="panel-title"><span>// Accuracy walk-forward por probabilidad</span><span class="small" id="dbAccuracyMeta">-</span></div>
+          <div class="table-scroll">
+            <table><thead><tr><th>Probabilidad</th><th>Aciertos</th><th>N</th><th>Accuracy</th><th>Prob. media</th><th>Gap calibracion</th></tr></thead><tbody id="dbAccuracyRows"></tbody></table>
+          </div>
+          <div class="small" style="padding:9px 12px" id="dbAccuracyNote"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Estado SQLite</span><span class="health" id="dbHealth">-</span></div>
+          <div style="padding:12px 14px" id="dbFilesBox"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Integridad</span></div>
+          <div style="padding:12px 14px" id="dbIntegrityBox"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Tablas persistidas</span></div>
+          <table><thead><tr><th>Tabla</th><th>Filas</th></tr></thead><tbody id="dbTablesRows"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Cobertura pre-match</span></div>
+          <table><thead><tr><th>Flag</th><th>Capturados</th><th>%</th></tr></thead><tbody id="dbCoverageRows"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Fetch state</span><span class="small">frescura y bloqueos</span></div>
+          <table><thead><tr><th>Entidad</th><th>Total</th><th>OK</th><th>Fresh</th><th>Issues</th></tr></thead><tbody id="dbFetchRows"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Ultimos ingest</span></div>
+          <table><thead><tr><th>Run</th><th>Estado</th><th>Req.</th><th>Skip fresh</th><th>Rows</th></tr></thead><tbody id="dbIngestRows"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Pendientes / bloqueados</span></div>
+          <table><thead><tr><th>Entidad</th><th>Key</th><th>Estado</th><th>Reintento</th></tr></thead><tbody id="dbProblemRows"></tbody></table>
+        </div>
+        <div class="panel">
+          <div class="panel-title"><span>// Backups</span></div>
+          <table><thead><tr><th>Archivo</th><th>Tamano</th><th>Modificado</th></tr></thead><tbody id="dbBackupRows"></tbody></table>
+        </div>
+      </div>
+    </section>
   </main>
 
   <script>
-    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {} };
+    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {} };
     const M = DATA.matches || [];
+    const DB = DATA.database || {};
     const state = { view: "matches", selected: null };
     const $ = (id) => document.getElementById(id);
 
@@ -308,7 +380,15 @@
     const pct = (x) => x == null || isNaN(x) ? "—" : `${(x*100).toFixed(1)}%`;
     const sg = (x) => x == null || isNaN(x) ? "—" : `${x>=0?"+":""}${(x*100).toFixed(1)}%`;
     const num = (x,d=2) => x == null || isNaN(x) ? "—" : Number(x).toFixed(d);
+    const intfmt = (x) => x == null || isNaN(x) ? "—" : Number(x).toLocaleString("es-ES");
+    const bytes = (x) => {
+      if (x == null || isNaN(x)) return "—";
+      const units=["B","KB","MB","GB"]; let n=Number(x), i=0;
+      while(n>=1024 && i<units.length-1){ n/=1024; i++; }
+      return `${n.toFixed(i?1:0)} ${units[i]}`;
+    };
     const esc = (s) => String(s ?? "").replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    const shortPath = (s) => String(s || "").replaceAll("\\","/");
     const tn = (m,s) => m[s]?.name || "TBD";
     const sideName = (m,s) => s==="team1" ? tn(m,"team1") : tn(m,"team2");
     function logo(m,s){ const u=m[s]?.logo, n=tn(m,s); return u ? `<img class="logo-sm" src="${esc(u)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'tinitial',textContent:'${esc((n||'?')[0])}'}))">` : `<span class="tinitial">${esc((n||'?')[0])}</span>`; }
@@ -669,6 +749,109 @@
         <div class="small" style="margin-top:8px">Cuanto más pegada a la diagonal, mejor calibrado. Validado solo con resultados reales post-snapshot.</div>`;
     }
 
+    // ---------- database view ----------
+    function renderDatabase(){
+      const tableRows = DB.table_counts || [];
+      const tcount = (name) => tableRows.find(t=>t.name===name)?.rows ?? 0;
+      const integrity = DB.integrity || {};
+      const pragmas = DB.pragmas || {};
+      const favoriteAccuracy = DATA.model?.favorite_accuracy || {};
+      const health = DB.health || (DB.exists ? "unknown" : "missing");
+      const healthEl = $("dbHealth");
+      healthEl.textContent = health;
+      healthEl.className = `health ${health}`;
+      const dot = $("dbHealthDot");
+      if(dot){
+        dot.textContent = health === "ok" ? "OK" : "!";
+        dot.style.color = health === "ok" ? "var(--green)" : health === "warning" ? "var(--amber)" : "var(--red-soft)";
+      }
+
+      $("dbKpis").innerHTML = [
+        [pct(favoriteAccuracy.accuracy), "accuracy modelo"],
+        [intfmt(favoriteAccuracy.n), "muestra walk-forward"],
+        [intfmt(tcount("matches")), "matches"],
+        [intfmt(tcount("odds")), "odds"],
+        [intfmt(tcount("player_stat_snapshots")), "player snapshots"],
+        [intfmt(tcount("team_ranking_snapshots")), "ranking snapshots"],
+        [intfmt(tcount("raw_snapshots")), "raw snapshots"],
+        [intfmt(integrity.fresh_entities), "fetch frescos"],
+        [intfmt((integrity.blocked_fetches||0)+(integrity.error_fetches||0)+(integrity.partial_fetches||0)), "fetch issues"],
+      ].map(([a,b])=>`<div class="kpi"><b>${a}</b><span>${b}</span></div>`).join("");
+
+      const accuracyBands = favoriteAccuracy.bands || [];
+      const accuracyMeta = [favoriteAccuracy.model, favoriteAccuracy.trained_at]
+        .filter(Boolean).map(esc).join(" · ");
+      $("dbAccuracyMeta").textContent = accuracyMeta || "sin entreno";
+      const accuracyRows = accuracyBands.map(b=>{
+        const gap = Number(b.calibration_gap);
+        const gapClass = Math.abs(gap) <= 0.02 ? "good" : "watch";
+        const rowClass = b.representative === false ? "sample-low" : "";
+        return `<tr class="winrow ${rowClass}"><td>${esc(b.band)}</td><td>${intfmt(b.correct)} / ${intfmt(b.n)}</td><td>${intfmt(b.n)}</td><td>${pct(b.accuracy)}</td><td>${pct(b.average_predicted_probability)}</td><td class="cal-gap ${gapClass}">${sg(b.calibration_gap)}</td></tr>`;
+      });
+      if(accuracyBands.length){
+        accuracyRows.push(`<tr class="winrow best"><td>Total</td><td>${intfmt(favoriteAccuracy.correct)} / ${intfmt(favoriteAccuracy.n)}</td><td>${intfmt(favoriteAccuracy.n)}</td><td>${pct(favoriteAccuracy.accuracy)}</td><td>—</td><td>—</td></tr>`);
+      }
+      $("dbAccuracyRows").innerHTML = accuracyRows.join("") || '<tr><td colspan="6" class="empty">Sin evaluación walk-forward</td></tr>';
+      $("dbAccuracyNote").textContent = accuracyBands.some(b=>b.representative === false)
+        ? "Las franjas con menos de 30 partidos se muestran atenuadas: muestra insuficiente para concluir."
+        : "Todas las franjas tienen al menos 30 partidos.";
+
+      const fileLine = (label, file) => `<div class="dbline"><span class="key">${esc(label)}</span><span class="val">${file?.exists ? `${bytes(file.size_bytes)} · ${esc(shortPath(file.relative_path))}` : "no existe"}</span></div>`;
+      $("dbFilesBox").innerHTML = [
+        fileLine("SQLite", DB.db),
+        fileLine("WAL", DB.wal),
+        fileLine("SHM", DB.shm),
+        fileLine("Dump SQL", DB.dump),
+        `<div class="dbline"><span class="key">generado</span><span class="val">${esc(DB.generated_at_utc || "—")}</span></div>`,
+      ].join("");
+
+      const groupLine = (label, rows) => `<div class="dbline"><span class="key">${esc(label)}</span><span class="val">${(rows||[]).map(r=>`${esc(r.label || "unknown")}:${intfmt(r.count)}`).join(" · ") || "—"}</span></div>`;
+      $("dbIntegrityBox").innerHTML = [
+        `<div class="dbline"><span class="key">foreign_keys</span><span class="val">${pragmas.foreign_keys === 1 ? "ON" : esc(pragmas.foreign_keys ?? "—")}</span></div>`,
+        `<div class="dbline"><span class="key">journal_mode</span><span class="val">${esc(pragmas.journal_mode || "—")}</span></div>`,
+        `<div class="dbline"><span class="key">quick_check</span><span class="val">${esc(pragmas.quick_check || "—")}</span></div>`,
+        `<div class="dbline"><span class="key">foreign key issues</span><span class="val">${intfmt(pragmas.foreign_key_issues)}</span></div>`,
+        `<div class="dbline"><span class="key">leakage rows</span><span class="val">${intfmt(integrity.leakage_rows)}</span></div>`,
+        `<div class="dbline"><span class="key">matches no seed</span><span class="val">${intfmt(integrity.non_seed_matches)}</span></div>`,
+        groupLine("status", DB.matches_by_status),
+        groupLine("tier", DB.matches_by_tier),
+        groupLine("entorno", DB.matches_by_environment),
+        ...(DB.notes||[]).map(n=>`<div class="dbline"><span class="key">nota</span><span class="val">${esc(n)}</span></div>`),
+      ].join("");
+
+      $("dbTablesRows").innerHTML = tableRows
+        .map(r=>`<tr class="winrow"><td>${esc(r.name)}</td><td>${intfmt(r.rows)}</td></tr>`)
+        .join("") || '<tr><td colspan="2" class="empty">Sin tablas leidas</td></tr>';
+
+      $("dbCoverageRows").innerHTML = (DB.coverage||[])
+        .map(r=>`<tr class="winrow"><td>${esc(r.flag)}</td><td>${intfmt(r.count)} / ${intfmt(r.total)}</td><td>${pct(r.ratio)}</td></tr>`)
+        .join("") || '<tr><td colspan="3" class="empty">Sin cobertura calculada</td></tr>';
+
+      $("dbFetchRows").innerHTML = (DB.fetch_summary||[]).map(r=>{
+        const issues = Number(r.blocked||0)+Number(r.error||0)+Number(r.partial||0);
+        const color = issues ? "var(--amber)" : "var(--green)";
+        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${intfmt(r.total)}</td><td>${intfmt(r.ok)}</td><td>${intfmt(r.fresh)}</td><td style="color:${color}">${intfmt(issues)}</td></tr>`;
+      }).join("") || '<tr><td colspan="5" class="empty">Sin fetch_state</td></tr>';
+
+      const rowsSummary = (rows) => {
+        const entries = Object.entries(rows || {}).sort((a,b)=>b[1]-a[1]).slice(0,4);
+        return entries.length ? entries.map(([k,v])=>`${esc(k)}:${intfmt(v)}`).join(" · ") : "—";
+      };
+      $("dbIngestRows").innerHTML = (DB.recent_ingests||[]).map(r=>{
+        const color = r.status === "ok" ? "var(--green)" : r.status === "partial" ? "var(--amber)" : "var(--red-soft)";
+        return `<tr class="winrow"><td>${esc(r.run_id)}</td><td style="color:${color}">${esc(r.status||"—")}</td><td>${intfmt(r.requests_made)}</td><td>${intfmt(r.requests_skipped_by_freshness)}</td><td>${rowsSummary(r.rows_upserted)}</td></tr>`;
+      }).join("") || '<tr><td colspan="5" class="empty">Sin ingest_runs</td></tr>';
+
+      $("dbProblemRows").innerHTML = (DB.fetch_problem_rows||[]).map(r=>{
+        const color = r.last_status === "blocked" ? "var(--amber)" : r.last_status === "partial" ? "var(--cyan)" : "var(--red-soft)";
+        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${esc(r.entity_key)}</td><td style="color:${color}">${esc(r.last_status)}</td><td>${esc(r.next_eligible_at_utc || "—")}</td></tr>`;
+      }).join("") || '<tr><td colspan="4" class="empty">Sin bloqueos ni parciales recientes</td></tr>';
+
+      $("dbBackupRows").innerHTML = (DB.backups||[]).map(b=>
+        `<tr class="winrow"><td>${esc(shortPath(b.relative_path))}</td><td>${bytes(b.size_bytes)}</td><td>${esc(b.modified_at || "—")}</td></tr>`
+      ).join("") || '<tr><td colspan="3" class="empty">Sin backups encontrados</td></tr>';
+    }
+
     // ---------- views ----------
     function setView(v){
       state.view=v;
@@ -676,14 +859,21 @@
       $("view-matches").classList.toggle("hidden",v!=="matches");
       $("view-best").classList.toggle("hidden",v!=="best");
       $("view-model").classList.toggle("hidden",v!=="model");
+      $("view-database").classList.toggle("hidden",v!=="database");
       $("controls").style.display = v==="matches" ? "" : "none";
-      if(v==="best") renderBest(); if(v==="model") renderModel();
+      if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase();
     }
 
     function init(){
       const man = DATA.manifest||{};
       $("runInfo").textContent = `RUN ${man.run_id||man.last_run_id||"?"} · ${M.length} partidos · ${DATA.generatedAt||man.finished_at||""}`;
       $("modelBadge").textContent = "◈ " + (DATA.model?.production_model || "modelo no cargado");
+      const dbDot = $("dbHealthDot");
+      if(dbDot){
+        const health = DB.health || (DB.exists ? "unknown" : "missing");
+        dbDot.textContent = health === "ok" ? "OK" : "!";
+        dbDot.style.color = health === "ok" ? "var(--green)" : health === "warning" ? "var(--amber)" : "var(--red-soft)";
+      }
       document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setView(t.dataset.view));
       ["search","flagFilter","oddsFilter","sortBy"].forEach(id=>$(id).oninput=renderRows);
       $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");$("sortBy").value="confidence";renderRows();};

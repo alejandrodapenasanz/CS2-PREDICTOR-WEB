@@ -1,4 +1,4 @@
-"""Construye la base de datos SQLite del predictor desde los datos scrapeados.
+"""Inicializa/migra la base SQLite viva del predictor.
 
 Materializa la arquitectura de tres capas de PROJECT.md (§4.4):
 
@@ -13,7 +13,11 @@ SQLite viene incluido en Python: no requiere instalar nada.
 
 Uso:
     python BBDD/build_db.py
-    python BBDD/build_db.py --raw <results_all.json> --db <salida.db> --enriched <predictions_enriched.json> --master <matches.json>
+    python BBDD/build_db.py --raw <results_all.json> --db <salida.db> --master <matches.json>
+
+Si `matches` ya contiene filas, no borra ni reconstruye: solo asegura el
+esquema vivo (`fetch_state`, `ingest_runs`, flags de cobertura). La ingesta
+diaria incremental vive en `BBDD/ingest.py`.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ import sys
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -58,6 +63,94 @@ def utcnow() -> str:
 
 def create_schema(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA.read_text(encoding="utf-8"))
+
+
+MATCH_LIVE_COLUMNS: dict[str, str] = {
+    "hltv_match_id": "TEXT",
+    "status": "TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('scheduled','pending_result','completed'))",
+    "data_tier": "TEXT NOT NULL DEFAULT 'historical_seed' CHECK (data_tier IN ('historical_seed','prematch_captured','completed'))",
+    "prematch_captured_at_utc": "TEXT",
+    "result_filled_at_utc": "TEXT",
+    "has_prematch_odds": "INTEGER NOT NULL DEFAULT 0 CHECK (has_prematch_odds IN (0,1))",
+    "has_player_snapshot": "INTEGER NOT NULL DEFAULT 0 CHECK (has_player_snapshot IN (0,1))",
+    "has_ranking_snapshot": "INTEGER NOT NULL DEFAULT 0 CHECK (has_ranking_snapshot IN (0,1))",
+    "has_analytics": "INTEGER NOT NULL DEFAULT 0 CHECK (has_analytics IN (0,1))",
+    "has_context": "INTEGER NOT NULL DEFAULT 0 CHECK (has_context IN (0,1))",
+    "has_box_score": "INTEGER NOT NULL DEFAULT 0 CHECK (has_box_score IN (0,1))",
+    "has_veto": "INTEGER NOT NULL DEFAULT 0 CHECK (has_veto IN (0,1))",
+}
+
+
+def configure_connection(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+
+
+def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    try:
+        return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.DatabaseError:
+        return set()
+
+
+def ensure_live_schema(conn: sqlite3.Connection) -> None:
+    configure_connection(conn)
+    tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not tables:
+        create_schema(conn)
+        return
+
+    existing = table_columns(conn, "matches")
+    for column, ddl in MATCH_LIVE_COLUMNS.items():
+        if column not in existing:
+            conn.execute(f"ALTER TABLE matches ADD COLUMN {column} {ddl}")
+
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS fetch_state (
+            entity_type   TEXT NOT NULL CHECK (entity_type IN
+                            ('team_profile','player_stats','ranking_hltv','ranking_valve',
+                             'match_detail','match_assets','match_analytics')),
+            entity_key    TEXT NOT NULL,
+            last_fetched_at_utc  TEXT,
+            last_status   TEXT CHECK (last_status IN ('ok','partial','blocked','not_found','error')),
+            fetch_count   INTEGER NOT NULL DEFAULT 0,
+            next_eligible_at_utc TEXT,
+            note          TEXT,
+            PRIMARY KEY (entity_type, entity_key)
+        );
+        CREATE TABLE IF NOT EXISTS ingest_runs (
+            ingest_id     INTEGER PRIMARY KEY,
+            run_id        TEXT NOT NULL,
+            started_at_utc  TEXT NOT NULL,
+            finished_at_utc TEXT,
+            status        TEXT CHECK (status IN ('ok','partial','failed')),
+            rows_upserted_json TEXT,
+            requests_made INTEGER,
+            requests_skipped_by_freshness INTEGER,
+            note          TEXT
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_hltv ON matches(hltv_match_id);
+        CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
+        CREATE INDEX IF NOT EXISTS idx_matches_tier ON matches(data_tier);
+        CREATE INDEX IF NOT EXISTS idx_fetch_state_eligible ON fetch_state(entity_type, next_eligible_at_utc);
+        """
+    )
+
+
+def connect_live_db(db_path: Path) -> sqlite3.Connection:
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    ensure_live_schema(conn)
+    return conn
+
+
+def table_count(conn: sqlite3.Connection, table: str) -> int:
+    try:
+        row = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+        return int(row[0] or 0)
+    except sqlite3.DatabaseError:
+        return 0
 
 
 def latest_enriched() -> Path | None:
@@ -911,6 +1004,269 @@ def backup_database(db_path: Path, backup_dir: Path | None, mirror_dir: Path | N
     return result
 
 
+def _event_id_for(cur: sqlite3.Cursor, event_cache: dict[str, int], name: str | None) -> int:
+    event_name = name or "Unknown event"
+    if event_name in event_cache:
+        return event_cache[event_name]
+    cur.execute(
+        "INSERT OR IGNORE INTO events(name, is_lan) VALUES (?,0)",
+        (event_name,),
+    )
+    row = cur.execute("SELECT event_id FROM events WHERE name = ?", (event_name,)).fetchone()
+    if not row:
+        raise RuntimeError(f"No se pudo crear/leer event: {event_name}")
+    event_cache[event_name] = int(row[0])
+    return event_cache[event_name]
+
+
+def _team_id_for(
+    cur: sqlite3.Cursor,
+    team_cache: dict[str, int],
+    team_hltv_cache: dict[str, int],
+    *,
+    name: str,
+    hltv_id: str | None = None,
+) -> int:
+    hltv_key = str(hltv_id or "").strip()
+    if hltv_key and hltv_key in team_hltv_cache:
+        return team_hltv_cache[hltv_key]
+    key = dataio.clean_team(name)
+    if key in team_cache:
+        return team_cache[key]
+    hltv_int = int(hltv_key) if hltv_key.isdigit() else None
+    cur.execute(
+        "INSERT OR IGNORE INTO teams(name, hltv_id) VALUES (?,?)",
+        (name, hltv_int),
+    )
+    if hltv_int is not None:
+        row = cur.execute("SELECT team_id FROM teams WHERE hltv_id = ?", (hltv_int,)).fetchone()
+    else:
+        row = cur.execute("SELECT team_id FROM teams WHERE lower(name) = lower(?) ORDER BY team_id LIMIT 1", (name,)).fetchone()
+    if not row:
+        raise RuntimeError(f"No se pudo crear/leer team: {name}")
+    team_id = int(row[0])
+    team_cache[key] = team_id
+    if hltv_key:
+        team_hltv_cache[hltv_key] = team_id
+    return team_id
+
+
+def _load_team_caches(conn: sqlite3.Connection) -> tuple[dict[str, int], dict[str, int]]:
+    by_name: dict[str, int] = {}
+    by_hltv: dict[str, int] = {}
+    for team_id, name, hltv_id in conn.execute("SELECT team_id, name, hltv_id FROM teams"):
+        by_name[dataio.clean_team(name)] = int(team_id)
+        if hltv_id is not None:
+            by_hltv[str(hltv_id)] = int(team_id)
+    return by_name, by_hltv
+
+
+def _load_event_cache(conn: sqlite3.Connection) -> dict[str, int]:
+    return {str(name): int(event_id) for event_id, name in conn.execute("SELECT event_id, name FROM events")}
+
+
+def _match_id_for_hltv(conn: sqlite3.Connection, hltv_match_id: str) -> int | None:
+    row = conn.execute("SELECT match_id FROM matches WHERE hltv_match_id = ?", (hltv_match_id,)).fetchone()
+    return int(row[0]) if row else None
+
+
+def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dict[str, int]:
+    """Recalcula ratings_history/match_features point-in-time para filas con hltv id.
+
+    Se borra solo el mart derivado: los hechos core y snapshots no se tocan. Cada
+    feature se emite antes de observar el resultado del propio partido.
+    """
+    cur = conn.cursor()
+    cur.execute("DELETE FROM ratings_history")
+    cur.execute("DELETE FROM match_features")
+    state = ChronologicalState()
+    n_ratings = 0
+    n_features = 0
+    for row in rows:
+        match_id = int(row["db_match_id"]) if row.get("db_match_id") else None
+        if match_id is None:
+            hltv_id = str(row.get("id") or "")
+            match_id = _match_id_for_hltv(conn, hltv_id)
+        if match_id is None:
+            continue
+        date_obj = row.get("date_obj")
+        period = _period_index(date_obj)
+        state._advance_to(period)
+        for key_name, id_name in (("team1_key", "team1_id"), ("team2_key", "team2_id")):
+            team_key = row[key_name]
+            db_team_id_row = conn.execute(
+                "SELECT team1_id, team2_id FROM matches WHERE match_id = ?",
+                (match_id,),
+            ).fetchone()
+            if not db_team_id_row:
+                continue
+            db_team_id = int(db_team_id_row[0] if key_name == "team1_key" else db_team_id_row[1])
+            card = state.rating_card(team_key, date_obj)
+            cur.execute(
+                "INSERT OR REPLACE INTO ratings_history(entity_type, entity_id, before_match_id, "
+                "as_of_date, rating, rd, sigma) VALUES ('team',?,?,?,?,?,?)",
+                (db_team_id, match_id, row["date"], card["glicko_rating"], card["glicko_rd"], card["glicko_sigma"]),
+            )
+            n_ratings += 1
+            fr = state.team_feature_row(team_key, date_obj)
+            cur.execute(
+                "INSERT OR REPLACE INTO match_features(match_id, team_id, data_up_to_utc, glicko_rating, "
+                "glicko_rd, glicko_sigma, elo, form_winrate_10, form_winrate_20, winrate_overall, "
+                "avg_score_diff, recent_opp_elo, streak, matches_played, days_since_last) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    match_id, db_team_id, row["date"], fr["glicko_rating"], fr["glicko_rd"], fr["glicko_sigma"],
+                    fr["elo"], fr["form_winrate_10"], fr["form_winrate_20"], fr["winrate_overall"],
+                    fr["avg_score_diff"], fr["recent_opp_elo"], fr["streak"], fr["matches_played"],
+                    fr["days_since_last"],
+                ),
+            )
+            n_features += 1
+        state.observe(row)
+    return {"ratings_history_rows": n_ratings, "match_features_rows": n_features}
+
+
+def seed_database_once(
+    raw_path: Path,
+    db_path: Path,
+    master_path: Path | None = DEFAULT_MASTER,
+    backup_dir: Path | None = DEFAULT_BACKUP_DIR,
+    mirror_backup_dir: Path | None = DEFAULT_MIRROR_BACKUP_DIR,
+) -> dict[str, Any]:
+    conn = connect_live_db(db_path)
+    before_count = table_count(conn, "matches")
+    if before_count > 0:
+        conn.close()
+        stats = {
+            "db": str(db_path),
+            "mode": "already_seeded",
+            "matches": before_count,
+            "note": "BBDD viva ya contiene matches; no se ejecuta semilla ni reconstruccion.",
+        }
+        return stats
+
+    started = utcnow()
+    rows = dataio.load_results(raw_path, cs2_only=True)
+    master = load_master(master_path)
+    match_contexts = build_match_context_index(master)
+    raw_payload = dataio.read_json(raw_path, [])
+    cur = conn.cursor()
+    team_cache, team_hltv_cache = _load_team_caches(conn)
+    event_cache = _load_event_cache(conn)
+    now = utcnow()
+    counts: dict[str, int] = defaultdict(int)
+
+    for item in raw_payload:
+        cur.execute(
+            "INSERT OR IGNORE INTO raw_results(hltv_match_id, source_file, ingested_at_utc, payload_json) "
+            "VALUES (?,?,?,?)",
+            (str(item.get("id")), str(raw_path.name), now, json.dumps(item, ensure_ascii=False)),
+        )
+        counts["raw_results"] += cur.rowcount
+
+    for row in rows:
+        event_id = _event_id_for(cur, event_cache, row.get("event"))
+        team1_id = _team_id_for(cur, team_cache, team_hltv_cache, name=row["team1"], hltv_id=row.get("team1_id"))
+        team2_id = _team_id_for(cur, team_cache, team_hltv_cache, name=row["team2"], hltv_id=row.get("team2_id"))
+        context = match_contexts.get(str(row.get("id"))) or asset_match_context(row.get("asset"))
+        environment = context.get("environment") if context and context.get("environment") in {"lan", "online"} else "unknown"
+        stage = schema_stage(context.get("stage")) if context else None
+        bracket = context.get("bracket") if context and context.get("bracket") in {"upper", "lower"} else None
+        winner_team_id = team1_id if row["team1_win"] else team2_id
+        cur.execute(
+            "INSERT INTO matches(hltv_match_id, event_id, datetime_utc, team1_id, team2_id, best_of, "
+            "stage, environment, stage_detail, incentive_label, high_stakes, opening_match, "
+            "winner_advances, loser_eliminated, bracket, context_json, status, data_tier, "
+            "prematch_captured_at_utc, result_filled_at_utc, has_context, winner_team_id, score_t1, score_t2) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(hltv_match_id) DO NOTHING",
+            (
+                str(row["id"]),
+                event_id,
+                row["date"],
+                team1_id,
+                team2_id,
+                {"bo1": 1, "bo3": 3, "bo5": 5}.get(row["format"], 3),
+                stage,
+                environment,
+                context.get("stage_detail") if context else None,
+                context.get("incentive_label") if context else None,
+                1 if context and context.get("high_stakes") else 0,
+                1 if context and context.get("opening_match") else 0,
+                1 if context and context.get("winner_advances") else 0,
+                1 if context and context.get("loser_eliminated") else 0,
+                bracket,
+                json.dumps(context, ensure_ascii=False) if context else None,
+                "completed",
+                "historical_seed",
+                None,
+                now,
+                0,
+                winner_team_id,
+                row["score1"],
+                row["score2"],
+            ),
+        )
+        counts["matches"] += cur.rowcount
+
+    conn.commit()
+    team_cache, team_hltv_cache = _load_team_caches(conn)
+    n_rosters = insert_roster_history(cur, team_hltv_cache)
+    match_id_map = {
+        str(hltv_id): int(match_id)
+        for match_id, hltv_id in conn.execute("SELECT match_id, hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL")
+    }
+    match_teams = {
+        int(match_id): (int(team1_id), int(team2_id))
+        for match_id, team1_id, team2_id in conn.execute("SELECT match_id, team1_id, team2_id FROM matches")
+    }
+    n_odds = insert_odds(cur, master, match_id_map)
+    asset_stats = insert_hltv_assets(cur, master, match_id_map, match_teams, team_cache, team_hltv_cache)
+    n_rankings = insert_team_rankings(cur, team_hltv_cache)
+    archive_stats = insert_daily_archives(cur)
+    mart_stats = _recompute_mart(conn, rows)
+    conn.commit()
+
+    finished = utcnow()
+    rows_upserted = {
+        "raw_results": counts["raw_results"],
+        "matches": counts["matches"],
+        "team_rosters_rows": n_rosters,
+        "odds_rows": n_odds,
+        "team_ranking_snapshots_rows": n_rankings,
+        **asset_stats,
+        **archive_stats,
+        **mart_stats,
+    }
+    cur.execute(
+        "INSERT INTO ingest_runs(run_id, started_at_utc, finished_at_utc, status, rows_upserted_json, "
+        "requests_made, requests_skipped_by_freshness, note) VALUES (?,?,?,?,?,?,?,?)",
+        (
+            "historical_seed",
+            started,
+            finished,
+            "ok",
+            json.dumps(rows_upserted, ensure_ascii=False),
+            0,
+            0,
+            "Semilla inicial idempotente desde results_all.json y master JSON disponible.",
+        ),
+    )
+    conn.commit()
+    stats = {
+        "db": str(db_path),
+        "mode": "seeded",
+        "raw_rows": len(raw_payload),
+        "teams": table_count(conn, "teams"),
+        "events": table_count(conn, "events"),
+        "matches": table_count(conn, "matches"),
+        **rows_upserted,
+    }
+    conn.close()
+    stats.update(backup_database(db_path, backup_dir, mirror_backup_dir))
+    return stats
+
+
 def ingest(
     raw_path: Path,
     db_path: Path,
@@ -919,252 +1275,11 @@ def ingest(
     backup_dir: Path | None = DEFAULT_BACKUP_DIR,
     mirror_backup_dir: Path | None = DEFAULT_MIRROR_BACKUP_DIR,
 ) -> dict:
-    rows = dataio.load_training_rows(raw_path, master_path if master_path and master_path.exists() else None, cs2_only=True)
-    master = load_master(master_path)
-    match_contexts = build_match_context_index(master)
-    if db_path.exists():
-        db_path.unlink()
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON;")
-    create_schema(conn)
-    cur = conn.cursor()
-    now = utcnow()
-
-    # --- staging ---------------------------------------------------------
-    raw_payload = dataio.read_json(raw_path, [])
-    for item in raw_payload:
-        cur.execute(
-            "INSERT OR IGNORE INTO raw_results(hltv_match_id, source_file, ingested_at_utc, payload_json) "
-            "VALUES (?,?,?,?)",
-            (str(item.get("id")), str(raw_path.name), now, json.dumps(item, ensure_ascii=False)),
-        )
-
-    # --- core: teams + events --------------------------------------------
-    team_ids: dict[str, int] = {}
-    team_names: dict[str, str] = {}
-    team_hltv: dict[str, str] = {}
-    team_ids_by_hltv: dict[str, int] = {}
-    event_ids: dict[str, int] = {}
-    event_contexts: dict[str, list[dict]] = defaultdict(list)
-    for r in rows:
-        for side in ("1", "2"):
-            key = r[f"team{side}_key"]
-            if key and key not in team_names:
-                team_names[key] = r[f"team{side}"]
-                if r.get(f"team{side}_id"):
-                    team_hltv[key] = r[f"team{side}_id"]
-        ev = r.get("event") or ""
-        if ev and ev not in event_ids:
-            event_ids[ev] = len(event_ids) + 1
-        context = match_contexts.get(str(r.get("id"))) or asset_match_context(r.get("asset"))
-        if ev and context:
-            event_contexts[ev].append(context)
-
-    for key, name in team_names.items():
-        hltv = team_hltv.get(key)
-        cur.execute(
-            "INSERT INTO teams(name, hltv_id) VALUES (?,?)",
-            (name, int(hltv) if hltv and hltv.isdigit() else None),
-        )
-        team_ids[key] = cur.lastrowid
-        if hltv:
-            team_ids_by_hltv[str(hltv)] = cur.lastrowid
-    for ev, eid in event_ids.items():
-        envs = [ctx.get("environment") for ctx in event_contexts.get(ev, []) if ctx.get("environment") in {"lan", "online"}]
-        is_lan = 1 if envs and envs.count("lan") >= envs.count("online") else 0
-        cur.execute("INSERT INTO events(event_id, name, is_lan) VALUES (?,?,?)", (eid, ev, is_lan))
-    n_rosters = insert_roster_history(cur, team_ids_by_hltv)
-
-    # --- core: matches + feature mart (paso cronológico) -----------------
-    state = ChronologicalState()
-    match_id_map: dict[str, int] = {}
-    match_teams: dict[int, tuple[int, int]] = {}
-    n_ratings = 0
-    n_features = 0
-    for r in rows:
-        t1, t2 = r["team1_key"], r["team2_key"]
-        date_obj = r.get("date_obj")
-        period = _period_index(date_obj)
-        # asegura flush de periodos previos antes de leer estado pre-partido
-        state._advance_to(period)
-        context = match_contexts.get(str(r.get("id"))) or asset_match_context(r.get("asset"))
-        environment = context.get("environment") if context.get("environment") in {"lan", "online"} else "unknown"
-        stage = schema_stage(context.get("stage")) if context else None
-        bracket = context.get("bracket") if context.get("bracket") in {"upper", "lower"} else None
-
-        cur.execute(
-            "INSERT INTO matches(event_id, datetime_utc, team1_id, team2_id, best_of, "
-            "stage, environment, stage_detail, incentive_label, high_stakes, opening_match, "
-            "winner_advances, loser_eliminated, bracket, context_json, "
-            "winner_team_id, score_t1, score_t2) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (
-                event_ids.get(r.get("event") or ""),
-                r["date"],
-                team_ids[t1],
-                team_ids[t2],
-                {"bo1": 1, "bo3": 3, "bo5": 5}.get(r["format"], 3),
-                stage,
-                environment,
-                context.get("stage_detail") if context else None,
-                context.get("incentive_label") if context else None,
-                1 if context.get("high_stakes") else 0,
-                1 if context.get("opening_match") else 0,
-                1 if context.get("winner_advances") else 0,
-                1 if context.get("loser_eliminated") else 0,
-                bracket,
-                json.dumps(context, ensure_ascii=False) if context else None,
-                team_ids[t1] if r["team1_win"] else team_ids[t2],
-                r["score1"],
-                r["score2"],
-            ),
-        )
-        mid = cur.lastrowid
-        match_id_map[r["id"]] = mid
-        match_teams[mid] = (team_ids[t1], team_ids[t2])
-
-        # ratings_history + match_features ANTES de observar (point-in-time)
-        for key in (t1, t2):
-            card = state.rating_card(key, date_obj)
-            cur.execute(
-                "INSERT OR IGNORE INTO ratings_history(entity_type, entity_id, before_match_id, "
-                "as_of_date, rating, rd, sigma) VALUES ('team',?,?,?,?,?,?)",
-                (team_ids[key], mid, r["date"], card["glicko_rating"], card["glicko_rd"], card["glicko_sigma"]),
-            )
-            n_ratings += 1
-            fr = state.team_feature_row(key, date_obj)
-            cur.execute(
-                "INSERT OR IGNORE INTO match_features(match_id, team_id, data_up_to_utc, glicko_rating, "
-                "glicko_rd, glicko_sigma, elo, form_winrate_10, form_winrate_20, winrate_overall, "
-                "avg_score_diff, recent_opp_elo, streak, matches_played, days_since_last) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    mid, team_ids[key], r["date"], fr["glicko_rating"], fr["glicko_rd"], fr["glicko_sigma"],
-                    fr["elo"], fr["form_winrate_10"], fr["form_winrate_20"], fr["winrate_overall"],
-                    fr["avg_score_diff"], fr["recent_opp_elo"], fr["streak"], fr["matches_played"],
-                    fr["days_since_last"],
-                ),
-            )
-            n_features += 1
-        state.observe(r)
-
-    # --- odds de mercado (apertura/cierre/historial, con timestamp) -------
-    n_odds = insert_odds(cur, master, match_id_map)
-    asset_stats = insert_hltv_assets(cur, master, match_id_map, match_teams, team_ids, team_ids_by_hltv)
-    n_rankings = insert_team_rankings(cur, team_ids_by_hltv)
-
-    # --- predicciones del modelo (último run enriquecido) ----------------
-    n_preds = 0
-    if enriched_path and enriched_path.exists():
-        enriched = json.loads(enriched_path.read_text(encoding="utf-8"))
-        version = "glicko2+model@" + (enriched_path.parent.name if enriched_path.parent else now)
-        for e in enriched:
-            pred = e.get("prediction") or {}
-            if pred.get("model_prob_team1") is None:
-                continue
-            fav_name = pred.get("favorite")
-            mid = match_id_map.get(str(e.get("id")))
-            decision_prob = safe_float(
-                pred.get("decision_prob_team1")
-                if pred.get("decision_prob_team1") is not None
-                else pred.get("risk_adjusted_prob_team1")
-                if pred.get("risk_adjusted_prob_team1") is not None
-                else pred.get("model_prob_team1")
-            )
-            team1_min_value_odds = 1 / decision_prob if decision_prob and decision_prob > 0 else None
-            team2_prob = 1 - decision_prob if decision_prob is not None else None
-            team2_min_value_odds = 1 / team2_prob if team2_prob and team2_prob > 0 else None
-            decision_side = pred.get("decision_favorite_side") or ("team1" if (decision_prob or 0.5) >= 0.5 else "team2")
-            decision_min_value_odds = team1_min_value_odds if decision_side == "team1" else team2_min_value_odds
-            favorite_team_id = None
-            if mid is not None and mid in match_teams:
-                team1_id, team2_id = match_teams[mid]
-                favorite_team_id = team1_id if decision_side == "team1" else team2_id
-            context = ((e.get("controls") or {}).get("tournament_context") or {})
-            context_environment = context.get("environment") if context.get("environment") in {"lan", "online"} else "unknown"
-            context_bracket = context.get("bracket") if context.get("bracket") in {"upper", "lower"} else None
-            cur.execute(
-                "INSERT OR IGNORE INTO predictions(match_id, hltv_match_id, model_version, predicted_at_utc, "
-                "prob_team1, odds_prob_team1, blended_prob_team1, risk_adjusted_prob_team1, "
-                "decision_prob_team1, decision_confidence, decision_probability_source, decision_market_weight, "
-                "decision_market_weight_reasons, decision_policy_json, reliability_score, "
-                "decision_edge_team1_vs_market, favorite_team_id, favorite_name, decision_favorite_side, "
-                "decision_min_value_odds, team1_min_value_odds, team2_min_value_odds, confidence, "
-                "context_environment, context_stage, context_stage_detail, context_incentive_label, "
-                "context_high_stakes, context_winner_advances, context_loser_eliminated, "
-                "context_opening_match, context_bracket, context_json, "
-                "prediction_json, features_json, odds_json, staking_json, controls_json, flags_json, "
-                "data_quality_json, rosters_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    mid,
-                    str(e.get("id")),
-                    version,
-                    e.get("captured_at") or now,
-                    pred.get("model_prob_team1"),
-                    pred.get("odds_prob_team1"),
-                    pred.get("blended_prob_team1"),
-                    pred.get("risk_adjusted_prob_team1"),
-                    pred.get("decision_prob_team1"),
-                    pred.get("decision_confidence"),
-                    pred.get("decision_probability_source"),
-                    pred.get("decision_market_weight"),
-                    json.dumps(pred.get("decision_market_weight_reasons"), ensure_ascii=False),
-                    json.dumps((e.get("controls") or {}).get("decision_policy"), ensure_ascii=False),
-                    pred.get("reliability_score"),
-                    pred.get("decision_edge_team1_vs_market"),
-                    favorite_team_id,
-                    pred.get("decision_favorite") or fav_name,
-                    decision_side,
-                    decision_min_value_odds,
-                    team1_min_value_odds,
-                    team2_min_value_odds,
-                    pred.get("confidence"),
-                    context_environment,
-                    context.get("stage"),
-                    context.get("stage_detail"),
-                    context.get("incentive_label"),
-                    1 if context.get("high_stakes") else 0,
-                    1 if context.get("winner_advances") else 0,
-                    1 if context.get("loser_eliminated") else 0,
-                    1 if context.get("opening_match") else 0,
-                    context_bracket,
-                    json.dumps(context, ensure_ascii=False),
-                    json.dumps(pred, ensure_ascii=False),
-                    json.dumps(e.get("features"), ensure_ascii=False),
-                    json.dumps(e.get("odds"), ensure_ascii=False),
-                    json.dumps(e.get("staking"), ensure_ascii=False),
-                    json.dumps(e.get("controls"), ensure_ascii=False),
-                    json.dumps(e.get("flags"), ensure_ascii=False),
-                    json.dumps(e.get("data_quality"), ensure_ascii=False),
-                    json.dumps(e.get("rosters"), ensure_ascii=False),
-                ),
-            )
-            n_preds += 1
-
-    archive_stats = insert_daily_archives(cur)
-
-    conn.commit()
-    stats = {
-        "db": str(db_path),
-        "raw_rows": len(raw_payload),
-        "teams": len(team_ids),
-        "events": len(event_ids),
-        "matches": len(match_id_map),
-        "ratings_history_rows": n_ratings,
-        "match_features_rows": n_features,
-        "odds_rows": n_odds,
-        "team_rosters_rows": n_rosters,
-        **asset_stats,
-        "team_ranking_snapshots_rows": n_rankings,
-        "predictions_rows": n_preds,
-        **archive_stats,
-    }
-    conn.close()
-    stats.update(backup_database(db_path, backup_dir, mirror_backup_dir))
-    return stats
+    return seed_database_once(raw_path, db_path, master_path, backup_dir, mirror_backup_dir)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Construye la BBDD SQLite del predictor CS2.")
+    parser = argparse.ArgumentParser(description="Inicializa/siembra la BBDD viva SQLite del predictor CS2.")
     parser.add_argument("--raw", default=str(DEFAULT_RAW))
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--enriched", default="")
@@ -1177,7 +1292,13 @@ def main() -> int:
     enriched = Path(args.enriched) if args.enriched else latest_enriched()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
     mirror_dir = None if args.no_backup or args.no_mirror_backup else Path(args.mirror_backup_dir)
-    stats = ingest(Path(args.raw), Path(args.db), enriched, Path(args.master) if args.master else None, backup_dir, mirror_dir)
+    stats = seed_database_once(
+        Path(args.raw),
+        Path(args.db),
+        Path(args.master) if args.master else None,
+        backup_dir,
+        mirror_dir,
+    )
     print(json.dumps(stats, indent=2, ensure_ascii=False))
     return 0
 
