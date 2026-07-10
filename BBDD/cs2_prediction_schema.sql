@@ -12,6 +12,7 @@
 -- ============================================================================
 
 PRAGMA foreign_keys = ON;   -- imprescindible en SQLite, no está activo por defecto
+PRAGMA journal_mode = WAL;  -- BBDD viva: mejor concurrencia lectura/escritura
 
 -- ============================================================================
 -- 1. ENTIDADES  (identidad estable en el tiempo)
@@ -69,6 +70,7 @@ CREATE TABLE team_rosters (
 
 CREATE TABLE matches (
     match_id        INTEGER PRIMARY KEY,
+    hltv_match_id   TEXT UNIQUE,                         -- id estable de HLTV
     event_id        INTEGER NOT NULL REFERENCES events(event_id),
     datetime_utc    TEXT NOT NULL,                       -- inicio de la serie, UTC
     team1_id        INTEGER NOT NULL REFERENCES teams(team_id),
@@ -86,6 +88,19 @@ CREATE TABLE matches (
     loser_eliminated INTEGER CHECK (loser_eliminated IN (0,1)),
     bracket         TEXT CHECK (bracket IN ('upper','lower')),
     context_json    TEXT,
+    status          TEXT NOT NULL DEFAULT 'scheduled'
+                       CHECK (status IN ('scheduled','pending_result','completed')),
+    data_tier       TEXT NOT NULL DEFAULT 'prematch_captured'
+                       CHECK (data_tier IN ('historical_seed','prematch_captured','completed')),
+    prematch_captured_at_utc TEXT,
+    result_filled_at_utc     TEXT,
+    has_prematch_odds    INTEGER NOT NULL DEFAULT 0 CHECK (has_prematch_odds IN (0,1)),
+    has_player_snapshot  INTEGER NOT NULL DEFAULT 0 CHECK (has_player_snapshot IN (0,1)),
+    has_ranking_snapshot INTEGER NOT NULL DEFAULT 0 CHECK (has_ranking_snapshot IN (0,1)),
+    has_analytics        INTEGER NOT NULL DEFAULT 0 CHECK (has_analytics IN (0,1)),
+    has_context          INTEGER NOT NULL DEFAULT 0 CHECK (has_context IN (0,1)),
+    has_box_score        INTEGER NOT NULL DEFAULT 0 CHECK (has_box_score IN (0,1)),
+    has_veto             INTEGER NOT NULL DEFAULT 0 CHECK (has_veto IN (0,1)),
     winner_team_id  INTEGER REFERENCES teams(team_id),   -- NULL si aún no jugado
     score_t1        INTEGER,            -- mapas ganados por team1 (serie)
     score_t2        INTEGER,
@@ -406,15 +421,46 @@ CREATE TABLE predictions (
     UNIQUE (hltv_match_id, model_version)
 );
 
+-- Estado de frescura por entidad compartida. El scraper consulta esta tabla
+-- antes de pedir perfiles, stats, rankings, assets o analytics a HLTV.
+CREATE TABLE fetch_state (
+    entity_type   TEXT NOT NULL CHECK (entity_type IN
+                    ('team_profile','player_stats','ranking_hltv','ranking_valve',
+                     'match_detail','match_assets','match_analytics')),
+    entity_key    TEXT NOT NULL,
+    last_fetched_at_utc  TEXT,
+    last_status   TEXT CHECK (last_status IN ('ok','partial','blocked','not_found','error')),
+    fetch_count   INTEGER NOT NULL DEFAULT 0,
+    next_eligible_at_utc TEXT,
+    note          TEXT,
+    PRIMARY KEY (entity_type, entity_key)
+);
+
+-- Auditoría de cada ingest incremental run -> cs2.db.
+CREATE TABLE ingest_runs (
+    ingest_id     INTEGER PRIMARY KEY,
+    run_id        TEXT NOT NULL,
+    started_at_utc  TEXT NOT NULL,
+    finished_at_utc TEXT,
+    status        TEXT CHECK (status IN ('ok','partial','failed')),
+    rows_upserted_json TEXT,
+    requests_made INTEGER,
+    requests_skipped_by_freshness INTEGER,
+    note          TEXT
+);
+
 -- ============================================================================
 -- 5. ÍNDICES  (orientados a las queries point-in-time y a los joins frecuentes)
 -- ============================================================================
 
 CREATE INDEX idx_matches_datetime     ON matches(datetime_utc);
+CREATE UNIQUE INDEX idx_matches_hltv  ON matches(hltv_match_id);
 CREATE INDEX idx_matches_team1        ON matches(team1_id);
 CREATE INDEX idx_matches_team2        ON matches(team2_id);
 CREATE INDEX idx_matches_event        ON matches(event_id);
 CREATE INDEX idx_matches_context      ON matches(environment, stage, high_stakes);
+CREATE INDEX idx_matches_status       ON matches(status);
+CREATE INDEX idx_matches_tier         ON matches(data_tier);
 
 CREATE INDEX idx_maps_match           ON maps(match_id);
 CREATE INDEX idx_maps_mapstats        ON maps(hltv_mapstats_id);
@@ -439,6 +485,7 @@ CREATE INDEX idx_raw_snapshots_run    ON raw_snapshots(run_id, kind);
 CREATE INDEX idx_raw_snapshots_match  ON raw_snapshots(hltv_match_id);
 CREATE INDEX idx_player_stats_player  ON player_stat_snapshots(hltv_player_id, captured_at_utc);
 CREATE INDEX idx_team_rankings_team   ON team_ranking_snapshots(hltv_team_id, ranking_type, captured_at_utc);
+CREATE INDEX idx_fetch_state_eligible ON fetch_state(entity_type, next_eligible_at_utc);
 
 -- ============================================================================
 -- 6. VISTA DE EJEMPLO  (roster activo de cada equipo a día de hoy)

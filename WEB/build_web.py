@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -12,6 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 DAILY_ROOT = ROOT / "DAILY_SNAPSHOTS"
 MODEL_ROOT = ROOT / "MODEL"
 WEB_ROOT = ROOT / "WEB"
+BBDD_ROOT = ROOT / "BBDD"
+DB_PATH = BBDD_ROOT / "cs2.db"
 
 
 def read_json(path: Path, default):
@@ -35,10 +38,15 @@ def model_payload() -> dict:
     metrics = read_json(MODEL_ROOT / "results" / "metrics.json", {})
     shap = read_json(MODEL_ROOT / "results" / "shap_importance.json", [])
     seg = read_json(MODEL_ROOT / "results" / "segmented_eval.json", {})
+    favorite_accuracy = read_json(
+        MODEL_ROOT / "results" / "favorite_accuracy_bands.json",
+        seg.get("favorite_accuracy", {}),
+    )
     return {
         "metrics": metrics,
         "shap_top": shap[:15] if isinstance(shap, list) else [],
         "segments": seg.get("segments", []),
+        "favorite_accuracy": favorite_accuracy,
         "market": seg.get("market", {}),
         "production_model": _production_model(),
     }
@@ -58,6 +66,245 @@ def _production_model() -> str:
     except Exception:
         pass
     return ""
+
+
+def _table_count(conn: sqlite3.Connection, table: str) -> int | None:
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table,),
+    ).fetchone()
+    if not exists:
+        return None
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def _fetch_dicts(conn: sqlite3.Connection, query: str, params: tuple = ()) -> list[dict]:
+    return [dict(row) for row in conn.execute(query, params).fetchall()]
+
+
+def _file_info(path: Path) -> dict:
+    if not path.exists():
+        return {"path": str(path), "relative_path": str(path.relative_to(ROOT)), "exists": False, "size_bytes": 0}
+    stat = path.stat()
+    return {
+        "path": str(path),
+        "relative_path": str(path.relative_to(ROOT)),
+        "exists": True,
+        "size_bytes": stat.st_size,
+        "modified_at": datetime.fromtimestamp(stat.st_mtime, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _rows_summary(raw: str | None) -> dict:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): int(v) for k, v in data.items() if isinstance(v, (int, float)) and int(v) != 0}
+
+
+def database_payload() -> dict:
+    """Operational SQLite status for the local web debug tab."""
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload: dict = {
+        "generated_at_utc": now,
+        "db": _file_info(DB_PATH),
+        "wal": _file_info(Path(str(DB_PATH) + "-wal")),
+        "shm": _file_info(Path(str(DB_PATH) + "-shm")),
+        "dump": _file_info(BBDD_ROOT / "cs2_dump.sql"),
+        "exists": DB_PATH.exists(),
+        "health": "missing",
+        "notes": [],
+    }
+    if not DB_PATH.exists():
+        payload["notes"].append("BBDD/cs2.db no existe todavia.")
+        return payload
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        journal_mode = str(conn.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+        foreign_keys = int(conn.execute("PRAGMA foreign_keys").fetchone()[0])
+        quick_check = str(conn.execute("PRAGMA quick_check").fetchone()[0])
+        fk_issues = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+        tables = [
+            "matches",
+            "teams",
+            "players",
+            "events",
+            "odds",
+            "maps",
+            "map_player_stats",
+            "map_player_side_stats",
+            "veto",
+            "raw_snapshots",
+            "player_stat_snapshots",
+            "team_ranking_snapshots",
+            "predictions",
+            "ratings_history",
+            "match_features",
+            "fetch_state",
+            "ingest_runs",
+        ]
+        table_counts = [
+            {"name": table, "rows": count}
+            for table in tables
+            if (count := _table_count(conn, table)) is not None
+        ]
+        flag_columns = [
+            "has_prematch_odds",
+            "has_player_snapshot",
+            "has_ranking_snapshot",
+            "has_analytics",
+            "has_context",
+            "has_box_score",
+            "has_veto",
+        ]
+        coverage = []
+        non_seed_total = int(
+            conn.execute("SELECT COUNT(*) FROM matches WHERE data_tier <> 'historical_seed'").fetchone()[0]
+        )
+        for flag in flag_columns:
+            count = int(
+                conn.execute(
+                    f"SELECT COALESCE(SUM({flag}),0) FROM matches WHERE data_tier <> 'historical_seed'"
+                ).fetchone()[0]
+            )
+            coverage.append(
+                {
+                    "flag": flag,
+                    "count": count,
+                    "total": non_seed_total,
+                    "ratio": (count / non_seed_total) if non_seed_total else None,
+                }
+            )
+        recent_ingests = []
+        for row in _fetch_dicts(
+            conn,
+            """
+            SELECT ingest_id, run_id, started_at_utc, finished_at_utc, status,
+                   requests_made, requests_skipped_by_freshness, rows_upserted_json, note
+            FROM ingest_runs
+            ORDER BY ingest_id DESC
+            LIMIT 8
+            """,
+        ):
+            row["rows_upserted"] = _rows_summary(row.pop("rows_upserted_json", None))
+            recent_ingests.append(row)
+
+        blocked = int(
+            conn.execute("SELECT COUNT(*) FROM fetch_state WHERE last_status='blocked'").fetchone()[0]
+        )
+        errors = int(
+            conn.execute("SELECT COUNT(*) FROM fetch_state WHERE last_status='error'").fetchone()[0]
+        )
+        partial = int(
+            conn.execute("SELECT COUNT(*) FROM fetch_state WHERE last_status='partial'").fetchone()[0]
+        )
+        fresh = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM fetch_state WHERE next_eligible_at_utc IS NOT NULL AND next_eligible_at_utc > ?",
+                (now,),
+            ).fetchone()[0]
+        )
+        leakage_rows = int(
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM match_features mf
+                JOIN matches m ON m.match_id = mf.match_id
+                WHERE mf.data_up_to_utc > m.datetime_utc
+                """
+            ).fetchone()[0]
+        )
+        payload.update(
+            {
+                "health": "ok" if quick_check == "ok" and fk_issues == 0 and leakage_rows == 0 else "warning",
+                "pragmas": {
+                    "foreign_keys": foreign_keys,
+                    "journal_mode": journal_mode,
+                    "quick_check": quick_check,
+                    "foreign_key_issues": fk_issues,
+                },
+                "table_counts": table_counts,
+                "matches_by_status": _fetch_dicts(
+                    conn,
+                    "SELECT status AS label, COUNT(*) AS count FROM matches GROUP BY status ORDER BY count DESC",
+                ),
+                "matches_by_tier": _fetch_dicts(
+                    conn,
+                    "SELECT data_tier AS label, COUNT(*) AS count FROM matches GROUP BY data_tier ORDER BY count DESC",
+                ),
+                "matches_by_environment": _fetch_dicts(
+                    conn,
+                    "SELECT environment AS label, COUNT(*) AS count FROM matches GROUP BY environment ORDER BY count DESC",
+                ),
+                "coverage": coverage,
+                "fetch_summary": _fetch_dicts(
+                    conn,
+                    """
+                    SELECT entity_type,
+                           COUNT(*) AS total,
+                           SUM(CASE WHEN last_status='ok' THEN 1 ELSE 0 END) AS ok,
+                           SUM(CASE WHEN last_status='partial' THEN 1 ELSE 0 END) AS partial,
+                           SUM(CASE WHEN last_status='blocked' THEN 1 ELSE 0 END) AS blocked,
+                           SUM(CASE WHEN last_status='error' THEN 1 ELSE 0 END) AS error,
+                           SUM(CASE WHEN next_eligible_at_utc IS NOT NULL AND next_eligible_at_utc > ? THEN 1 ELSE 0 END) AS fresh
+                    FROM fetch_state
+                    GROUP BY entity_type
+                    ORDER BY entity_type
+                    """,
+                    (now,),
+                ),
+                "fetch_problem_rows": _fetch_dicts(
+                    conn,
+                    """
+                    SELECT entity_type, entity_key, last_status, last_fetched_at_utc,
+                           next_eligible_at_utc, note
+                    FROM fetch_state
+                    WHERE last_status IN ('blocked','error','partial')
+                    ORDER BY last_fetched_at_utc DESC
+                    LIMIT 12
+                    """,
+                ),
+                "recent_ingests": recent_ingests,
+                "integrity": {
+                    "leakage_rows": leakage_rows,
+                    "blocked_fetches": blocked,
+                    "error_fetches": errors,
+                    "partial_fetches": partial,
+                    "fresh_entities": fresh,
+                    "non_seed_matches": non_seed_total,
+                },
+                "latest_matches": _fetch_dicts(
+                    conn,
+                    """
+                    SELECT m.hltv_match_id, m.datetime_utc, m.status, m.data_tier,
+                           m.environment, m.stage, t1.name AS team1, t2.name AS team2
+                    FROM matches m
+                    JOIN teams t1 ON t1.team_id = m.team1_id
+                    JOIN teams t2 ON t2.team_id = m.team2_id
+                    ORDER BY m.datetime_utc DESC
+                    LIMIT 10
+                    """,
+                ),
+            }
+        )
+    except Exception as exc:
+        payload["health"] = "error"
+        payload["notes"].append(str(exc))
+    finally:
+        conn.close()
+
+    backup_dir = BBDD_ROOT / "backups"
+    backups = sorted(backup_dir.glob("*.db"), key=lambda path: path.stat().st_mtime, reverse=True)[:8]
+    payload["backups"] = [_file_info(path) for path in backups]
+    return payload
 
 
 def parse_match_datetime(date_text: str | None, hour_text: str | None = None) -> datetime | None:
@@ -109,6 +356,7 @@ def main() -> int:
         "masterManifest": master_manifest,
         "calibration": calibration,
         "model": model_payload(),
+        "database": database_payload(),
         "webFilter": {
             "sourceMatches": len(raw_data),
             "publishedMatches": len(data),

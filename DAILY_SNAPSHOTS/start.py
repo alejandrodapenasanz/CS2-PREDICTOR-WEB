@@ -8,6 +8,7 @@ import json
 import math
 import random
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -51,13 +52,19 @@ MASTER_DIR = DATA_ROOT / "master"
 MASTER_MATCHES = MASTER_DIR / "matches.json"
 MASTER_MANIFEST = MASTER_DIR / "manifest.json"
 MASTER_ROSTERS = MASTER_DIR / "roster_history.json"
+BBDD_DB = ROOT / "BBDD" / "cs2.db"
 
 BLOCK_HTTP_CODES = {403, 429, 500, 502, 503, 504, 522, 524}
 CHALLENGE_MARKERS = (
     "Just a moment",
     "cf-chl",
+    "cf_chl_",
+    "__cf_chl",
+    "challenge-platform",
     "Checking your browser",
     "Enable JavaScript and cookies",
+    "Attention Required",
+    "turnstile",
 )
 FETCH_MAX_ATTEMPTS = int(os.environ.get("HLTV_FETCH_MAX_ATTEMPTS", "8"))
 FETCH_BASE_DELAY = float(os.environ.get("HLTV_FETCH_BASE_DELAY", "3.0"))
@@ -72,6 +79,46 @@ FETCH_WARMUP_ENABLED = os.environ.get("HLTV_FETCH_WARMUP", "1").strip().lower() 
 FETCH_URL_QUARANTINE_SECONDS = float(os.environ.get("HLTV_URL_QUARANTINE_SECONDS", "900.0"))
 FETCH_MAX_HTTP_REQUESTS_PER_RUN = int(os.environ.get("HLTV_MAX_HTTP_REQUESTS_PER_RUN", "2500"))
 
+# --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
+# Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
+# stealth que resuelve el challenge de Cloudflare y acuña cf_clearance. Ambos
+# son opcionales: si scrapling no esta instalado, el fetch cae a requests/
+# cloudscraper igual que antes. Ver LAST change.md.
+def _env_bool(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", ""}
+
+
+SCRAPLING_ENABLED = _env_bool("HLTV_USE_SCRAPLING", "1")
+SCRAPLING_STEALTH_ENABLED = _env_bool("HLTV_SOLVE_CLOUDFLARE", "1")
+SCRAPLING_IMPERSONATE = os.environ.get("HLTV_IMPERSONATE", "chrome").strip() or "chrome"
+SCRAPLING_PROXY = os.environ.get("HLTV_PROXY", "").strip() or None
+SCRAPLING_STEALTH_TIMEOUT_MS = int(os.environ.get("HLTV_STEALTH_TIMEOUT_MS", "90000"))
+SCRAPLING_STEALTH_HEADLESS = _env_bool("HLTV_STEALTH_HEADLESS", "1")
+SCRAPLING_STEALTH_MAX_SOLVES = int(os.environ.get("HLTV_STEALTH_MAX_SOLVES_PER_RUN", "6"))
+SCRAPLING_TIER1_ATTEMPTS = int(os.environ.get("HLTV_SCRAPLING_TIER1_ATTEMPTS", "3"))
+CF_REFRESH_ENABLED = _env_bool("HLTV_AUTO_REFRESH_CF_ON_BLOCK", "1")
+CF_REFRESH_TIMEOUT_SECONDS = int(os.environ.get("HLTV_CF_REFRESH_TIMEOUT_SECONDS", "240"))
+
+# CA bundle para redes con inspeccion TLS (proxy corporativo con CA propia).
+# En un PC sin restricciones no hace falta: certifi funciona por defecto.
+_DEFAULT_CORP_BUNDLE = SCRAPER_PROJECT / "corp_ca_bundle.pem"
+HLTV_CA_BUNDLE = (
+    os.environ.get("HLTV_CA_BUNDLE")
+    or os.environ.get("CURL_CA_BUNDLE")
+    or os.environ.get("SSL_CERT_FILE")
+    or os.environ.get("REQUESTS_CA_BUNDLE")
+    or (str(_DEFAULT_CORP_BUNDLE) if _DEFAULT_CORP_BUNDLE.exists() else None)
+)
+
+try:  # scrapling es opcional; el scraper funciona sin el (requests/cloudscraper)
+    from scrapling.fetchers import Fetcher as _ScraplingFetcher, StealthyFetcher as _ScraplingStealthy
+except Exception:  # pragma: no cover - scrapling no instalado / Python no soportado
+    _ScraplingFetcher = None
+    _ScraplingStealthy = None
+
+_CA_ENV_APPLIED = False
+_STEALTH_SOLVES = 0
+
 _HTTP_SESSION: requests.Session | None = None
 _LAST_FETCH_AT = 0.0
 _HTML_CACHE: dict[str, tuple[float, str]] = {}
@@ -80,6 +127,7 @@ _URL_FAILURES: dict[str, dict[str, Any]] = {}
 _FETCH_DOMAIN_COOLDOWN_UNTIL = 0.0
 _FETCH_BLOCK_STREAK = 0
 _CF_SESSION_REFRESHED_THIS_RUN = False
+_REQUESTS_PREFERRED_UNTIL = 0.0
 _FETCH_STATS: dict[str, Any] = {
     "http_attempts": 0,
     "successes": 0,
@@ -95,6 +143,11 @@ _FETCH_STATS: dict[str, Any] = {
     "cooldown_seconds": 0.0,
     "requests_successes": 0,
     "cloudscraper_successes": 0,
+    "scrapling_successes": 0,
+    "scrapling_stealth_successes": 0,
+    "stealth_solves": 0,
+    "ca_bundle": None,
+    "freshness_skipped": 0,
 }
 VERBOSE = False
 
@@ -151,6 +204,291 @@ def fetch_diagnostics() -> dict[str, Any]:
         reverse=True,
     )[:20]
     return stats
+
+
+def db_connect() -> sqlite3.Connection:
+    conn = sqlite3.connect(BBDD_DB)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    conn.execute("PRAGMA journal_mode = WAL;")
+    return conn
+
+
+def db_entity_is_fresh(entity_type: str, entity_key: str, now: str | None = None) -> bool:
+    """Consulta `fetch_state`; si la BBDD no existe, no bloquea el scrape."""
+    if not BBDD_DB.exists() or not entity_key:
+        return False
+    now = now or now_utc()
+    try:
+        conn = db_connect()
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT next_eligible_at_utc, last_status FROM fetch_state WHERE entity_type=? AND entity_key=?",
+            (entity_type, str(entity_key)),
+        ).fetchone()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return False
+    if not row or not row[0]:
+        return False
+    return str(row[1]) in {"ok", "partial", "blocked", "error"} and str(row[0]) > now
+
+
+def db_latest_team_profile(team_id: str) -> dict[str, Any] | None:
+    if not BBDD_DB.exists() or not team_id:
+        return None
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            """
+            SELECT payload_json
+            FROM raw_snapshots
+            WHERE kind='team_profile' AND hltv_team_id=?
+            ORDER BY captured_at_utc DESC, raw_snapshot_id DESC
+            LIMIT 1
+            """,
+            (str(team_id),),
+        ).fetchone()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return None
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) and payload.get("profile") else None
+
+
+def db_latest_player_snapshots(player_ids: set[str]) -> dict[str, list[dict[str, Any]]]:
+    if not BBDD_DB.exists() or not player_ids:
+        return {}
+    placeholders = ",".join("?" for _ in player_ids)
+    try:
+        conn = db_connect()
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT *
+            FROM player_stat_snapshots
+            WHERE hltv_player_id IN ({placeholders})
+            ORDER BY hltv_player_id, captured_at_utc DESC, player_stat_snapshot_id DESC
+            """,
+            tuple(sorted(player_ids)),
+        ).fetchall()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return {}
+
+    stat_columns = {
+        "rating": "Rating 3.0",
+        "kpr": "KPR",
+        "dpr": "DPR",
+        "apr": "APR",
+        "kast": "KAST",
+        "impact": "Impact",
+        "adr": "ADR",
+        "round_swing": "Round Swing",
+        "multi_kill_rating": "Multi-kill rating",
+        "awp_kpr": "AWP KPR",
+        "hs_pct": "HS %",
+        "opening_kpr": "Opening KPR",
+        "opening_dpr": "Opening DPR",
+        "flash_assists": "Flash assists",
+    }
+    seen: set[tuple[str, str]] = set()
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        player_id = str(row["hltv_player_id"])
+        time_filter = str(row["time_filter"] or row["season_year"] or "unknown")
+        key = (player_id, time_filter)
+        if key in seen:
+            continue
+        seen.add(key)
+        stats = {
+            label: row[column]
+            for column, label in stat_columns.items()
+            if row[column] is not None
+        }
+        out.setdefault(player_id, []).append(
+            {
+                "id": player_id,
+                "name": row["player_name"],
+                "slug": row["player_slug"],
+                "link": row["player_link"],
+                "maps": row["maps"],
+                "time_filter": time_filter,
+                "selected_from_time_filter": time_filter,
+                "stats": stats,
+                "source": "BBDD.player_stat_snapshots",
+                "captured_at": row["captured_at_utc"],
+            }
+        )
+    return out
+
+
+def db_match_has_coverage(hltv_match_id: str, flag_column: str) -> bool:
+    if not BBDD_DB.exists() or not hltv_match_id:
+        return False
+    allowed = {"has_box_score", "has_veto", "has_analytics", "has_context", "has_prematch_odds"}
+    if flag_column not in allowed:
+        return False
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            f"SELECT {flag_column} FROM matches WHERE hltv_match_id=?",
+            (str(hltv_match_id),),
+        ).fetchone()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return False
+    return bool(row and row[0])
+
+
+def db_pending_match_ids(now: str | None = None) -> set[str] | None:
+    """Lista de trabajo de resultados desde SQLite; None = fallback legacy."""
+    if not BBDD_DB.exists():
+        return None
+    now = now or now_utc()
+    try:
+        conn = db_connect()
+        rows = conn.execute(
+            """
+            SELECT hltv_match_id
+            FROM matches
+            WHERE hltv_match_id IS NOT NULL
+              AND (
+                    status = 'pending_result'
+                 OR (status = 'scheduled' AND datetime_utc < ?)
+              )
+            """,
+            (now,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return None
+    return {str(row[0]) for row in rows if row[0]}
+
+
+def db_pending_match_info(now: str | None = None) -> dict[str, dict[str, Any]] | None:
+    if not BBDD_DB.exists():
+        return None
+    now = now or now_utc()
+    try:
+        conn = db_connect()
+        rows = conn.execute(
+            """
+            SELECT m.hltv_match_id, m.datetime_utc, m.status,
+                   t1.name AS team1_name, t2.name AS team2_name, e.name AS event_name
+            FROM matches m
+            LEFT JOIN teams t1 ON t1.team_id = m.team1_id
+            LEFT JOIN teams t2 ON t2.team_id = m.team2_id
+            LEFT JOIN events e ON e.event_id = m.event_id
+            WHERE m.hltv_match_id IS NOT NULL
+              AND (
+                    m.status = 'pending_result'
+                 OR (m.status = 'scheduled' AND m.datetime_utc < ?)
+              )
+            """,
+            (now,),
+        ).fetchall()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return None
+    return {
+        str(row[0]): {
+            "datetime_utc": row[1],
+            "status": row[2],
+            "team1": row[3],
+            "team2": row[4],
+            "event": row[5],
+        }
+        for row in rows if row[0]
+    }
+
+
+def format_pending_missing(match_id: str, info: dict[str, dict[str, Any]] | None) -> str:
+    item = (info or {}).get(str(match_id)) or {}
+    label = f"{item.get('team1') or '?'} vs {item.get('team2') or '?'}"
+    when = item.get("datetime_utc") or "unknown_time"
+    status = item.get("status") or "unknown_status"
+    return f"{match_id} {when} {status} {label}"
+
+
+def db_match_already_photographed(hltv_match_id: str) -> bool:
+    if not BBDD_DB.exists() or not hltv_match_id:
+        return False
+    try:
+        conn = db_connect()
+        row = conn.execute(
+            """
+            SELECT data_tier, status
+            FROM matches
+            WHERE hltv_match_id = ?
+            """,
+            (str(hltv_match_id),),
+        ).fetchone()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return False
+    if not row:
+        return False
+    return str(row[0]) in {"prematch_captured", "completed"} or str(row[1]) == "completed"
+
+
+def db_fetch_next_eligible(entity_type: str, status: str, fetched_at: str) -> str:
+    ttl_days = {
+        "team_profile": int(os.environ.get("BBDD_TEAM_PROFILE_TTL_DAYS", "7")),
+        "player_stats": int(os.environ.get("BBDD_PLAYER_STATS_TTL_DAYS", "3")),
+        "ranking_hltv": int(os.environ.get("BBDD_RANKING_TTL_DAYS", "7")),
+        "ranking_valve": int(os.environ.get("BBDD_RANKING_TTL_DAYS", "7")),
+    }
+    base = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    if status in {"blocked", "error", "partial"}:
+        delta = timedelta(hours=1)
+    elif entity_type in {"match_assets", "match_analytics", "match_detail"}:
+        delta = timedelta(days=3650)
+    else:
+        delta = timedelta(days=ttl_days.get(entity_type, 1))
+    return (base + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def db_mark_fetch_state(entity_type: str, entity_key: str, status: str, note: str | None = None) -> None:
+    """Checkpoint de scraper: persiste OK/error/blocked por entidad."""
+    if not BBDD_DB.exists() or not entity_key:
+        return
+    fetched_at = now_utc()
+    try:
+        conn = db_connect()
+        conn.execute(
+            """
+            INSERT INTO fetch_state(entity_type, entity_key, last_fetched_at_utc, last_status,
+                                    fetch_count, next_eligible_at_utc, note)
+            VALUES (?,?,?,?,1,?,?)
+            ON CONFLICT(entity_type, entity_key) DO UPDATE SET
+                last_fetched_at_utc=excluded.last_fetched_at_utc,
+                last_status=excluded.last_status,
+                fetch_count=fetch_state.fetch_count + 1,
+                next_eligible_at_utc=excluded.next_eligible_at_utc,
+                note=excluded.note
+            """,
+            (
+                entity_type,
+                str(entity_key),
+                fetched_at,
+                status,
+                db_fetch_next_eligible(entity_type, status, fetched_at),
+                note,
+            ),
+        )
+        conn.commit()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return
+
+
+def note_freshness_skip(count: int = 1) -> None:
+    _FETCH_STATS["freshness_skipped"] = int(_FETCH_STATS.get("freshness_skipped") or 0) + count
 
 
 class FetchBudgetExceeded(RuntimeError):
@@ -235,7 +573,10 @@ def wait_for_domain_cooldown() -> None:
 def register_fetch_success(source: str, url: str) -> None:
     global _FETCH_BLOCK_STREAK
     _FETCH_STATS["successes"] += 1
-    if source == "cloudscraper":
+    key = f"{source}_successes"
+    if key in _FETCH_STATS:
+        _FETCH_STATS[key] += 1
+    elif source == "cloudscraper":
         _FETCH_STATS["cloudscraper_successes"] += 1
     else:
         _FETCH_STATS["requests_successes"] += 1
@@ -270,13 +611,21 @@ def register_fetch_error(source: str, url: str, exc: Exception) -> None:
     log(f"ERROR {source} {type(exc).__name__}: {exc}: {url}")
 
 
+def register_fetch_soft_block(source: str, url: str, reason: str) -> None:
+    _FETCH_STATS["blocks"] += 1
+    register_url_failure(url, f"{source} {reason}")
+    log(f"BLOCK {source} {reason}; falling back without domain cooldown: {url}", force=True)
+
+
 def looks_like_cf_or_waf_problem(error: Exception | None) -> bool:
     text = str(error or "").lower()
     return any(marker in text for marker in ("cloudflare", "challenge", "403", "429", "bloqueo", "cf-chl"))
 
 
 def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
-    global _CF_SESSION_REFRESHED_THIS_RUN, _HTTP_SESSION, _FETCH_DOMAIN_COOLDOWN_UNTIL, _FETCH_BLOCK_STREAK
+    global _CF_SESSION_REFRESHED_THIS_RUN, _HTTP_SESSION, _FETCH_DOMAIN_COOLDOWN_UNTIL, _FETCH_BLOCK_STREAK, _REQUESTS_PREFERRED_UNTIL
+    if not CF_REFRESH_ENABLED:
+        return False
     if _CF_SESSION_REFRESHED_THIS_RUN:
         return False
     helper = SCRAPY_ROOT / "hltv_scraper" / "grab_cf.py"
@@ -285,12 +634,13 @@ def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
     _CF_SESSION_REFRESHED_THIS_RUN = True
     _FETCH_STATS["cf_session_refresh_attempts"] += 1
     log(f"cf_session refresh triggered by {reason}: {url}", force=True)
-    ok, logs = run_cmd([str(PYTHON_EXE), str(helper)], SCRAPER_PROJECT, timeout=240, stream=True)
+    ok, logs = run_cmd([str(PYTHON_EXE), str(helper)], SCRAPER_PROJECT, timeout=CF_REFRESH_TIMEOUT_SECONDS, stream=True)
     if ok and CF_SESSION.exists():
         _FETCH_STATS["cf_session_refresh_successes"] += 1
         _HTTP_SESSION = None
         _FETCH_BLOCK_STREAK = 0
         _FETCH_DOMAIN_COOLDOWN_UNTIL = min(_FETCH_DOMAIN_COOLDOWN_UNTIL, time.monotonic() + 5.0)
+        _REQUESTS_PREFERRED_UNTIL = time.monotonic() + float(os.environ.get("HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS", "900"))
         log("cf_session refreshed; retrying blocked request", force=True)
         return True
     log(f"cf_session refresh did not produce a usable session: {logs[-500:]}", force=True)
@@ -315,6 +665,27 @@ def save_raw_html(run_dir: Path, kind: str, identifier: str, link: str, html: st
     }
     write_json(output.with_suffix(output.suffix + ".json"), meta)
     return meta
+
+
+def raw_html_safe_id(identifier: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", identifier)[:160]
+
+
+def load_persisted_raw_html(kind: str, identifier: str) -> str | None:
+    safe_id = raw_html_safe_id(identifier)
+    if not safe_id:
+        return None
+    pattern = f"*/raw_html/{kind}/{safe_id}.html.gz"
+    for path in sorted(RUNS_DIR.glob(pattern), reverse=True):
+        try:
+            with gzip.open(path, "rt", encoding="utf-8") as fh:
+                html = fh.read()
+            if html and not is_cloudflare_challenge(html):
+                log(f"RAW reuse {kind}/{safe_id}: {path}")
+                return html
+        except Exception:
+            continue
+    return None
 
 
 def run_cmd(cmd: list[str], cwd: Path, timeout: int = 300, stream: bool = False) -> tuple[bool, str]:
@@ -495,7 +866,7 @@ def polite_fetch_wait(min_interval: float) -> None:
 def default_headers(referer: str = "https://www.hltv.org/") -> dict[str, str]:
     return {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
         "Accept-Encoding": "gzip, deflate",
@@ -645,6 +1016,247 @@ def parse_results_fallback(html: str) -> list[dict[str, Any]]:
     return parsed
 
 
+def _apply_ca_env() -> None:
+    """Propaga el CA bundle corporativo a curl_cffi/requests via variables de entorno.
+
+    Solo actua si HLTV_CA_BUNDLE apunta a un fichero existente (redes con
+    inspeccion TLS). En un PC sin restricciones no hay bundle y se usa certifi.
+    """
+    global _CA_ENV_APPLIED
+    if _CA_ENV_APPLIED:
+        return
+    _CA_ENV_APPLIED = True
+    if HLTV_CA_BUNDLE and Path(HLTV_CA_BUNDLE).exists():
+        for var in ("CURL_CA_BUNDLE", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE"):
+            os.environ.setdefault(var, HLTV_CA_BUNDLE)
+        _FETCH_STATS["ca_bundle"] = HLTV_CA_BUNDLE
+        log(f"CA bundle corporativo activo: {HLTV_CA_BUNDLE}", force=True)
+
+
+def _scrapling_response_parts(resp: Any) -> tuple[int | None, str]:
+    """Extrae (status, html) de una Response de scrapling de forma defensiva."""
+    status = getattr(resp, "status", None)
+    html = getattr(resp, "html_content", None)
+    if html is None:
+        body = getattr(resp, "body", None)
+        if isinstance(body, bytes):
+            html = body.decode("utf-8", "replace")
+        elif isinstance(body, str):
+            html = body
+        else:
+            html = str(resp) if resp is not None else ""
+    return status, (html or "")
+
+
+def _persist_cf_from_response(resp: Any) -> None:
+    """Guarda cf_clearance + user_agent acuñados por el navegador stealth.
+
+    Asi los tiers HTTP posteriores (scrapling impersonate, requests) reusan la
+    cookie. El binding cf_clearance <-> IP + UA + JA3 exige reusar la misma UA.
+    """
+    try:
+        cf_value = None
+        cookies = getattr(resp, "cookies", None)
+        if isinstance(cookies, dict):
+            cf_value = cookies.get("cf_clearance")
+        elif cookies:
+            for c in cookies:
+                name = getattr(c, "name", None) or (c.get("name") if isinstance(c, dict) else None)
+                if name == "cf_clearance":
+                    cf_value = getattr(c, "value", None) or (c.get("value") if isinstance(c, dict) else None)
+                    break
+        if not cf_value:
+            return
+        ua = None
+        req = getattr(resp, "request", None)
+        req_headers = getattr(req, "headers", None) if req is not None else None
+        if isinstance(req_headers, dict):
+            ua = req_headers.get("User-Agent") or req_headers.get("user-agent")
+        payload = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+        payload["cf_clearance"] = cf_value
+        if ua:
+            payload["user_agent"] = ua
+        payload["captured_at"] = now_utc()
+        payload["source"] = "scrapling_stealth"
+        write_json(CF_SESSION, payload)
+        log("cf_clearance acuñado por navegador stealth y guardado en cf_session.json", force=True)
+    except Exception as exc:  # pragma: no cover - best effort
+        log(f"no se pudo persistir cf_clearance del navegador: {exc}")
+
+
+def _scrapling_impersonate_get(url: str, cookies: dict[str, str] | None, timeout: int) -> tuple[int | None, str]:
+    kwargs: dict[str, Any] = {
+        "impersonate": SCRAPLING_IMPERSONATE,
+        "stealthy_headers": True,
+        "timeout": timeout,
+    }
+    if SCRAPLING_PROXY:
+        kwargs["proxy"] = SCRAPLING_PROXY
+    if cookies:
+        kwargs["cookies"] = cookies
+    try:
+        resp = _ScraplingFetcher.get(url, **kwargs)
+    except TypeError:
+        # Firma distinta segun version: reintenta sin cookies/proxy.
+        resp = _ScraplingFetcher.get(url, impersonate=SCRAPLING_IMPERSONATE, stealthy_headers=True, timeout=timeout)
+    return _scrapling_response_parts(resp)
+
+
+def _scrapling_stealth_solve(url: str) -> tuple[int | None, str] | None:
+    """Tier 2: navegador stealth que resuelve Cloudflare y acuña cf_clearance."""
+    global _STEALTH_SOLVES
+    if _ScraplingStealthy is None or _STEALTH_SOLVES >= SCRAPLING_STEALTH_MAX_SOLVES:
+        return None
+    _STEALTH_SOLVES += 1
+    _FETCH_STATS["stealth_solves"] += 1
+    kwargs: dict[str, Any] = {
+        "headless": SCRAPLING_STEALTH_HEADLESS,
+        "solve_cloudflare": True,
+        "block_webrtc": True,
+        "disable_resources": True,
+        "network_idle": False,
+        "timeout": SCRAPLING_STEALTH_TIMEOUT_MS,
+    }
+    if SCRAPLING_PROXY:
+        kwargs["proxy"] = SCRAPLING_PROXY
+        kwargs["geoip"] = True
+    log(f"STEALTH solve_cloudflare (#{_STEALTH_SOLVES}): {url}", force=True)
+    started = time.monotonic()
+    try:
+        resp = _ScraplingStealthy.fetch(url, **kwargs)
+    except Exception as exc:
+        elapsed = time.monotonic() - started
+        log(f"STEALTH solve_cloudflare failed after {elapsed:.1f}s: {type(exc).__name__}: {exc}", force=True)
+        raise
+    elapsed = time.monotonic() - started
+    log(f"STEALTH solve_cloudflare finished in {elapsed:.1f}s: {url}", force=True)
+    _persist_cf_from_response(resp)
+    return _scrapling_response_parts(resp)
+
+
+def _retry_after_cf_refresh(url: str, timeout: int, interval: float) -> str | None:
+    fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+    cookies = {"cf_clearance": fresh["cf_clearance"]} if fresh.get("cf_clearance") else None
+    if not cookies:
+        return None
+    try:
+        ensure_fetch_budget(url)
+        wait_for_domain_cooldown()
+        polite_fetch_wait(interval)
+        _FETCH_STATS["http_attempts"] += 1
+        status, text = _scrapling_impersonate_get(url, cookies, timeout)
+        if status == 200 and text and not is_cloudflare_challenge(text):
+            register_fetch_success("scrapling", url)
+            fetch_cache_put(url, text)
+            log(f"OK scrapling after cf_session refresh {len(text)} bytes: {url}")
+            return text
+    except FetchBudgetExceeded:
+        raise
+    except Exception as exc:
+        register_fetch_error("scrapling_after_cf_refresh", url, exc)
+    return None
+
+
+def _scrapling_fetch(
+    url: str,
+    cookies: dict[str, str] | None,
+    timeout: int,
+    base: float,
+    max_wait: float,
+    interval: float,
+) -> str | None:
+    """Tiers 1 (impersonate) y 2 (stealth solve). Devuelve HTML o None (fall-through).
+
+    Reutiliza todas las guardas compartidas (presupuesto, cooldown, backoff,
+    deteccion de bloqueo, cache). Si no obtiene HTML valido, devuelve None y el
+    fetch principal cae a requests/cloudscraper.
+    """
+    if not SCRAPLING_ENABLED or _ScraplingFetcher is None:
+        return None
+    _apply_ca_env()
+
+    # Tier 1: HTTP con impersonation TLS (rapido).
+    attempts = max(2, SCRAPLING_TIER1_ATTEMPTS)
+    for attempt in range(attempts):
+        ensure_fetch_budget(url)
+        try:
+            log(f"GET scrapling {attempt + 1}/{attempts}: {url}")
+            started = time.monotonic()
+            wait_for_domain_cooldown()
+            polite_fetch_wait(interval)
+            _FETCH_STATS["http_attempts"] += 1
+            status, text = _scrapling_impersonate_get(url, cookies, timeout)
+            challenge = is_cloudflare_challenge(text)
+            elapsed = time.monotonic() - started
+            if status == 200 and text and not challenge:
+                register_fetch_success("scrapling", url)
+                fetch_cache_put(url, text)
+                log(f"OK scrapling HTTP 200 {len(text)} bytes {elapsed:.1f}s: {url}")
+                return text
+            if (status in BLOCK_HTTP_CODES) or challenge:
+                reason = "cloudflare_challenge" if challenge else f"HTTP {status}"
+                if cookies and "/stats/" in url:
+                    register_fetch_soft_block("scrapling", url, reason)
+                    log("scrapling blocked on stats URL with cf_session; trying requests before long backoff", force=True)
+                    return None
+                delay = backoff_delay(attempt, None, base_delay=base, max_delay=max_wait)
+                delay = max(delay, register_fetch_block("scrapling", url, reason))
+                log(f"BLOCK scrapling {reason}; wait {delay:.1f}s: {url}")
+                time.sleep(delay)
+                continue
+            if text:
+                register_fetch_success("scrapling", url)
+                fetch_cache_put(url, text)
+                return text
+        except FetchBudgetExceeded:
+            raise
+        except Exception as exc:
+            register_fetch_error("scrapling", url, exc)
+            if attempt < attempts - 1:
+                time.sleep(backoff_delay(attempt, None, base_delay=base, max_delay=max_wait))
+
+    # Tier 2: navegador stealth que resuelve el challenge y acuña cookie.
+    if SCRAPLING_STEALTH_ENABLED and _ScraplingStealthy is not None:
+        stealth_problem = False
+        try:
+            ensure_fetch_budget(url)
+            wait_for_domain_cooldown()
+            result = _scrapling_stealth_solve(url)
+            if result is not None:
+                status, text = result
+                if status in (None, 200) and text and not is_cloudflare_challenge(text):
+                    register_fetch_success("scrapling_stealth", url)
+                    fetch_cache_put(url, text)
+                    log(f"OK scrapling_stealth {len(text)} bytes: {url}")
+                    return text
+                # Cookie acuñada: reintenta el tier 1 barato con la nueva cf_clearance.
+                fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+                cookies2 = {"cf_clearance": fresh["cf_clearance"]} if fresh.get("cf_clearance") else None
+                if cookies2:
+                    try:
+                        polite_fetch_wait(interval)
+                        _FETCH_STATS["http_attempts"] += 1
+                        status, text = _scrapling_impersonate_get(url, cookies2, timeout)
+                        if status == 200 and text and not is_cloudflare_challenge(text):
+                            register_fetch_success("scrapling", url)
+                            fetch_cache_put(url, text)
+                            return text
+                    except Exception as exc:
+                        register_fetch_error("scrapling", url, exc)
+                stealth_problem = True
+        except FetchBudgetExceeded:
+            raise
+        except Exception as exc:
+            register_fetch_error("scrapling_stealth", url, exc)
+            stealth_problem = True
+        if stealth_problem and maybe_refresh_cf_session_once("scrapling_stealth_failed_or_challenged", url):
+            refreshed_html = _retry_after_cf_refresh(url, timeout, interval)
+            if refreshed_html is not None:
+                return refreshed_html
+
+    return None
+
+
 def fetch_html(
     link: str,
     timeout: int = 45,
@@ -679,6 +1291,22 @@ def fetch_html(
     cookies = {"cf_clearance": cf_payload["cf_clearance"]} if cf_payload.get("cf_clearance") else None
     last_error: Exception | None = None
 
+    # Tiers 1/2: Scrapling (impersonate TLS -> navegador stealth). Si devuelve
+    # None, cae al camino clasico requests -> cloudscraper de mas abajo.
+    prefer_requests = bool(cookies) and time.monotonic() < _REQUESTS_PREFERRED_UNTIL
+    if prefer_requests:
+        log(f"cf_session recently refreshed; trying requests before scrapling: {url}", force=True)
+    else:
+        scrapling_html = _scrapling_fetch(url, cookies, timeout, base, max_wait, interval)
+        if scrapling_html is not None:
+            return scrapling_html
+    # El navegador stealth pudo acuñar una cf_clearance nueva: reutilizala.
+    if not cookies:
+        cf_payload = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+        if cf_payload.get("user_agent"):
+            headers["User-Agent"] = cf_payload["user_agent"]
+        cookies = {"cf_clearance": cf_payload["cf_clearance"]} if cf_payload.get("cf_clearance") else None
+
     for attempt in range(attempts):
         ensure_fetch_budget(url)
         try:
@@ -689,7 +1317,9 @@ def fetch_html(
             _FETCH_STATS["http_attempts"] += 1
             response = http_session().get(url, timeout=timeout, headers=headers, cookies=cookies)
             text = response.text or ""
-            challenge = is_cloudflare_challenge(text)
+            challenge = is_cloudflare_challenge(text) or (
+                str(response.headers.get("cf-mitigated", "")).strip().lower() == "challenge"
+            )
             elapsed = time.monotonic() - started
             if response.status_code == 200 and not challenge:
                 register_fetch_success("requests", url)
@@ -749,7 +1379,9 @@ def fetch_html(
             _FETCH_STATS["http_attempts"] += 1
             response = scraper.get(url, timeout=timeout, headers=headers)
             text = response.text or ""
-            challenge = is_cloudflare_challenge(text)
+            challenge = is_cloudflare_challenge(text) or (
+                str(response.headers.get("cf-mitigated", "")).strip().lower() == "challenge"
+            )
             elapsed = time.monotonic() - started
             if response.status_code == 200 and not challenge:
                 register_fetch_success("cloudscraper", url)
@@ -1363,7 +1995,8 @@ def scrape_match_assets(match_link: str, output_path: Path, delay: float = 0.5) 
     log(f"assets {match_id}: fetching match page")
     html = fetch_html(match_link)
     html_sources = [save_raw_html(run_dir, "match_page", match_id, match_link, html)]
-    assets = {
+    existing = read_json(output_path, {}) if output_path.exists() else {}
+    assets = existing if isinstance(existing, dict) and existing.get("match_link") == match_link else {
         "match_id": match_id_from_link(match_link),
         "match_link": match_link,
         "captured_at": now_utc(),
@@ -1373,20 +2006,68 @@ def scrape_match_assets(match_link: str, output_path: Path, delay: float = 0.5) 
         "errors": [],
         "raw_html": html_sources,
     }
+    assets["captured_at"] = assets.get("captured_at") or now_utc()
+    assets["veto"] = assets.get("veto") or parse_veto_html(html)
+    assets["mapstats_links"] = assets.get("mapstats_links") or extract_mapstats_links(html)
+    assets["mapstats"] = assets.get("mapstats") or []
+    assets["errors"] = assets.get("errors") or []
+    assets["raw_html"] = (assets.get("raw_html") or []) + html_sources
+    seen_links = {item.get("source_link") for item in assets["mapstats"] if isinstance(item, dict)}
     log(f"assets {match_id}: veto_steps={len((assets.get('veto') or {}).get('steps') or [])} mapstats_links={len(assets['mapstats_links'])}")
+    write_json(output_path, assets)
+    db_mark_fetch_state(
+        "match_assets",
+        str(match_id),
+        "partial",
+        f"checkpoint match_page maps={len(assets['mapstats'])}/{len(assets['mapstats_links'])}",
+    )
     for index, link in enumerate(assets["mapstats_links"], start=1):
+        if link in seen_links:
+            log(f"assets {match_id}: mapstats {index}/{len(assets['mapstats_links'])} already in partial JSON; skip {link}")
+            continue
         try:
             log(f"assets {match_id}: mapstats {index}/{len(assets['mapstats_links'])} {link}")
             time.sleep(delay)
-            map_html = fetch_html(link)
+            mapstats_id = mapstats_id_from_link(link) or slug_from_link(link)
+            map_html = load_persisted_raw_html("mapstats", mapstats_id) or fetch_html(link)
             meta = save_raw_html(run_dir, "mapstats", mapstats_id_from_link(link) or slug_from_link(link), link, map_html)
             parsed = parse_mapstats_html(map_html, link)
             parsed["raw_html"] = meta
             assets["mapstats"].append(parsed)
+            seen_links.add(link)
+            write_json(output_path, assets)
+            db_mark_fetch_state(
+                "match_assets",
+                str(match_id),
+                "partial",
+                f"checkpoint mapstats maps={len(assets['mapstats'])}/{len(assets['mapstats_links'])}",
+            )
+        except KeyboardInterrupt:
+            write_json(output_path, assets)
+            db_mark_fetch_state(
+                "match_assets",
+                str(match_id),
+                "partial",
+                f"interrupted maps={len(assets['mapstats'])}/{len(assets['mapstats_links'])}",
+            )
+            raise
         except Exception as exc:
             log(f"assets {match_id}: mapstats ERROR {link}: {exc}")
             assets["errors"].append({"link": link, "error": str(exc)})
+            write_json(output_path, assets)
+            db_mark_fetch_state(
+                "match_assets",
+                str(match_id),
+                "partial",
+                f"error mapstats maps={len(assets['mapstats'])}/{len(assets['mapstats_links'])}",
+            )
     write_json(output_path, assets)
+    db_mark_fetch_state(
+        "match_assets",
+        str(match_id),
+        "ok" if not assets.get("errors") else "partial",
+        f"done maps={len(assets['mapstats'])}/{len(assets['mapstats_links'])} errors={len(assets['errors'])}",
+    )
     return assets
 
 
@@ -1844,14 +2525,38 @@ def scrape_upcoming(run_dir: Path) -> list[dict[str, Any]]:
     return matches
 
 
-def scrape_recent_results(run_dir: Path, pages: int = 3) -> dict[str, dict[str, Any]]:
+def scrape_recent_results(
+    run_dir: Path,
+    pages: int = 3,
+    target_ids: set[str] | None = None,
+    target_info: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch `/results` only as much as the DB worklist needs.
+
+    `target_ids is None` means legacy fallback: DB unavailable, keep the old
+    bounded scan. An empty set means SQLite says there are no pending results,
+    so skip `/results` completely.
+    """
     results_by_id: dict[str, dict[str, Any]] = {}
+    if target_ids is not None:
+        target_ids = {str(item) for item in target_ids if item}
+        if not target_ids:
+            log("recent results: DB has no pending_result matches; skipping /results")
+            write_json(run_dir / "recent_results_index.json", results_by_id)
+            write_json(
+                run_dir / "recent_results_manifest.json",
+                {"mode": "db_targeted", "target_count": 0, "pages_fetched": 0, "skipped": True},
+            )
+            return results_by_id
+        log(f"recent results: DB-targeted scan for {len(target_ids)} pending ids (max_pages={pages})")
+    pages_fetched = 0
     for page in range(pages):
         offset = page * 100
         output = run_dir / "raw" / "recent_results" / f"results_offset_{offset}.json"
         try:
             log(f"recent results: fetching offset={offset} ({page + 1}/{pages})")
             html = fetch_html(f"/results?offset={offset}")
+            pages_fetched += 1
             save_raw_html(run_dir, "results_page", f"results_offset_{offset}", f"/results?offset={offset}", html)
             data: list[dict[str, Any] | None] = []
             if PF is not None:
@@ -1867,6 +2572,17 @@ def scrape_recent_results(run_dir: Path, pages: int = 3) -> dict[str, dict[str, 
                 if match_id:
                     results_by_id[match_id] = item
             log(f"recent results: offset={offset} parsed {len(data)} rows")
+            if target_ids is not None:
+                missing = target_ids - set(results_by_id)
+                log(f"recent results: DB targets found={len(target_ids) - len(missing)}/{len(target_ids)}")
+                if not missing:
+                    log("recent results: all DB pending ids found; stopping before older offsets")
+                    break
+                log(
+                    "recent results: still missing "
+                    + "; ".join(format_pending_missing(mid, target_info) for mid in sorted(missing)),
+                    force=VERBOSE,
+                )
             time.sleep(0.2)
             continue
         except Exception as exc:
@@ -1877,13 +2593,35 @@ def scrape_recent_results(run_dir: Path, pages: int = 3) -> dict[str, dict[str, 
         if not ok:
             log(f"recent results: offset={offset} scrapy fallback failed")
             continue
+        pages_fetched += 1
         fallback_rows = read_json(output, [])
         for item in fallback_rows:
             match_id = str(item.get("id") or "")
             if match_id:
                 results_by_id[match_id] = item
         log(f"recent results: offset={offset} scrapy fallback parsed {len(fallback_rows)} rows")
+        if target_ids is not None:
+            missing = target_ids - set(results_by_id)
+            log(f"recent results: DB targets found={len(target_ids) - len(missing)}/{len(target_ids)}")
+            if not missing:
+                log("recent results: all DB pending ids found; stopping before older offsets")
+                break
+            log(
+                "recent results: still missing "
+                + "; ".join(format_pending_missing(mid, target_info) for mid in sorted(missing)),
+                force=VERBOSE,
+            )
     write_json(run_dir / "recent_results_index.json", results_by_id)
+    write_json(
+        run_dir / "recent_results_manifest.json",
+        {
+            "mode": "legacy_scan" if target_ids is None else "db_targeted",
+            "target_count": None if target_ids is None else len(target_ids),
+            "targets_found": None if target_ids is None else len(target_ids & set(results_by_id)),
+            "pages_fetched": pages_fetched,
+            "max_pages": pages,
+        },
+    )
     log(f"recent results: unique matches={len(results_by_id)}")
     return results_by_id
 
@@ -1895,12 +2633,29 @@ def update_pending_matches(
     capture_analytics: bool = True,
 ) -> list[dict[str, Any]]:
     updates = []
-    pending = [record for record in master.values() if record.get("status") != "completed" and record.get("link")]
+    db_pending = db_pending_match_ids()
+    if db_pending is None:
+        pending = [record for record in master.values() if record.get("status") != "completed" and record.get("link")]
+        log("pending updates: DB unavailable, using master JSON fallback")
+    else:
+        pending = [
+            record for record in master.values()
+            if str(record.get("id") or "") in db_pending and record.get("link")
+        ]
+        skipped = max(0, len(db_pending) - len(pending))
+        if skipped:
+            note_freshness_skip(skipped)
+            log(f"pending updates: {skipped} DB pending ids not present in master JSON")
     log(f"pending updates: {len(pending)} pending matches")
     for index, record in enumerate(pending, start=1):
         match_id = record["id"]
         log(f"[pending {index}/{len(pending)}] {record_label(record)}")
         update_item: dict[str, Any] = {"id": match_id}
+        if str(match_id) not in recent_results:
+            update_item["status"] = "still_pending_recent_results_miss"
+            updates.append(update_item)
+            log(f"[pending {index}/{len(pending)}] not found in recent /results; detail skipped")
+            continue
         try:
             log(f"[pending {index}/{len(pending)}] odds snapshot")
             odds_html = fetch_html(record["link"])
@@ -1994,20 +2749,97 @@ def collect_teams_from_details(details: list[dict[str, Any]]) -> dict[str, dict[
 def collect_team_profiles(teams: dict[str, dict[str, Any]], run_dir: Path) -> list[dict[str, Any]]:
     profiles = []
     output_dir = run_dir / "team_profiles"
-    team_list = list(teams.values())
-    log(f"team profiles: {len(team_list)} teams")
+    team_list = []
+    skipped = 0
+    cache_hits = 0
+    for team in teams.values():
+        team_id = str(team.get("id") or "")
+        if db_entity_is_fresh("team_profile", team_id):
+            cached = db_latest_team_profile(team_id)
+            if cached:
+                profiles.append(cached)
+                skipped += 1
+                cache_hits += 1
+                continue
+        team_list.append(team)
+    if skipped:
+        note_freshness_skip(skipped)
+    log(f"team profiles: {len(team_list)} teams to fetch; cache_hits={cache_hits}; skipped_fresh={skipped}")
     for index, team in enumerate(team_list, start=1):
         log(f"[team {index}/{len(team_list)}] {team.get('name') or team.get('id') or '?'}")
         profile = scrape_team_profile(team, output_dir)
+        team_id = str(team.get("id") or "")
         if profile:
             profiles.append(profile)
+            db_mark_fetch_state("team_profile", team_id, "ok")
             log(f"[team {index}/{len(team_list)}] ok")
         else:
+            db_mark_fetch_state("team_profile", team_id, "error", "team profile unavailable")
             log(f"[team {index}/{len(team_list)}] unavailable")
         time.sleep(0.2)
     write_json(run_dir / "team_profiles.json", profiles)
-    log(f"team profiles: collected={len(profiles)}")
+    log(f"team profiles: collected={len(profiles)} fetched={len(team_list)} cache_hits={cache_hits} skipped_fresh={skipped}")
     return profiles
+
+
+def team_profiles_players_are_fresh(team_profiles_file: Path) -> tuple[bool, int]:
+    profiles = read_json(team_profiles_file, [])
+    if not profiles:
+        return True, 0
+    player_ids = player_ids_from_team_profiles_payload(profiles)
+    if not player_ids:
+        return False, 0
+    fresh = sum(1 for player_id in player_ids if db_entity_is_fresh("player_stats", player_id))
+    return fresh == len(player_ids), fresh
+
+
+def player_ids_from_team_profiles_payload(profiles: list[dict[str, Any]]) -> set[str]:
+    player_ids: set[str] = set()
+    for profile in profiles:
+        for player in ((profile.get("profile") or {}).get("squad") or []):
+            player_id = str(player.get("id") or "")
+            if player_id:
+                player_ids.add(player_id)
+    return player_ids
+
+
+def player_ids_from_team_profiles(team_profiles_file: Path) -> set[str]:
+    return player_ids_from_team_profiles_payload(read_json(team_profiles_file, []))
+
+
+def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year: int) -> dict[str, Any] | None:
+    player_ids = player_ids_from_team_profiles(team_profiles_file)
+    snapshots = db_latest_player_snapshots(player_ids)
+    covered_ids = {player_id for player_id, rows in snapshots.items() if rows}
+    if not covered_ids:
+        return None
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for player_rows in snapshots.values():
+        for player in player_rows:
+            grouped.setdefault(str(player.get("time_filter") or "unknown"), []).append(player)
+    results = [
+        {
+            "time_filter": time_filter,
+            "players": sorted(players, key=lambda item: str(item.get("id") or "")),
+            "source": "BBDD.player_stat_snapshots",
+        }
+        for time_filter, players in sorted(grouped.items())
+    ]
+    payload = {
+        "ok": True,
+        "source": "BBDD.player_stat_snapshots",
+        "materialized_from_cache": True,
+        "year": year,
+        "captured_at": now_utc(),
+        "players_requested": len(player_ids),
+        "players_loaded": len(covered_ids),
+        "coverage": len(covered_ids) / max(len(player_ids), 1),
+        "comparisons_collected": len(results),
+        "comparisons_failed": 0,
+        "results": results,
+    }
+    write_json(output, payload)
+    return payload
 
 
 def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, delay: float) -> dict[str, Any]:
@@ -2015,6 +2847,28 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
     if not team_profiles_file.exists():
         log("player stats: missing team_profiles.json")
         return {"ok": False, "reason": "missing_team_profiles"}
+    all_fresh, fresh_count = team_profiles_players_are_fresh(team_profiles_file)
+    if all_fresh:
+        cached = materialize_cached_player_stats(team_profiles_file, output, year)
+        if cached:
+            note_freshness_skip(fresh_count)
+            log(
+                "player stats: materialized from BBDD cache; "
+                f"players_fresh={fresh_count} players_loaded={cached.get('players_loaded')}"
+            )
+            return {
+                "ok": True,
+                "skipped_by_freshness": True,
+                "file": str(output),
+                "players_fresh": fresh_count,
+                "players_requested": cached.get("players_requested"),
+                "players_loaded": cached.get("players_loaded"),
+                "coverage": cached.get("coverage"),
+                "comparisons_collected": cached.get("comparisons_collected"),
+                "comparisons_failed": 0,
+                "source": "BBDD.player_stat_snapshots",
+            }
+        log("player stats: freshness said ok, but BBDD cache was empty; fetching")
 
     def refresh_cf_session(reason: str) -> tuple[bool, str]:
         helper = SCRAPY_ROOT / "hltv_scraper" / "grab_cf.py"
@@ -2096,6 +2950,18 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
     collected = int(payload.get("comparisons_collected") or 0)
     failed = int(payload.get("comparisons_failed") or 0)
     log(f"player stats: collected={collected} failed={failed} ok={ok}")
+    problem_text = " ".join(
+        [
+            str(payload.get("stopped_reason") or ""),
+            str(payload.get("reason") or ""),
+            logs or "",
+        ]
+    ).lower()
+    if not ok and collected == 0:
+        status = "blocked" if any(marker in problem_text for marker in ("cloudflare", "challenge", "403", "cf_session")) else "error"
+        note = str(payload.get("stopped_reason") or payload.get("reason") or "player compare scrape failed")
+        for player_id in player_ids_from_team_profiles(team_profiles_file):
+            db_mark_fetch_state("player_stats", player_id, status, note[:500])
     return {
         "ok": ok or collected > 0,
         "partial": (not ok and collected > 0) or failed > 0,
@@ -2132,19 +2998,26 @@ def collect_completed_match_assets(
     delay: float,
 ) -> dict[str, Any]:
     candidates = []
+    skipped_fresh = 0
     for record in master.values():
         if record.get("status") != "completed" or not record.get("link"):
             continue
         meta = record.get("hltv_assets") or {}
         if meta.get("status") == "ok" and asset_file_exists(meta):
             continue
+        match_id = str(record.get("id") or match_id_from_link(record.get("link")) or "")
+        if db_match_has_coverage(match_id, "has_box_score") or db_entity_is_fresh("match_assets", match_id):
+            skipped_fresh += 1
+            continue
         candidates.append(record)
+    if skipped_fresh:
+        note_freshness_skip(skipped_fresh)
 
     if limit > 0:
         candidates = candidates[:limit]
 
     index = []
-    log(f"completed assets: {len(candidates)} missing/partial completed matches (limit={limit})")
+    log(f"completed assets: {len(candidates)} missing/partial completed matches (limit={limit}) skipped_fresh={skipped_fresh}")
     for item_index, record in enumerate(candidates, start=1):
         match_id = str(record.get("id") or match_id_from_link(record.get("link")) or "")
         if not match_id:
@@ -2166,16 +3039,22 @@ def collect_completed_match_assets(
             }
             record["hltv_assets"] = meta
             index.append({"id": match_id, **meta})
+            db_status = "ok" if meta["status"] == "ok" else "partial"
+            db_mark_fetch_state("match_assets", match_id, db_status, f"maps={meta['mapstats_maps']} errors={len(meta['errors'])}")
             log(f"[assets {item_index}/{len(candidates)}] status={meta['status']} maps={meta['mapstats_maps']} errors={len(meta['errors'])}")
         except Exception as exc:
+            text = str(exc).lower()
+            status = "blocked" if any(marker in text for marker in ("cloudflare", "challenge", "403", "cf_", "turnstile")) else "error"
+            db_mark_fetch_state("match_assets", match_id, status, str(exc)[:500])
             log(f"[assets {item_index}/{len(candidates)}] ERROR {exc}")
-            index.append({"id": match_id, "status": "error", "error": str(exc)})
+            index.append({"id": match_id, "status": status, "error": str(exc)})
         time.sleep(delay)
 
     summary = {
         "eligible_missing": len(candidates),
         "captured": sum(1 for item in index if item.get("status") in {"ok", "partial"}),
         "errors": sum(1 for item in index if item.get("status") == "error"),
+        "skipped_by_freshness": skipped_fresh,
         "limit": limit,
         "index": index,
     }
@@ -2220,6 +3099,12 @@ def collect_rankings(run_dir: Path) -> dict[str, Any]:
         "hltv": "/ranking/teams",
         "valve": "/valve-ranking/teams",
     }.items():
+        entity_type = "ranking_hltv" if ranking_type == "hltv" else "ranking_valve"
+        if db_entity_is_fresh(entity_type, "global"):
+            note_freshness_skip()
+            log(f"ranking {ranking_type}: skipped by fetch_state freshness")
+            summary[ranking_type] = {"ok": True, "skipped_by_freshness": True, "count": 0}
+            continue
         try:
             log(f"ranking {ranking_type}: fetching {link}")
             html = fetch_html(link)
@@ -2422,6 +3307,79 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
     return snapshot
 
 
+def materialize_persistent_match_snapshot(
+    master: dict[str, Any],
+    match: dict[str, Any],
+    run_dir: Path,
+) -> dict[str, Any] | None:
+    """Reutiliza la foto PRE-MATCH original dentro del run actual.
+
+    La idempotencia evita otra petición a HLTV, pero el run debe seguir
+    conteniendo todos los upcoming para que enriquecimiento y web no queden
+    vacíos. `captured_at` y la evidencia original se conservan intactos.
+    """
+    match_id = str(match.get("id") or match_id_from_link(match.get("link") or "") or "")
+    record = master.get(match_id) or {}
+    if not match_id or not record:
+        return None
+
+    candidate_files: list[str] = []
+    if record.get("latest_snapshot_file"):
+        candidate_files.append(str(record["latest_snapshot_file"]))
+    candidate_files.extend(
+        str(item) for item in reversed(record.get("snapshot_files") or []) if item
+    )
+
+    snapshot: dict[str, Any] | None = None
+    for candidate in dict.fromkeys(candidate_files):
+        source_path = Path(candidate)
+        if not source_path.is_absolute():
+            source_path = DATA_ROOT / Path(candidate.replace("\\", os.sep))
+        payload = read_json(source_path, None)
+        if isinstance(payload, list):
+            payload = payload[0] if payload else None
+        if isinstance(payload, dict) and str(payload.get("id") or "") == match_id:
+            snapshot = dict(payload)
+            break
+
+    if snapshot is None:
+        detail = record.get("detail")
+        if not isinstance(detail, dict):
+            return None
+        snapshot = {
+            "id": match_id,
+            "captured_at": record.get("first_seen_at") or record.get("last_seen_at"),
+            "data_quality": record.get("data_quality") or {
+                "real_pre_match_snapshot": True,
+                "legacy_backfill": False,
+            },
+            "source": "persistent_master_record",
+            "detail": detail,
+            "odds": record.get("latest_odds") or {
+                "available": False,
+                "bookmaker_count": 0,
+                "providers": [],
+                "average": None,
+            },
+            "analytics": record.get("analytics") or {},
+            "match_context": record.get("match_context"),
+        }
+
+    snapshot["upcoming_row"] = match
+    snapshot["link"] = match.get("link") or record.get("link") or snapshot.get("link")
+    snapshot["date"] = match.get("date") or record.get("date") or snapshot.get("date")
+    snapshot["hour"] = match.get("hour") or record.get("hour") or snapshot.get("hour")
+    snapshot["format"] = match.get("meta") or record.get("format") or snapshot.get("format")
+    snapshot["event"] = match.get("event") or record.get("event") or snapshot.get("event")
+    snapshot["status"] = "completed" if record.get("status") == "completed" else "pending"
+    quality = dict(snapshot.get("data_quality") or {})
+    quality["materialized_from_persistent_snapshot"] = True
+    quality["original_captured_at"] = snapshot.get("captured_at")
+    snapshot["data_quality"] = quality
+    write_json(run_dir / "match_snapshots" / f"{match_id}.json", snapshot)
+    return snapshot
+
+
 def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_dir: Path) -> None:
     match_id = snapshot["id"]
     record = master.get(match_id, {"id": match_id, "first_seen_at": snapshot["captured_at"]})
@@ -2474,7 +3432,12 @@ def main() -> int:
     parser.add_argument("--skip-player-stats", action="store_true")
     parser.add_argument("--skip-team-profiles", action="store_true")
     parser.add_argument("--skip-match-assets", action="store_true", help="No captura veto/mapstats de partidos completados.")
-    parser.add_argument("--match-assets-limit", type=int, default=50, help="Maximo de partidos completados a backfillear; 0 = todos.")
+    parser.add_argument(
+        "--match-assets-limit",
+        type=int,
+        default=int(os.environ.get("BBDD_ASSETS_BACKFILL_LIMIT", "20")),
+        help="Maximo de partidos completados a backfillear; 0 = todos.",
+    )
     parser.add_argument("--match-assets-delay", type=float, default=0.5, help="Retardo entre peticiones de assets HLTV.")
     parser.add_argument("--skip-analytics", action="store_true", help="No captura HLTV betting analytics de partidos upcoming.")
     parser.add_argument("--skip-rankings", action="store_true", help="No captura rankings actuales HLTV/Valve.")
@@ -2512,8 +3475,15 @@ def main() -> int:
     write_json(run_dir / "manifest.json", manifest)
 
     log("phase: recent results", force=VERBOSE)
-    recent_results = scrape_recent_results(run_dir)
-    manifest["steps"]["recent_results"] = {"count": len(recent_results)}
+    db_pending_for_results = db_pending_match_ids()
+    db_pending_info = db_pending_match_info()
+    if db_pending_for_results is None:
+        log("recent results phase: DB unavailable, using legacy bounded scan", force=VERBOSE)
+    else:
+        log(f"recent results phase: DB pending targets={len(db_pending_for_results)}", force=VERBOSE)
+    recent_results = scrape_recent_results(run_dir, target_ids=db_pending_for_results, target_info=db_pending_info)
+    recent_manifest = read_json(run_dir / "recent_results_manifest.json", {})
+    manifest["steps"]["recent_results"] = {"count": len(recent_results), **recent_manifest}
     write_json(run_dir / "manifest.json", manifest)
 
     log("phase: pending updates", force=VERBOSE)
@@ -2555,8 +3525,28 @@ def main() -> int:
         raise RuntimeError(manifest["failure"])
 
     snapshots = []
+    reused_photographed = 0
+    missing_persistent_snapshot = 0
     for index, match in enumerate(upcoming, start=1):
         log(f"[snapshot {index}/{len(upcoming)}] {match_label(match)}", force=VERBOSE)
+        match_id = str(match.get("id") or match_id_from_link(match.get("link") or "") or "")
+        if db_match_already_photographed(match_id):
+            cached_snapshot = materialize_persistent_match_snapshot(master, match, run_dir)
+            if cached_snapshot is not None:
+                snapshots.append(cached_snapshot)
+                reused_photographed += 1
+                note_freshness_skip()
+                log(
+                    f"[snapshot {index}/{len(upcoming)}] reused persistent PRE-MATCH snapshot "
+                    f"captured_at={cached_snapshot.get('captured_at')}",
+                    force=VERBOSE,
+                )
+                continue
+            missing_persistent_snapshot += 1
+            log(
+                f"[snapshot {index}/{len(upcoming)}] DB says photographed but snapshot is missing; recapturing",
+                force=True,
+            )
         snapshot = build_match_snapshot(match, run_dir, capture_analytics=not args.skip_analytics)
         snapshots.append(snapshot)
         upsert_master_record(master, snapshot, run_dir)
@@ -2573,7 +3563,13 @@ def main() -> int:
         )
         time.sleep(0.2)
     write_json(run_dir / "matches_snapshot_index.json", snapshots)
-    manifest["steps"]["match_snapshots"] = {"count": len(snapshots)}
+    manifest["steps"]["match_snapshots"] = {
+        "count": len(snapshots),
+        "captured_online": len(snapshots) - reused_photographed,
+        "reused_from_persistent_snapshot": reused_photographed,
+        "persistent_snapshot_missing_recaptured": missing_persistent_snapshot,
+        "skipped_already_photographed": 0,
+    }
     write_json(run_dir / "manifest.json", manifest)
 
     details = [snapshot["detail"] for snapshot in snapshots if isinstance(snapshot.get("detail"), dict)]

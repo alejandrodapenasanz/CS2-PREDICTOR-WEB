@@ -34,6 +34,8 @@ from cs2model.features import (  # noqa: E402
     ANALYTICS_FEATURE_COLUMNS,
     DIFF_COLUMNS,
     FEATURE_COLUMNS,
+    MAP_ASSET_DIFF_COLUMNS,
+    MAP_ASSET_FEATURE_COLUMNS,
     ChronologicalState,
     _clean_team,
     _period_index,
@@ -59,7 +61,7 @@ POSTVETO_SYM_COLUMNS = [
     "postveto_min_map_samples",
 ]
 POSTVETO_COLUMNS = POSTVETO_DIFF_COLUMNS + POSTVETO_SYM_COLUMNS
-EXTRA_DIFF_COLUMNS = set(ANALYTICS_DIFF_COLUMNS) | set(POSTVETO_DIFF_COLUMNS) | {"opening_odds_prob_centered"}
+EXTRA_DIFF_COLUMNS = set(MAP_ASSET_DIFF_COLUMNS) | set(ANALYTICS_DIFF_COLUMNS) | set(POSTVETO_DIFF_COLUMNS) | {"opening_odds_prob_centered"}
 
 
 def _safe_float(value: Any) -> float | None:
@@ -339,9 +341,9 @@ def main() -> int:
     X_with_odds = add_odds_features(X_dicts, rows)
     periods = np.asarray([_period_index(row.get("date_obj")) for row in rows], dtype=int)
 
-    no_asset_cols = [col for col in FEATURE_COLUMNS if not col.startswith("asset_")]
-    asset_cols = list(FEATURE_COLUMNS)
-    analytics_cols = list(FEATURE_COLUMNS) + list(ANALYTICS_FEATURE_COLUMNS)
+    no_asset_cols = list(FEATURE_COLUMNS)
+    asset_cols = list(FEATURE_COLUMNS) + list(MAP_ASSET_FEATURE_COLUMNS)
+    analytics_cols = asset_cols + list(ANALYTICS_FEATURE_COLUMNS)
     odds_cols = analytics_cols + list(ODDS_FEATURE_COLUMNS)
     postveto_cols = odds_cols + list(POSTVETO_COLUMNS)
 

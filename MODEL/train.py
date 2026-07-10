@@ -13,7 +13,7 @@ Pipeline (PROJECT.md §5, §7, §8):
   6. Importancia de features con SHAP (interpretabilidad).
 
 Uso:
-    python MODEL/train.py
+    python MODEL/train.py                         # fuente por defecto: BBDD/cs2.db
     python MODEL/train.py --raw <results_all.json> --warmup-weeks 10 --min-train 800
 """
 
@@ -39,19 +39,26 @@ from cs2model.features import (
     build_training_frame,
     FEATURE_COLUMNS,
     DIFF_COLUMNS,
-    ANALYTICS_DIFF_COLUMNS,
     ANALYTICS_FEATURE_COLUMNS,
     CONTEXT_FEATURE_COLUMNS,
+    PLAYER_FEATURE_COLUMNS,
+    MAP_ASSET_FEATURE_COLUMNS,
+    EVENT_HISTORY_FEATURE_COLUMNS,
+    RANKING_FEATURE_COLUMNS,
+    ROSTER_FEATURE_COLUMNS,
+    EXTENDED_DIFF_COLUMNS,
     _period_index,
 )
 from cs2model.metrics import metric_dict, calibration_bins
 from cs2model.artifacts import ModelArtifact, Component, ARTIFACT_PATH
+from cs2model.calibration import BetaCalibratedClassifier
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RAW = (
     ROOT / "SCRAPPER" / "hltv-scraper-api" / "hltv_scraper" / "data" / "raw"
     / "history_10000_2026-06-28" / "results_all.json"
 )
+DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
 OUTPUT_DIR = ROOT / "MODEL" / "results"
 MODEL_REGISTRY_DIR = ROOT / "MODEL" / "artifacts" / "registry"
 ODDS_FEATURE_COLUMNS = [
@@ -63,6 +70,20 @@ EXTRA_DIFF_COLUMNS = {"opening_odds_prob_centered"}
 ANALYTICS_MIN_TRAIN_ROWS = 120
 CONTEXT_MIN_TRAIN_ROWS = 200
 CONTEXT_MIN_ENV_ROWS = 50
+PLAYER_MIN_TRAIN_ROWS = 200
+MAP_ASSET_MIN_TRAIN_ROWS = 200
+EVENT_HISTORY_MIN_TRAIN_ROWS = 200
+RANKING_MIN_TRAIN_ROWS = 200
+ROSTER_MIN_TRAIN_ROWS = 200
+
+AUTO_FEATURE_FAMILIES = (
+    ("map_box_scores", MAP_ASSET_FEATURE_COLUMNS, "asset_available", MAP_ASSET_MIN_TRAIN_ROWS),
+    ("event_history", EVENT_HISTORY_FEATURE_COLUMNS, "event_history_available", EVENT_HISTORY_MIN_TRAIN_ROWS),
+    ("analytics", ANALYTICS_FEATURE_COLUMNS, "analytics_available", ANALYTICS_MIN_TRAIN_ROWS),
+    ("player_snapshots", PLAYER_FEATURE_COLUMNS, "player_snapshot_available", PLAYER_MIN_TRAIN_ROWS),
+    ("rankings", RANKING_FEATURE_COLUMNS, "ranking_available", RANKING_MIN_TRAIN_ROWS),
+    ("roster", ROSTER_FEATURE_COLUMNS, "roster_available", ROSTER_MIN_TRAIN_ROWS),
+)
 
 
 def _matrix(rows: list[dict[str, float]], cols: list[str]) -> np.ndarray:
@@ -70,8 +91,6 @@ def _matrix(rows: list[dict[str, float]], cols: list[str]) -> np.ndarray:
 
 
 def select_feature_columns(X_dicts: list[dict[str, float]]) -> tuple[list[str], dict[str, Any]]:
-    analytics_rows = sum(1 for row in X_dicts if (row.get("analytics_available") or 0.0) >= 0.5)
-    analytics_enabled = analytics_rows >= ANALYTICS_MIN_TRAIN_ROWS
     context_rows = sum(1 for row in X_dicts if (row.get("context_available") or 0.0) >= 0.5)
     lan_rows = sum(1 for row in X_dicts if (row.get("context_is_lan") or 0.0) >= 0.5)
     online_rows = sum(1 for row in X_dicts if (row.get("context_is_online") or 0.0) >= 0.5)
@@ -82,38 +101,47 @@ def select_feature_columns(X_dicts: list[dict[str, float]]) -> tuple[list[str], 
         and online_rows >= CONTEXT_MIN_ENV_ROWS
     )
     columns = list(FEATURE_COLUMNS)
-    if analytics_enabled:
-        columns += list(ANALYTICS_FEATURE_COLUMNS)
+    policies: dict[str, Any] = {}
+    for name, family_columns, availability_column, min_rows in AUTO_FEATURE_FAMILIES:
+        available_rows = sum(
+            1 for row in X_dicts
+            if (row.get(availability_column) or 0.0) >= 0.5
+        )
+        enabled = available_rows >= min_rows
+        if enabled:
+            columns += list(family_columns)
+        policies[name] = {
+            "available_rows": available_rows,
+            "min_rows": min_rows,
+            "availability_column": availability_column,
+            "enabled": enabled,
+            "columns": list(family_columns) if enabled else [],
+            "activation": "automatic_at_training_time",
+            "note": (
+                f"{name} enabled automatically in training."
+                if enabled else
+                f"{name} stored but excluded until enough closed point-in-time rows exist."
+            ),
+        }
     if context_enabled:
         columns += list(CONTEXT_FEATURE_COLUMNS)
-    return columns, {
-        "analytics": {
-            "available_rows": analytics_rows,
-            "min_rows": ANALYTICS_MIN_TRAIN_ROWS,
-            "enabled": analytics_enabled,
-            "columns": list(ANALYTICS_FEATURE_COLUMNS) if analytics_enabled else [],
-            "note": (
-                "Analytics features enabled in training."
-                if analytics_enabled else
-                "Analytics captured and stored, but excluded from training until enough closed point-in-time rows exist."
-            ),
-        },
-        "context": {
-            "available_rows": context_rows,
-            "lan_rows": lan_rows,
-            "online_rows": online_rows,
-            "stage_rows": stage_rows,
-            "min_rows": CONTEXT_MIN_TRAIN_ROWS,
-            "min_env_rows": CONTEXT_MIN_ENV_ROWS,
-            "enabled": context_enabled,
-            "columns": list(CONTEXT_FEATURE_COLUMNS) if context_enabled else [],
-            "note": (
-                "Tournament context features enabled in training."
-                if context_enabled else
-                "Tournament context captured and stored, but excluded from production training until LAN/online coverage is balanced enough."
-            ),
-        },
+    policies["context"] = {
+        "available_rows": context_rows,
+        "lan_rows": lan_rows,
+        "online_rows": online_rows,
+        "stage_rows": stage_rows,
+        "min_rows": CONTEXT_MIN_TRAIN_ROWS,
+        "min_env_rows": CONTEXT_MIN_ENV_ROWS,
+        "enabled": context_enabled,
+        "columns": list(CONTEXT_FEATURE_COLUMNS) if context_enabled else [],
+        "activation": "automatic_at_training_time",
+        "note": (
+            "Tournament context enabled automatically in training."
+            if context_enabled else
+            "Tournament context stored but excluded until total and LAN/online coverage pass their thresholds."
+        ),
     }
+    return columns, policies
 
 
 def augment(X: np.ndarray, y: np.ndarray, cols: list[str]) -> tuple[np.ndarray, np.ndarray]:
@@ -123,43 +151,109 @@ def augment(X: np.ndarray, y: np.ndarray, cols: list[str]) -> tuple[np.ndarray, 
     """
     diff_idx = [
         i for i, c in enumerate(cols)
-        if c in DIFF_COLUMNS or c in ANALYTICS_DIFF_COLUMNS or c in EXTRA_DIFF_COLUMNS
+        if c in DIFF_COLUMNS or c in EXTENDED_DIFF_COLUMNS or c in EXTRA_DIFF_COLUMNS
     ]
     X_rev = X.copy()
     X_rev[:, diff_idx] *= -1.0
     return np.vstack([X, X_rev]), np.concatenate([y, 1 - y])
 
 
-def make_lgbm():
+# Features "ventaja de team1": a mayor valor, mas probable que gane team1. Se
+# imponen como restricciones monotonas crecientes en los GBDT: reducen overfitting
+# con ~7k series y mejoran la generalizacion (LightGBM monotone_constraints).
+MONOTONE_INCREASING = {
+    "glicko_prob_centered", "glicko_diff", "elo_prob_centered", "elo_diff",
+    "winrate_diff", "winrate_decay_diff", "last5_winrate_diff", "last10_winrate_diff",
+    "last20_winrate_diff", "last30_winrate_diff", "avg_score_diff", "last5_score_diff",
+    "last10_score_diff", "last20_score_diff", "streak_diff",
+    "format_winrate_diff", "format_avg_score_diff",
+    "h2h_winrate_centered", "format_h2h_winrate_centered",
+    "asset_map_winrate_diff", "asset_rating_l10_diff",
+    "event_winrate_diff", "analytics_map_win_pct_diff",
+    "player_rating_diff", "player_kpr_diff", "player_adr_diff", "player_impact_diff",
+    "player_opening_kpr_diff",
+    "ranking_hltv_position_advantage", "ranking_hltv_points_diff",
+    "ranking_valve_position_advantage", "ranking_valve_points_diff",
+    "roster_days_log_diff", "roster_standin_risk_advantage",
+}
+CALIBRATION_METHODS = ("sigmoid", "isotonic", "beta")
+
+
+def _monotone_vector(cols: list[str]) -> list[int]:
+    return [1 if c in MONOTONE_INCREASING else 0 for c in cols]
+
+
+def _catboost_available() -> bool:
+    try:
+        import catboost  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def make_lgbm(monotone: list[int] | None = None, verbose: bool = False):
     try:
         from lightgbm import LGBMClassifier
 
-        return LGBMClassifier(
-            n_estimators=350,
-            learning_rate=0.03,
-            num_leaves=24,
+        params = dict(
+            n_estimators=2000,          # techo alto; el early stopping lo recorta
+            learning_rate=0.02,
+            num_leaves=31,
             max_depth=-1,
-            min_child_samples=50,
-            subsample=0.85,
+            min_child_samples=80,
+            subsample=0.8,
             subsample_freq=1,
-            colsample_bytree=0.85,
-            reg_lambda=3.0,
+            colsample_bytree=0.8,
+            reg_lambda=5.0,
             reg_alpha=0.0,
             objective="binary",
             n_jobs=-1,
-            verbosity=-1,
+            verbosity=1 if verbose else -1,
         )
+        if monotone is not None and any(monotone):
+            params["monotone_constraints"] = monotone
+        return LGBMClassifier(**params)
     except ModuleNotFoundError:
         from sklearn.ensemble import HistGradientBoostingClassifier
 
-        return HistGradientBoostingClassifier(
-            max_iter=350,
+        kwargs = dict(
+            max_iter=600,
             learning_rate=0.03,
-            max_leaf_nodes=24,
-            min_samples_leaf=50,
-            l2_regularization=3.0,
+            max_leaf_nodes=31,
+            min_samples_leaf=80,
+            l2_regularization=5.0,
+            early_stopping=True,
+            validation_fraction=0.15,
+            n_iter_no_change=40,
             random_state=42,
         )
+        if monotone is not None and any(monotone):
+            kwargs["monotonic_cst"] = monotone
+        return HistGradientBoostingClassifier(**kwargs)
+
+
+def make_catboost(monotone: list[int] | None = None, verbose: bool = False):
+    """CatBoost calibrado suele mejorar el log loss (ordered boosting, arboles
+    simetricos). Opcional: si no esta instalado devuelve None y se omite el
+    candidato (literatura: XGBoost/CatBoost/LightGBM boosting comparison)."""
+    try:
+        from catboost import CatBoostClassifier
+    except Exception:
+        return None
+    params = dict(
+        iterations=2000,
+        learning_rate=0.02,
+        depth=5,
+        l2_leaf_reg=6.0,
+        loss_function="Logloss",
+        eval_metric="Logloss",
+        random_seed=42,
+        allow_writing_files=False,
+        verbose=100 if verbose else False,
+    )
+    if monotone is not None and any(monotone):
+        params["monotone_constraints"] = list(monotone)
+    return CatBoostClassifier(**params)
 
 
 def make_logistic():
@@ -177,39 +271,119 @@ def make_logistic():
     )
 
 
-def _new_estimator(kind: str):
-    return make_lgbm() if kind == "gbm" else make_logistic()
+def _new_estimator(kind: str, cols: list[str], verbose: bool = False):
+    if kind == "gbm":
+        return make_lgbm(_monotone_vector(cols), verbose=verbose)
+    if kind == "catboost":
+        return make_catboost(_monotone_vector(cols), verbose=verbose)
+    return make_logistic()
 
 
-def fit_calibrated(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
-                   cal_frac: float = 0.2, random_state: int = 0, method: str = "sigmoid"):
-    """Ajusta un estimador base + un calibrado Platt (sigmoid) sobre holdout aleatorio.
+def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
+              random_state: int = 0, verbose: bool = False):
+    """Ajusta el base con augmentacion por simetria y, en GBDT, early stopping
+    sobre un holdout interno por log loss (evita fijar n_estimators a mano)."""
+    est = _new_estimator(kind, cols, verbose=verbose)
+    if kind in ("gbm", "catboost"):
+        from sklearn.model_selection import train_test_split
 
-    Devuelve (base, calibrated):
-      - base:       estimador crudo (predict_proba sin calibrar).
-      - calibrated: CalibratedClassifierCV(prefit) — probabilidades calibradas.
+        try:
+            idx = np.arange(len(X_tr))
+            tr, va = train_test_split(idx, test_size=0.15, random_state=random_state, stratify=y_tr)
+            Xf, yf = augment(X_tr[tr], y_tr[tr], cols)
+            if kind == "gbm":
+                try:
+                    import lightgbm as lgb
 
-    El holdout es ALEATORIO estratificado para no perder recencia. Platt es de
-    baja varianza (2 parámetros): rara vez degrada un modelo ya calibrado, a
-    diferencia de la isotónica con holdouts pequeños (PROJECT.md §7.4).
-    """
+                    est.fit(
+                        Xf, yf,
+                        eval_set=[(X_tr[va], y_tr[va])],
+                        eval_metric="binary_logloss",
+                        callbacks=[
+                            lgb.early_stopping(80, verbose=verbose),
+                            lgb.log_evaluation(50 if verbose else 0),
+                        ],
+                    )
+                    return est
+                except Exception:
+                    pass  # HistGB fallback (early stopping interno) o firma distinta
+            else:  # catboost
+                est.fit(
+                    Xf, yf,
+                    eval_set=(X_tr[va], y_tr[va]),
+                    use_best_model=True,
+                    verbose=100 if verbose else False,
+                )
+                return est
+        except Exception:
+            pass
+        est = _new_estimator(kind, cols, verbose=verbose)  # fallback robusto sin early stopping
+        Xf, yf = augment(X_tr, y_tr, cols)
+        est.fit(Xf, yf)
+        return est
+    Xf, yf = augment(X_tr, y_tr, cols)
+    est.fit(Xf, yf)
+    return est
+
+
+def _make_calibrator(base, X_cal: np.ndarray, y_cal: np.ndarray, method: str):
+    if method == "beta":
+        return BetaCalibratedClassifier(base).fit(X_cal, y_cal)
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.frozen import FrozenEstimator
+
+    return CalibratedClassifierCV(FrozenEstimator(base), method=method).fit(X_cal, y_cal)
+
+
+def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
+                         methods: tuple[str, ...] = CALIBRATION_METHODS,
+                         cal_frac: float = 0.2, random_state: int = 0,
+                         verbose: bool = False):
+    """Ajusta el base UNA vez y devuelve (base, {metodo: estimador_calibrado}).
+
+    El base se entrena sobre tr_idx (augmentado) y cada calibrador sobre cal_idx.
+    Compartir el base hace barato comparar sigmoid/isotonica/beta por fold.
+    """
     from sklearn.model_selection import train_test_split
 
     idx = np.arange(len(X_tr))
-    tr_idx, cal_idx = train_test_split(
-        idx, test_size=cal_frac, random_state=random_state, stratify=y_tr
-    )
-    base = _new_estimator(kind)
-    Xf, yf = augment(X_tr[tr_idx], y_tr[tr_idx], cols)
-    base.fit(Xf, yf)
+    tr_idx, cal_idx = train_test_split(idx, test_size=cal_frac, random_state=random_state, stratify=y_tr)
+    base = _fit_base(kind, X_tr[tr_idx], y_tr[tr_idx], cols,
+                     random_state=random_state, verbose=verbose)
+    cals: dict[str, Any] = {}
+    for m in methods:
+        try:
+            cals[m] = _make_calibrator(base, X_tr[cal_idx], y_tr[cal_idx], m)
+        except Exception:
+            continue
+    return base, cals
 
-    # FrozenEstimator: calibra sobre el base ya entrenado sin reentrenarlo
-    # (sustituye al antiguo cv='prefit', retirado en sklearn 1.8).
-    calibrated = CalibratedClassifierCV(FrozenEstimator(base), method=method)
-    calibrated.fit(X_tr[cal_idx], y_tr[cal_idx])
-    return base, calibrated
+
+def fit_calibrated(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
+                   cal_frac: float = 0.2, random_state: int = 0, method: str = "sigmoid",
+                   verbose: bool = False):
+    """Compat de un solo metodo (usado por Model B): devuelve (base, calibrado)."""
+    base, cals = fit_calibrated_multi(kind, X_tr, y_tr, cols, methods=(method,),
+                                      cal_frac=cal_frac, random_state=random_state,
+                                      verbose=verbose)
+    return base, (cals.get(method) or cals.get("sigmoid"))
+
+
+def candidate_specs(has_catboost: bool) -> dict[str, tuple[list[str], str]]:
+    """name -> (kinds, metodo_calibracion). Cada candidato es una media de
+    estimadores calibrados, reproducible como Components del artefacto. La
+    seleccion por log loss decide cual va a produccion (seguro por construccion)."""
+    specs: dict[str, tuple[list[str], str]] = {
+        "logistic_cal": (["logistic"], "sigmoid"),
+        "lightgbm_cal": (["gbm"], "sigmoid"),
+        "ensemble_cal": (["logistic", "gbm"], "sigmoid"),
+        "ensemble_iso": (["logistic", "gbm"], "isotonic"),
+        "ensemble_beta": (["logistic", "gbm"], "beta"),
+    }
+    if has_catboost:
+        specs["catboost_cal"] = (["catboost"], "sigmoid")
+        specs["ensemble3_cal"] = (["logistic", "gbm", "catboost"], "sigmoid")
+    return specs
 
 
 def _proba(est, X: np.ndarray) -> np.ndarray:
@@ -224,8 +398,16 @@ def walk_forward(
     cols: list[str],
     warmup_weeks: int,
     min_train: int,
+    gap: int = 0,
+    has_catboost: bool = False,
+    verbose: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Walk-forward semanal. Devuelve predicciones por modelo."""
+    """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
+
+    `gap` deja periodos de separacion entre el fin del entrenamiento y el test
+    (endurece contra fuga temporal). Los candidatos vienen de `candidate_specs`
+    y se eligen despues por menor log loss (seguro por construccion).
+    """
     preds: dict[str, list[dict[str, Any]]] = defaultdict(list)
     uniq_periods = sorted(set(periods.tolist()))
     test_periods = uniq_periods[warmup_weeks:]
@@ -233,29 +415,69 @@ def walk_forward(
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
 
+    specs = candidate_specs(has_catboost)
+    kinds = sorted({k for spec in specs.values() for k in spec[0]})
+
     for wi, period in enumerate(test_periods):
-        train_mask = periods < period
+        train_mask = periods < (period - gap)
         test_mask = periods == period
         if train_mask.sum() < min_train or len(np.unique(y_all[train_mask])) < 2:
+            if verbose:
+                print(
+                    f"      fold {wi+1:03d}/{len(test_periods):03d} period={period}: "
+                    f"SKIP train={int(train_mask.sum())} test={int(test_mask.sum())}",
+                    flush=True,
+                )
             continue
         X_tr, y_tr = X_all[train_mask], y_all[train_mask]
         X_te, y_te = X_all[test_mask], y_all[test_mask]
         te_meta = [meta[i] for i in np.where(test_mask)[0]]
         base_rate = float(np.mean(y_tr))
+        if verbose:
+            print(
+                f"      fold {wi+1:03d}/{len(test_periods):03d} period={period}: "
+                f"train={len(X_tr)} test={len(X_te)} kinds={','.join(kinds)}",
+                flush=True,
+            )
 
         # baselines (sin ajuste)
         elo_p = np.clip(X_te[:, elo_idx] + 0.5, 1e-4, 1 - 1e-4)
         glicko_p = np.clip(X_te[:, glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
 
-        # componentes (logística + GBM): crudo y calibrado (Platt)
-        log_base, log_cal = fit_calibrated("logistic", X_tr, y_tr, cols, random_state=wi)
-        gbm_base, gbm_cal = fit_calibrated("gbm", X_tr, y_tr, cols, random_state=wi)
-        cand = {
-            "logistic_cal": _proba(log_cal, X_te),
-            "lightgbm_cal": _proba(gbm_cal, X_te),
-            "ensemble_cal": np.clip(0.5 * _proba(log_cal, X_te) + 0.5 * _proba(gbm_cal, X_te), 1e-4, 1 - 1e-4),
-            "ensemble_raw": np.clip(0.5 * _proba(log_base, X_te) + 0.5 * _proba(gbm_base, X_te), 1e-4, 1 - 1e-4),
-        }
+        # Ajusta cada tipo de base una vez (con sus calibradores) y reusa.
+        fitted: dict[str, Any] = {}
+        for kind in kinds:
+            try:
+                if verbose:
+                    print(f"        fitting {kind}...", flush=True)
+                fitted[kind] = fit_calibrated_multi(
+                    kind, X_tr, y_tr, cols, random_state=wi, verbose=verbose
+                )
+            except Exception:
+                fitted[kind] = None
+                if verbose:
+                    print(f"        fitting {kind}: FAILED", flush=True)
+
+        def _cand_pred(spec: tuple[list[str], str]) -> np.ndarray | None:
+            est_kinds, method = spec
+            arrs = []
+            for k in est_kinds:
+                fk = fitted.get(k)
+                if not fk:
+                    return None
+                est = fk[1].get(method) or fk[1].get("sigmoid")
+                if est is None:
+                    return None
+                arrs.append(_proba(est, X_te))
+            if not arrs:
+                return None
+            return np.clip(np.mean(arrs, axis=0), 1e-4, 1 - 1e-4)
+
+        cand: dict[str, np.ndarray] = {}
+        for name, spec in specs.items():
+            arr = _cand_pred(spec)
+            if arr is not None:
+                cand[name] = arr
 
         for i, m in enumerate(te_meta):
             common = {
@@ -312,6 +534,62 @@ def segmented_eval(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "log_loss": round(float(np.mean(-(yy * np.log(pp) + (1 - yy) * np.log(1 - pp)))), 4),
         })
     return out
+
+
+def favorite_accuracy_bands(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Accuracy y calibracion del favorito puro en franjas de 10 puntos."""
+    bands = [
+        (0.50, 0.60, "50-60%"),
+        (0.60, 0.70, "60-70%"),
+        (0.70, 0.80, "70-80%"),
+        (0.80, 0.90, "80-90%"),
+        (0.90, 1.01, "90-100%"),
+    ]
+    output: list[dict[str, Any]] = []
+    total_correct = 0
+    for low, high, label in bands:
+        selected = []
+        for row in rows:
+            probability = float(row["prob_team1"])
+            confidence = max(probability, 1.0 - probability)
+            if low <= confidence < high:
+                selected.append((row, confidence))
+        n = len(selected)
+        correct = sum(
+            1
+            for row, _confidence in selected
+            if (float(row["prob_team1"]) >= 0.5) == bool(row["actual"])
+        )
+        total_correct += correct
+        accuracy = correct / n if n else None
+        average_probability = (
+            sum(confidence for _row, confidence in selected) / n if n else None
+        )
+        output.append(
+            {
+                "band": label,
+                "low": low,
+                "high": min(high, 1.0),
+                "n": n,
+                "correct": correct,
+                "accuracy": accuracy,
+                "average_predicted_probability": average_probability,
+                "calibration_gap": (
+                    accuracy - average_probability
+                    if accuracy is not None and average_probability is not None
+                    else None
+                ),
+                "representative": n >= 30,
+            }
+        )
+    total = len(rows)
+    return {
+        "n": total,
+        "correct": total_correct,
+        "accuracy": total_correct / total if total else None,
+        "bands": output,
+        "method": "walk_forward_model_favorite_10_point_bands",
+    }
 
 
 def market_benchmark(rows: list[dict[str, Any]], preds: dict[str, list[dict[str, Any]]],
@@ -373,14 +651,13 @@ def economic_backtest(rows: list[dict[str, Any]], prod_rows: list[dict[str, Any]
         odds2 = _safe_decimal_odds(row.get("opening_odds_decimal_t2"))
         if odds1 is None or odds2 is None:
             continue
-        k1 = _kelly_fraction(p1, odds1)
-        k2 = _kelly_fraction(p2, odds2)
-        if max(k1, k2) <= 0:
-            continue
-        side = "team1" if k1 >= k2 else "team2"
+        side = "team1" if p1 >= 0.5 else "team2"
         probability = p1 if side == "team1" else p2
         odds = odds1 if side == "team1" else odds2
-        fraction = min(0.025, 0.25 * max(k1, k2))
+        kelly = _kelly_fraction(probability, odds)
+        if kelly <= 0:
+            continue
+        fraction = min(0.025, 0.25 * kelly)
         stake = bankroll * fraction
         won = bool(row["team1_win"]) if side == "team1" else not bool(row["team1_win"])
         pnl = stake * (odds - 1.0) if won else -stake
@@ -410,8 +687,11 @@ def economic_backtest(rows: list[dict[str, Any]], prod_rows: list[dict[str, Any]
         "profit_fraction_start_bankroll": bankroll - 1.0,
         "final_bankroll": bankroll,
         "max_drawdown": max_drawdown,
-        "staking": "quarter_kelly_cap_2_5pct",
-        "note": "Solo usa odds de apertura guardadas; n pequeno hasta acumular mas mercado.",
+        "staking": "model_favorite_only_quarter_kelly_cap_2_5pct",
+        "note": (
+            "Siempre apuesta al favorito puro del modelo; las odds de apertura "
+            "solo filtran EV positivo y dimensionan el stake."
+        ),
         "bets": bets,
     }
 
@@ -616,29 +896,63 @@ def model_b_eval(
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Entrena el modelo CS2 (Glicko-2 + LightGBM + calibración).")
-    parser.add_argument("--raw", default=str(DEFAULT_RAW))
+    parser.add_argument("--raw", default="",
+                        help="Compatibilidad: results_all.json. Si se omite, entrena desde BBDD/cs2.db.")
+    parser.add_argument("--db", default=str(DEFAULT_DB),
+                        help="BBDD viva usada como fuente por defecto.")
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
     parser.add_argument("--warmup-weeks", type=int, default=10)
     parser.add_argument("--min-train", type=int, default=800)
     parser.add_argument("--no-cs2-filter", action="store_true")
+    parser.add_argument("--form-half-life", type=float, default=120.0,
+                        help="Vida media (dias) del decaimiento de la forma. Tunable.")
+    parser.add_argument("--wf-gap", type=int, default=0,
+                        help="Periodos de separacion train->test en walk-forward (anti-fuga).")
+    parser.add_argument("--no-catboost", action="store_true",
+                        help="No usar CatBoost como candidato aunque este instalado.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Mostrar progreso detallado por fold y logs internos de LightGBM/CatBoost.")
+    parser.add_argument("--no-promote", action="store_true",
+                        help="Guarda el artefacto en --output-dir, sin sobrescribir MODEL/artifacts/model.pkl ni registry.")
     args = parser.parse_args()
+
+    has_catboost = (not args.no_catboost) and _catboost_available()
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    print("[1/6] Cargando histórico…")
+    print("[1/6] Cargando histórico…", flush=True)
     master_path = ROOT / "DAILY_SNAPSHOTS" / "master" / "matches.json"
-    rows = dataio.load_training_rows(args.raw, master_path if master_path.exists() else None,
-                                     cs2_only=not args.no_cs2_filter)
+    raw_source = args.raw or None
+    rows = dataio.load_training_rows(
+        raw_source,
+        master_path if master_path.exists() else None,
+        cs2_only=not args.no_cs2_filter,
+        db_path=args.db,
+    )
+    if not rows and not raw_source and DEFAULT_RAW.exists():
+        print("      BBDD sin filas entrenables; fallback legacy results_all.json", flush=True)
+        raw_source = str(DEFAULT_RAW)
+        rows = dataio.load_training_rows(
+            raw_source,
+            master_path if master_path.exists() else None,
+            cs2_only=not args.no_cs2_filter,
+            db_path=None,
+        )
+    if not rows:
+        raise SystemExit("No hay filas de entrenamiento. Inicializa BBDD o pasa --raw <results_all.json>.")
     n_daily = sum(1 for r in rows if r.get("opening_odds_t1") is not None)
+    source_label = f"DB {args.db}" if not raw_source else f"raw {raw_source}"
+    print(f"      fuente: {source_label}")
     print(f"      {len(rows)} series ({rows[0]['date']} -> {rows[-1]['date']}) · con odds guardadas: {n_daily}")
 
-    print("[2/6] Construyendo features point-in-time…")
+    print("[2/6] Construyendo features point-in-time…", flush=True)
     t0 = time.time()
-    X_dicts, y_list, meta, state = build_training_frame(rows)
+    X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
     model_columns, feature_policies = select_feature_columns(X_dicts)
     analytics_policy = feature_policies["analytics"]
     context_policy = feature_policies["context"]
+    player_policy = feature_policies["player_snapshots"]
     model_b_columns = list(model_columns) + ODDS_FEATURE_COLUMNS
     X_all = _matrix(X_dicts, model_columns)
     X_model_b_dicts = add_odds_features(X_dicts, rows)
@@ -646,38 +960,42 @@ def main() -> int:
     y_all = np.array(y_list, dtype=int)
     periods = np.array([_period_index(r.get("date_obj")) for r in rows])
     print(f"      {len(X_all)} filas, {len(model_columns)} features en {time.time()-t0:.1f}s")
-    print(
-        "      analytics features: "
-        f"{'ON' if analytics_policy['enabled'] else 'OFF'} "
-        f"({analytics_policy['available_rows']}/{analytics_policy['min_rows']} filas cerradas)"
-    )
-    print(
-        "      context features:   "
-        f"{'ON' if context_policy['enabled'] else 'OFF'} "
-        f"({context_policy['available_rows']}/{context_policy['min_rows']} contexto; "
-        f"LAN={context_policy['lan_rows']}/{context_policy['min_env_rows']}, "
-        f"online={context_policy['online_rows']}/{context_policy['min_env_rows']})"
-    )
+    print("      activacion automatica de extended features:")
+    for family, policy in feature_policies.items():
+        detail = f"{policy['available_rows']}/{policy['min_rows']}"
+        if family == "context":
+            detail += (
+                f"; LAN={policy['lan_rows']}/{policy['min_env_rows']}"
+                f"; online={policy['online_rows']}/{policy['min_env_rows']}"
+            )
+        print(f"        {family:18s} {'ON' if policy['enabled'] else 'OFF':3s} ({detail})")
 
-    print("[3/6] Walk-forward semanal…")
+    print("[3/6] Walk-forward semanal…", flush=True)
+    print(f"      candidatos: {'con' if has_catboost else 'sin'} CatBoost · half_life={args.form_half_life:.0f}d · wf_gap={args.wf_gap}")
     t0 = time.time()
-    preds = walk_forward(X_all, y_all, periods, meta, model_columns, args.warmup_weeks, args.min_train)
+    preds = walk_forward(X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
+                         args.min_train, gap=args.wf_gap, has_catboost=has_catboost,
+                         verbose=args.verbose)
     metrics = summarize(preds)
     print(f"      hecho en {time.time()-t0:.1f}s; n_test={metrics.get('ensemble_cal',{}).get('n',0)}")
-    model_order = ["base_rate", "elo", "glicko", "logistic_cal", "lightgbm_cal", "ensemble_raw", "ensemble_cal"]
+    specs = candidate_specs(has_catboost)
+    model_order = ["base_rate", "elo", "glicko"] + list(specs.keys())
     for model in model_order:
         m = metrics.get(model)
         if m:
-            print(f"      {model:14s} acc={m['accuracy']:.4f} logloss={m['log_loss']:.4f} "
+            print(f"      {model:16s} acc={m['accuracy']:.4f} logloss={m['log_loss']:.4f} "
                   f"brier={m['brier']:.4f} auc={m['roc_auc']:.4f} ece={m['ece_10']:.4f}")
 
     # Selección del modelo de producción por menor log loss walk-forward.
-    candidates = {k: metrics[k] for k in ("logistic_cal", "lightgbm_cal", "ensemble_raw", "ensemble_cal") if k in metrics}
+    candidates = {k: metrics[k] for k in specs if k in metrics}
+    if not candidates:
+        raise SystemExit("Sin candidatos evaluables en walk-forward (revisa min-train/warmup).")
     best_name = min(candidates, key=lambda k: candidates[k]["log_loss"])
     print(f"      -> modelo de producción elegido por log loss: {best_name}")
 
     # Evaluación segmentada por competitividad + benchmark de mercado.
     segments = segmented_eval(preds.get(best_name, []))
+    favorite_accuracy = favorite_accuracy_bands(preds.get(best_name, []))
     print("      por competitividad:")
     for s in segments:
         print(f"        {s['band']:18s} n={s['n']:5d} ({s['share']*100:4.1f}%) acc={s['accuracy']:.3f} logloss={s['log_loss']:.3f}")
@@ -685,6 +1003,15 @@ def main() -> int:
     if market.get("n"):
         print(f"      mercado (n={market['n']}): modelo logloss={market.get('model_log_loss')} vs mercado={market.get('market_log_loss')}")
     model_b = model_b_eval(X_model_b, y_all, periods, meta, rows, preds.get(best_name, []), model_b_columns)
+    feature_policies["opening_odds_model_b"] = {
+        "available_rows": int(model_b.get("n_odds_rows", n_daily)),
+        "min_rows": int(model_b.get("min_train_odds", 120)),
+        "enabled": bool(model_b.get("available")),
+        "columns": list(ODDS_FEATURE_COLUMNS) if model_b.get("available") else [],
+        "activation": "automatic_separate_model_b_evaluation",
+        "production_scope": "benchmark_and_operational_market_layer_not_model_a",
+        "note": model_b.get("note", ""),
+    }
     economic = economic_backtest(rows, preds.get(best_name, []))
     if model_b.get("available"):
         mb = model_b["metrics"].get("model_b_stats_plus_opening_odds", {})
@@ -700,38 +1027,44 @@ def main() -> int:
         f"drawdown={economic['max_drawdown']:.3f}"
     )
 
-    print("[4/6] Ajuste final sobre todo el histórico…")
-    log_base, log_cal = fit_calibrated("logistic", X_all, y_all, model_columns, cal_frac=0.18, random_state=7)
-    gbm_base, gbm_cal = fit_calibrated("gbm", X_all, y_all, model_columns, cal_frac=0.18, random_state=7)
-    cal_use = best_name in ("logistic_cal", "lightgbm_cal", "ensemble_cal")
-    log_est = log_cal if cal_use else log_base
-    gbm_est = gbm_cal if cal_use else gbm_base
-    if best_name in ("ensemble_cal", "ensemble_raw"):
-        components = [
-            Component("logistic", log_est, None, 0.5),
-            Component("lightgbm", gbm_est, None, 0.5),
-        ]
-    elif best_name == "logistic_cal":
-        components = [Component("logistic", log_est, None, 1.0)]
-    else:
-        components = [Component("lightgbm", gbm_est, None, 1.0)]
+    print("[4/6] Ajuste final sobre todo el histórico…", flush=True)
+    best_kinds, best_method = specs[best_name]
+    fitted_full: dict[str, Any] = {}
+    for kind in sorted(set(best_kinds) | {"gbm"}):  # gbm siempre, para SHAP
+        if args.verbose:
+            print(f"      fitting final {kind}...", flush=True)
+        fitted_full[kind] = fit_calibrated_multi(kind, X_all, y_all, model_columns,
+                                                 cal_frac=0.18, random_state=7,
+                                                 verbose=args.verbose)
+    _component_kind = {"logistic": "logistic", "gbm": "lightgbm", "catboost": "catboost"}
+    weight = 1.0 / len(best_kinds)
+    components = []
+    for kind in best_kinds:
+        est = fitted_full[kind][1].get(best_method) or fitted_full[kind][1].get("sigmoid")
+        components.append(Component(_component_kind.get(kind, kind), est, None, weight))
 
-    print("[5/6] Importancia SHAP…")
+    print("[5/6] Importancia SHAP…", flush=True)
+    gbm_base = fitted_full["gbm"][0]
     shap_rows = shap_importance(gbm_base, X_all, model_columns)
 
-    print("[6/6] Guardando artefacto y resultados…")
+    print("[6/6] Guardando artefacto y resultados…", flush=True)
     artifact = ModelArtifact(
         feature_columns=list(model_columns),
         components=components,
         metadata={
             "trained_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "raw_source": str(args.raw),
+            "raw_source": str(raw_source or ""),
+            "db_source": str(args.db) if not raw_source else "",
             "n_train_rows": int(len(X_all)),
             "date_min": rows[0]["date"],
             "date_max": rows[-1]["date"],
             "cs2_only": not args.no_cs2_filter,
             "analytics_features": analytics_policy,
             "context_features": context_policy,
+            "player_snapshot_features": player_policy,
+            "map_box_score_features": feature_policies["map_box_scores"],
+            "ranking_features": feature_policies["rankings"],
+            "roster_features": feature_policies["roster"],
             "feature_policies": feature_policies,
             "walk_forward_metrics": metrics,
             "segmented_eval": segments,
@@ -741,15 +1074,29 @@ def main() -> int:
             "production_model": best_name,
             "model": "Glicko-2 features + " + {
                 "ensemble_cal": "LightGBM ⊕ Logística (Platt)",
-                "ensemble_raw": "LightGBM ⊕ Logística",
+                "ensemble_iso": "LightGBM ⊕ Logística (isotónica)",
+                "ensemble_beta": "LightGBM ⊕ Logística (beta)",
+                "ensemble3_cal": "LightGBM ⊕ Logística ⊕ CatBoost (Platt)",
                 "logistic_cal": "Logística (Platt)",
                 "lightgbm_cal": "LightGBM (Platt)",
+                "catboost_cal": "CatBoost (Platt)",
             }.get(best_name, best_name),
+            "production_calibration": best_method,
+            "production_components": [c.name for c in components],
+            "form_half_life_days": args.form_half_life,
+            "walk_forward_gap": args.wf_gap,
+            "catboost_enabled": has_catboost,
+            "monotone_features": sorted(MONOTONE_INCREASING),
             "period_days": 7,
         },
     )
-    artifact.save(ARTIFACT_PATH)
-
+    favorite_accuracy.update(
+        {
+            "model": best_name,
+            "trained_at": artifact.metadata["trained_at"],
+        }
+    )
+    artifact.metadata["favorite_accuracy_bands"] = favorite_accuracy
     # predicciones y calibración del mejor modelo
     cal_rows = []
     for model, rs in preds.items():
@@ -761,12 +1108,16 @@ def main() -> int:
             cal_rows.append({"model": model, **b})
 
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (out / "favorite_accuracy_bands.json").write_text(
+        json.dumps(favorite_accuracy, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
     (out / "shap_importance.json").write_text(json.dumps(shap_rows, indent=2), encoding="utf-8")
     (out / "model_b_eval.json").write_text(json.dumps(model_b, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "economic_backtest.json").write_text(json.dumps(economic, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "segmented_eval.json").write_text(
         json.dumps(
-            {"segments": segments, "market": market, "model_b": model_b, "economic_backtest": {k: v for k, v in economic.items() if k != "bets"}},
+            {"segments": segments, "favorite_accuracy": favorite_accuracy, "market": market, "model_b": model_b, "economic_backtest": {k: v for k, v in economic.items() if k != "bets"}},
             indent=2,
             ensure_ascii=False,
         ),
@@ -785,11 +1136,20 @@ def main() -> int:
         w.writeheader()
         w.writerows(cal_rows)
 
-    registry = save_model_registry(artifact, metrics, shap_rows, segments, market, model_b, economic)
+    artifact_output = out / "model.pkl" if args.no_promote else ARTIFACT_PATH
+    if args.no_promote:
+        registry = {
+            "promoted": False,
+            "registered_model": str(artifact_output),
+            "model_registry_dir": str(out),
+            "note": "--no-promote: verificacion/local, no toca artefacto de produccion.",
+        }
+    else:
+        registry = save_model_registry(artifact, metrics, shap_rows, segments, market, model_b, economic)
     artifact.metadata["registry"] = registry
-    artifact.save(ARTIFACT_PATH)
+    artifact.save(artifact_output)
     _write_report(out, metrics, shap_rows, rows, artifact, segments, market, model_b, economic)
-    print(f"      artefacto: {ARTIFACT_PATH}")
+    print(f"      artefacto: {artifact_output}")
     print(f"      resultados: {out}")
     return 0
 
@@ -804,21 +1164,24 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
                 f"{d['brier']:.4f} | {d['roc_auc']:.4f} | {d['ece_10']:.4f} |\n")
 
     feature_policies = artifact.metadata.get("feature_policies") or {}
-    analytics_policy = feature_policies.get("analytics") or artifact.metadata.get("analytics_features") or {}
-    context_policy = feature_policies.get("context") or artifact.metadata.get("context_features") or {}
+    policy_lines = [
+        "| Familia | Estado | Cobertura | Umbral | Activacion |\n",
+        "|---|---:|---:|---:|---|\n",
+    ]
+    for family, policy in feature_policies.items():
+        coverage = str(policy.get("available_rows", 0))
+        if family == "context":
+            coverage += f" (LAN {policy.get('lan_rows', 0)}, online {policy.get('online_rows', 0)})"
+        policy_lines.append(
+            f"| {family} | {'ON' if policy.get('enabled') else 'OFF'} | {coverage} | "
+            f"{policy.get('min_rows', 0)} | {policy.get('activation', 'automatic_at_training_time')} |\n"
+        )
     lines = [
         "# Informe de entrenamiento — modelo CS2 (Glicko-2 + LightGBM)\n",
-        f"\nGenerado: {artifact.metadata['trained_at']}  \n",
+        f"\nGenerado: {artifact.metadata['trained_at']}\n",
         f"Histórico: {rows[0]['date']} → {rows[-1]['date']} ({len(rows)} series, era CS2)\n",
         "\n## Politica de features opcionales\n\n",
-        f"- Analytics HLTV: {'ON' if analytics_policy.get('enabled') else 'OFF'} "
-        f"({analytics_policy.get('available_rows', 0)}/{analytics_policy.get('min_rows', 0)} filas cerradas). "
-        f"{analytics_policy.get('note', '')}\n",
-        f"- Contexto torneo LAN/online/fase: {'ON' if context_policy.get('enabled') else 'OFF'} "
-        f"({context_policy.get('available_rows', 0)}/{context_policy.get('min_rows', 0)} contexto; "
-        f"LAN={context_policy.get('lan_rows', 0)}/{context_policy.get('min_env_rows', 0)}, "
-        f"online={context_policy.get('online_rows', 0)}/{context_policy.get('min_env_rows', 0)}). "
-        f"{context_policy.get('note', '')}\n",
+        *policy_lines,
         "\n## Resultados walk-forward (ventana expansiva, paso semanal)\n\n",
         "| Modelo | N | Accuracy | Log loss | Brier | ROC-AUC | ECE 10 |\n",
         "|---|---:|---:|---:|---:|---:|---:|\n",
@@ -827,8 +1190,11 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         row("glicko", "Glicko-2 (baseline)"),
         row("logistic_cal", "Logística (Platt)"),
         row("lightgbm_cal", "LightGBM (Platt)"),
-        row("ensemble_raw", "Ensemble sin calibrar"),
-        row("ensemble_cal", "**Ensemble (Platt)**"),
+        row("catboost_cal", "CatBoost (Platt)"),
+        row("ensemble_cal", "Ensemble LGBM⊕Log (Platt)"),
+        row("ensemble_iso", "Ensemble (isotónica)"),
+        row("ensemble_beta", "Ensemble (beta)"),
+        row("ensemble3_cal", "**Ensemble +CatBoost (Platt)**"),
         f"\n> Modelo de producción elegido por menor log loss: **{artifact.metadata.get('production_model')}**.\n",
         "\n> Log loss y Brier son el objetivo (probabilidades calibradas), no solo accuracy.\n",
         "> El baseline 'elige al favorito' (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si lo supera en log loss/Brier/AUC.\n",
@@ -844,7 +1210,26 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         lines.append(f"| {s['band']} | {s['n']} | {s['share']*100:.1f}% | {s['accuracy']:.3f} | {s['log_loss']:.3f} |\n")
     lines.append("\n> Log loss de un coinflip puro = ln(2) ≈ 0.693. El valor del modelo se concentra "
                  "en la banda 55-80%; en los partidos genuinamente parejos la incertidumbre es irreducible.\n")
-
+    favorite_accuracy = artifact.metadata.get("favorite_accuracy_bands") or {}
+    lines.append("\n## Accuracy del favorito por probabilidad predicha\n\n")
+    lines.append("| Probabilidad | Aciertos | N | Accuracy | Prob. media | Gap calibracion |\n")
+    lines.append("|---|---:|---:|---:|---:|---:|\n")
+    for band in favorite_accuracy.get("bands", []):
+        accuracy = band.get("accuracy")
+        average = band.get("average_predicted_probability")
+        gap = band.get("calibration_gap")
+        if accuracy is None or average is None or gap is None:
+            lines.append(f"| {band['band']} | 0 | 0 | - | - | - |\n")
+            continue
+        lines.append(
+            f"| {band['band']} | {band['correct']} | {band['n']} | "
+            f"{accuracy:.4f} | {average:.4f} | {gap:+.4f} |\n"
+        )
+    lines.append(
+        f"| **Total** | **{favorite_accuracy.get('correct', 0)}** | "
+        f"**{favorite_accuracy.get('n', 0)}** | "
+        f"**{favorite_accuracy.get('accuracy', 0.0):.4f}** | - | - |\n"
+    )
     lines.append("\n## Benchmark de mercado (odds de apertura)\n\n")
     if market.get("n"):
         lines.append(f"Sobre {market['n']} partidos con odds guardadas (ILUSTRATIVO, n pequeño):\n\n")

@@ -78,17 +78,6 @@ DIFF_COLUMNS = [
     "format_last10_score_diff",
     "format_opp_elo_last5_diff",
     "format_recent_opponent_elo_diff",
-    "asset_map_winrate_diff",
-    "asset_ct_round_winrate_diff",
-    "asset_t_round_winrate_diff",
-    "asset_rating_l5_diff",
-    "asset_rating_l10_diff",
-    "asset_rating_l20_diff",
-    "asset_adr_l10_diff",
-    "asset_kast_l10_diff",
-    "asset_opening_diff_l10_diff",
-    "event_matches_diff",
-    "event_winrate_diff",
     "h2h_winrate_centered",
     "format_h2h_winrate_centered",
 ]
@@ -104,14 +93,41 @@ SYM_COLUMNS = [
     "h2h_matches",
     "format_experience_min",
     "format_experience_total",
-    "asset_maps_played_min",
-    "asset_maps_played_total",
     "format_h2h_matches",
     "format_bo1",
     "format_bo3",
     "format_bo5",
 ]
 FEATURE_COLUMNS = DIFF_COLUMNS + SYM_COLUMNS
+
+MAP_ASSET_DIFF_COLUMNS = [
+    "asset_map_winrate_diff",
+    "asset_ct_round_winrate_diff",
+    "asset_t_round_winrate_diff",
+    "asset_rating_l5_diff",
+    "asset_rating_l10_diff",
+    "asset_rating_l20_diff",
+    "asset_adr_l10_diff",
+    "asset_kast_l10_diff",
+    "asset_opening_diff_l10_diff",
+]
+MAP_ASSET_SYM_COLUMNS = [
+    "asset_available",
+    "asset_maps_played_min",
+    "asset_maps_played_total",
+]
+MAP_ASSET_FEATURE_COLUMNS = MAP_ASSET_DIFF_COLUMNS + MAP_ASSET_SYM_COLUMNS
+
+EVENT_HISTORY_DIFF_COLUMNS = [
+    "event_matches_diff",
+    "event_winrate_diff",
+]
+EVENT_HISTORY_SYM_COLUMNS = [
+    "event_history_available",
+    "event_experience_min",
+    "event_experience_total",
+]
+EVENT_HISTORY_FEATURE_COLUMNS = EVENT_HISTORY_DIFF_COLUMNS + EVENT_HISTORY_SYM_COLUMNS
 
 ANALYTICS_DIFF_COLUMNS = [
     "analytics_map_win_pct_diff",
@@ -156,6 +172,62 @@ CONTEXT_FEATURE_COLUMNS = [
     "context_bracket_upper",
     "context_bracket_lower",
 ] + CONTEXT_STAGE_COLUMNS
+
+PLAYER_DIFF_COLUMNS = [
+    "player_rating_diff",
+    "player_rating_max_diff",
+    "player_rating_min_diff",
+    "player_rating_std_diff",
+    "player_rating_spread_diff",
+    "player_star_gap_diff",
+    "player_weak_link_gap_diff",
+    "player_kpr_diff",
+    "player_kast_diff",
+    "player_adr_diff",
+    "player_impact_diff",
+    "player_round_swing_diff",
+    "player_opening_kpr_diff",
+]
+PLAYER_SYM_COLUMNS = [
+    "player_snapshot_available",
+    "player_coverage_min",
+    "player_maps_min",
+]
+PLAYER_FEATURE_COLUMNS = PLAYER_DIFF_COLUMNS + PLAYER_SYM_COLUMNS
+
+RANKING_DIFF_COLUMNS = [
+    "ranking_hltv_position_advantage",
+    "ranking_hltv_points_diff",
+    "ranking_valve_position_advantage",
+    "ranking_valve_points_diff",
+]
+RANKING_SYM_COLUMNS = [
+    "ranking_available",
+    "ranking_sources",
+    "ranking_age_days_max",
+]
+RANKING_FEATURE_COLUMNS = RANKING_DIFF_COLUMNS + RANKING_SYM_COLUMNS
+
+ROSTER_DIFF_COLUMNS = [
+    "roster_days_log_diff",
+    "roster_size_diff",
+    "roster_standin_risk_advantage",
+]
+ROSTER_SYM_COLUMNS = [
+    "roster_available",
+    "roster_days_min",
+    "roster_size_min",
+]
+ROSTER_FEATURE_COLUMNS = ROSTER_DIFF_COLUMNS + ROSTER_SYM_COLUMNS
+
+EXTENDED_DIFF_COLUMNS = (
+    MAP_ASSET_DIFF_COLUMNS
+    + EVENT_HISTORY_DIFF_COLUMNS
+    + ANALYTICS_DIFF_COLUMNS
+    + PLAYER_DIFF_COLUMNS
+    + RANKING_DIFF_COLUMNS
+    + ROSTER_DIFF_COLUMNS
+)
 
 
 def _clean_team(name: str | None) -> str:
@@ -237,7 +309,6 @@ def context_match_features(match: dict[str, Any]) -> dict[str, float]:
     if not isinstance(context, dict) or not context:
         return feats
 
-    feats["context_available"] = 1.0
     env = str(context.get("environment") or "").strip().lower()
     if env not in {"lan", "online"}:
         if context.get("is_lan") is True:
@@ -262,6 +333,22 @@ def context_match_features(match: dict[str, Any]) -> dict[str, float]:
     bracket = str(context.get("bracket") or "").strip().lower()
     feats["context_bracket_upper"] = 1.0 if bracket == "upper" else 0.0
     feats["context_bracket_lower"] = 1.0 if bracket == "lower" else 0.0
+    signal_columns = [
+        col for col in CONTEXT_FEATURE_COLUMNS
+        if col not in {
+            "context_available",
+            "context_is_lan",
+            "context_is_online",
+            "context_environment_known",
+            "context_stage_known",
+        }
+    ]
+    meaningful = (
+        feats["context_environment_known"] >= 0.5
+        or feats["context_stage_known"] >= 0.5
+        or any(feats[col] >= 0.5 for col in signal_columns)
+    )
+    feats["context_available"] = 1.0 if meaningful else 0.0
     return feats
 
 
@@ -352,6 +439,32 @@ def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
     return feats
 
 
+def player_snapshot_features(match: dict[str, Any]) -> dict[str, float]:
+    payload = match.get("player_snapshot_features")
+    if isinstance(payload, dict):
+        return {
+            col: float(payload.get(col) or 0.0)
+            for col in PLAYER_FEATURE_COLUMNS
+        }
+    return {col: 0.0 for col in PLAYER_FEATURE_COLUMNS}
+
+
+def external_snapshot_features(match: dict[str, Any]) -> dict[str, float]:
+    """Features externas que `dataio` unio respetando captured_at_utc."""
+    out: dict[str, float] = {}
+    for payload_key, columns in (
+        ("ranking_snapshot_features", RANKING_FEATURE_COLUMNS),
+        ("roster_snapshot_features", ROSTER_FEATURE_COLUMNS),
+    ):
+        payload = match.get(payload_key)
+        for col in columns:
+            try:
+                out[col] = float((payload or {}).get(col) or 0.0)
+            except (TypeError, ValueError):
+                out[col] = 0.0
+    return out
+
+
 def _period_index(date_obj: datetime | None) -> int:
     if date_obj is None:
         return 0
@@ -365,8 +478,11 @@ def _laplace_winrate(wins: int, n: int) -> float:
 class ChronologicalState:
     """Acumula la verdad de los partidos en orden y emite features point-in-time."""
 
-    def __init__(self, glicko_tau: float = 0.5) -> None:
+    def __init__(self, glicko_tau: float = 0.5, form_half_life: float = FORM_HALF_LIFE) -> None:
         self.glicko = Glicko2(tau=glicko_tau)
+        # Vida media (dias) del decaimiento temporal de la forma. Tunable como
+        # hiperparametro (PROJECT.md; Dixon-Coles time-weighting).
+        self.form_half_life = float(form_half_life) if form_half_life and form_half_life > 0 else FORM_HALF_LIFE
         self.ratings: dict[str, Rating] = {}
         self.current_period: int | None = None
         self.period_buffer: dict[str, list[_Match]] = defaultdict(list)
@@ -451,7 +567,7 @@ class ChronologicalState:
                 w = 0.5
             else:
                 age = max(0.0, (as_of - date).days)
-                w = 0.5 ** (age / FORM_HALF_LIFE)
+                w = 0.5 ** (age / self.form_half_life)
             num += w * won
             den += w
         return (num + 0.5) / (den + 1.0) if den else 0.5
@@ -611,6 +727,7 @@ class ChronologicalState:
             "format_recent_opponent_elo_diff": self._format_avg_opp_elo(a_key, fmt) - self._format_avg_opp_elo(b_key, fmt),
             "asset_maps_played_min": float(min(self.asset_team_maps[a_key], self.asset_team_maps[b_key])),
             "asset_maps_played_total": float(self.asset_team_maps[a_key] + self.asset_team_maps[b_key]),
+            "asset_available": float(min(self.asset_team_maps[a_key], self.asset_team_maps[b_key]) >= 5),
             "asset_map_winrate_diff": self._asset_map_winrate(a_key) - self._asset_map_winrate(b_key),
             "asset_ct_round_winrate_diff": self._asset_round_winrate(a_key, "ct") - self._asset_round_winrate(b_key, "ct"),
             "asset_t_round_winrate_diff": self._asset_round_winrate(a_key, "t") - self._asset_round_winrate(b_key, "t"),
@@ -622,6 +739,9 @@ class ChronologicalState:
             "asset_opening_diff_l10_diff": self._asset_avg(self.asset_opening_diff_hist, a_key, 10, 0.0) - self._asset_avg(self.asset_opening_diff_hist, b_key, 10, 0.0),
             "event_matches_diff": math.log1p(ea["n"]) - math.log1p(eb["n"]),
             "event_winrate_diff": _laplace_winrate(ea["w"], ea["n"]) - _laplace_winrate(eb["w"], eb["n"]),
+            "event_history_available": float(min(ea["n"], eb["n"]) >= 1),
+            "event_experience_min": float(min(ea["n"], eb["n"])),
+            "event_experience_total": float(ea["n"] + eb["n"]),
             "h2h_winrate_centered": h2h_centered,
             "h2h_matches": float(pn),
             "format_h2h_winrate_centered": format_h2h_centered,
@@ -795,13 +915,17 @@ class ChronologicalState:
         }
 
 
-def build_training_frame(rows: list[dict[str, Any]]) -> tuple[list[dict[str, float]], list[int], list[dict[str, Any]], ChronologicalState]:
+def build_training_frame(
+    rows: list[dict[str, Any]],
+    form_half_life: float = FORM_HALF_LIFE,
+) -> tuple[list[dict[str, float]], list[int], list[dict[str, Any]], ChronologicalState]:
     """Itera el histórico cronológicamente y devuelve (X, y, meta, estado_final).
 
     Para cada partido: emite features con el estado previo, registra la etiqueta
     y luego observa el resultado. El estado final sirve para predecir en vivo.
+    `form_half_life` (dias) controla el decaimiento temporal de la forma.
     """
-    state = ChronologicalState()
+    state = ChronologicalState(form_half_life=form_half_life)
     X: list[dict[str, float]] = []
     y: list[int] = []
     meta: list[dict[str, Any]] = []
@@ -811,6 +935,8 @@ def build_training_frame(rows: list[dict[str, Any]]) -> tuple[list[dict[str, flo
         )
         feats.update(analytics_match_features(m))
         feats.update(context_match_features(m))
+        feats.update(player_snapshot_features(m))
+        feats.update(external_snapshot_features(m))
         X.append(feats)
         y.append(int(m["team1_win"]))
         meta.append(

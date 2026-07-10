@@ -32,6 +32,12 @@ try:
         build_training_frame as cs2_build_state,
         analytics_match_features as cs2_analytics_match_features,
         context_match_features as cs2_context_match_features,
+        PLAYER_DIFF_COLUMNS as CS2_PLAYER_DIFF_COLUMNS,
+        PLAYER_SYM_COLUMNS as CS2_PLAYER_SYM_COLUMNS,
+        RANKING_DIFF_COLUMNS as CS2_RANKING_DIFF_COLUMNS,
+        RANKING_SYM_COLUMNS as CS2_RANKING_SYM_COLUMNS,
+        ROSTER_DIFF_COLUMNS as CS2_ROSTER_DIFF_COLUMNS,
+        ROSTER_SYM_COLUMNS as CS2_ROSTER_SYM_COLUMNS,
     )
     from cs2model.artifacts import load_artifact as cs2_load_artifact
 
@@ -44,12 +50,19 @@ except Exception:  # pragma: no cover - entorno sin librería
 
     def cs2_context_match_features(_match: dict[str, Any]) -> dict[str, float]:
         return {}
+    CS2_PLAYER_DIFF_COLUMNS = []
+    CS2_PLAYER_SYM_COLUMNS = []
+    CS2_RANKING_DIFF_COLUMNS = []
+    CS2_RANKING_SYM_COLUMNS = []
+    CS2_ROSTER_DIFF_COLUMNS = []
+    CS2_ROSTER_SYM_COLUMNS = []
 DAILY_ROOT = ROOT / "DAILY_SNAPSHOTS"
 RUNS_DIR = DAILY_ROOT / "runs"
 MASTER_MANIFEST = DAILY_ROOT / "master" / "manifest.json"
 MASTER_MATCHES = DAILY_ROOT / "master" / "matches.json"
 MASTER_ROSTERS = DAILY_ROOT / "master" / "roster_history.json"
 MASTER_CALIBRATION = DAILY_ROOT / "master" / "calibration.json"
+LIVE_DB = ROOT / "BBDD" / "cs2.db"
 
 try:
     from DAILY_SNAPSHOTS.match_context import parse_match_context_meta
@@ -555,6 +568,24 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
         return None
 
 
+def model_external_features_for_order(features: dict[str, Any], reverse: bool = False) -> dict[str, float]:
+    out: dict[str, float] = {}
+    diff_columns = CS2_PLAYER_DIFF_COLUMNS + CS2_RANKING_DIFF_COLUMNS + CS2_ROSTER_DIFF_COLUMNS
+    sym_columns = CS2_PLAYER_SYM_COLUMNS + CS2_RANKING_SYM_COLUMNS + CS2_ROSTER_SYM_COLUMNS
+    for col in diff_columns:
+        try:
+            value = float(features.get(col) or 0.0)
+        except (TypeError, ValueError):
+            value = 0.0
+        out[col] = -value if reverse else value
+    for col in sym_columns:
+        try:
+            out[col] = float(features.get(col) or 0.0)
+        except (TypeError, ValueError):
+            out[col] = 0.0
+    return out
+
+
 def model_probability_team1(
     engine: dict[str, Any],
     team1_key: str,
@@ -564,6 +595,7 @@ def model_probability_team1(
     fmt: str,
     analytics_match: dict[str, Any] | None = None,
     match_context: dict[str, Any] | None = None,
+    extra_features: dict[str, float] | None = None,
 ) -> float:
     """Probabilidad calibrada de que gane team1 según el modelo entrenado.
 
@@ -592,6 +624,9 @@ def model_probability_team1(
                 }
             )
         )
+    if extra_features:
+        f1.update(model_external_features_for_order(extra_features, reverse=False))
+        f2.update(model_external_features_for_order(extra_features, reverse=True))
     p1 = float(artifact.predict_proba_team1([f1])[0])
     p2 = float(artifact.predict_proba_team1([f2])[0])
     return clamp(0.5 * (p1 + (1.0 - p2)), 1e-4, 1 - 1e-4)
@@ -1998,6 +2033,10 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         + (engine["artifact"].metadata.get("production_model", "?") if engine else "NO (fallback logístico)")
     )
     model_metadata = engine["artifact"].metadata if engine else {}
+    external_feature_store = (
+        cs2_dataio.load_external_feature_store(LIVE_DB)
+        if _CS2_OK and LIVE_DB.exists() else {"rankings": {}, "rosters": {}}
+    )
     master = load_master()
     state = build_history_state(history)
     historical_p = historical_probability_rows(history, state)
@@ -2067,6 +2106,14 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         map_advantage = map_pool.get("map_pool_advantage_team1") or 0.0
         roster_days1 = roster_control1.get("days_with_current_roster") or 0.0
         roster_days2 = roster_control2.get("days_with_current_roster") or 0.0
+        roster_snapshot_available = (
+            min(roster_control1.get("roster_size", 0), roster_control2.get("roster_size", 0)) >= 5
+        )
+        player_coverage_min = min(roster1["coverage"], roster2["coverage"])
+        player_maps_min = min(
+            (roster1.get("distribution") or {}).get("maps_total") or 0,
+            (roster2.get("distribution") or {}).get("maps_total") or 0,
+        )
         features = {
             "elo_team1": elo1,
             "elo_team2": elo2,
@@ -2089,6 +2136,9 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "event_team2_winrate": (event2["wins"] + 1) / (event2["matches"] + 2),
             "player_coverage_team1": roster1["coverage"],
             "player_coverage_team2": roster2["coverage"],
+            "player_coverage_min": player_coverage_min,
+            "player_snapshot_available": 1.0 if player_coverage_min >= 0.8 else 0.0,
+            "player_maps_min": player_maps_min,
             "player_rating_team1": rating1,
             "player_rating_team2": rating2,
             "player_rating_diff": rating1 - rating2,
@@ -2127,7 +2177,15 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "map_pool_coverage": map_pool.get("coverage"),
             "roster_days_team1": roster_days1,
             "roster_days_team2": roster_days2,
-            "roster_days_log_diff": math.log1p(roster_days1) - math.log1p(roster_days2),
+            "roster_days_log_diff": math.log1p(roster_days1) - math.log1p(roster_days2) if roster_snapshot_available else 0.0,
+            "roster_available": float(roster_snapshot_available),
+            "roster_days_min": min(roster_days1, roster_days2) if roster_snapshot_available else 0.0,
+            "roster_size_min": min(roster_control1.get("roster_size", 0), roster_control2.get("roster_size", 0)) if roster_snapshot_available else 0.0,
+            "roster_size_diff": roster_control1.get("roster_size", 0) - roster_control2.get("roster_size", 0) if roster_snapshot_available else 0.0,
+            "roster_standin_risk_advantage": (
+                float(bool(roster_control2.get("standin_risk"))) - float(bool(roster_control1.get("standin_risk")))
+                if roster_snapshot_available else 0.0
+            ),
             "fatigue_last24_team1": fatigue1.get("last24_count", 0),
             "fatigue_last24_team2": fatigue2.get("last24_count", 0),
             "fatigue_last24_diff_team1": fatigue1.get("last24_count", 0) - fatigue2.get("last24_count", 0),
@@ -2160,6 +2218,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             }
         )
         features.update(cs2_context_match_features({"match_context": tournament}))
+        if _CS2_OK:
+            external = cs2_dataio.external_snapshot_features_asof(
+                external_feature_store,
+                team1.get("id"),
+                team2.get("id"),
+                match_dt,
+            )
+            ranking_features = external.get("ranking_snapshot_features") or {}
+            roster_features = external.get("roster_snapshot_features") or {}
+            features.update(ranking_features)
+            if roster_features.get("roster_available"):
+                features.update(roster_features)
 
         if engine is not None:
             try:
@@ -2172,6 +2242,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                     snapshot.get("format") or "bo3",
                     analytics_match,
                     tournament,
+                    features,
                 )
                 card1 = engine["state"].rating_card(t1, match_dt)
                 card2 = engine["state"].rating_card(t2, match_dt)

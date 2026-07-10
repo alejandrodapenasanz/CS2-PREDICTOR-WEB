@@ -1,8 +1,8 @@
-# Extra features contempladas pero no activadas en el modelo productivo
+# Extra features: activacion automatica y fuentes pendientes
 
-Ultima actualizacion: 2026-07-04
+Ultima actualizacion: 2026-07-10
 
-Este archivo lista features que el proyecto contempla, captura parcialmente o muestra como contexto, pero que todavia no forman parte activa del `model_prob_team1` productivo. El modelo productivo actual sigue siendo `ensemble_cal` basado principalmente en Glicko/Elo/forma/resultados, con validacion walk-forward.
+Este archivo lista las familias extendidas, su cobertura point-in-time y las fuentes que todavia no permiten construir una feature valida. Las familias implementadas no requieren switches: `MODEL/train.py` las activa automaticamente al superar el umbral y registra el resultado en `feature_policies`.
 
 Regla general: una feature solo debe entrar al modelo o a un calibrador productivo si existe muestra point-in-time suficiente, mejora log loss/Brier en walk-forward expansivo y no introduce fuga temporal.
 
@@ -10,16 +10,16 @@ Regla general: una feature solo debe entrar al modelo o a un calibrador producti
 
 | Feature | Estado actual | Activacion minima sugerida |
 |---|---|---|
-| HLTV Betting Analytics | Se captura y se guarda; no activa en Modelo A | 120+ partidos cerrados point-in-time con Analytics |
-| Contexto HLTV `Maps` | Se captura, se muestra y se diagnostica; no calibra produccion | 200+ partidos cerrados con contexto y subgrupos 30+ |
-| Model B con odds de apertura | Evaluacion separada; no productivo | 120+ partidos cerrados con odds de apertura |
-| Stats individuales point-in-time | Se capturan snapshots; no entran directamente al modelo | Feature store cronologico validado |
-| Map/player side stats L5/L10/L20 | BBDD parcial; no feature estable completa | Suficiente `map_player_stats` por equipo/jugador/mapa |
+| HLTV Betting Analytics | Auto-gate 100/120 | 120+ partidos cerrados point-in-time con Analytics |
+| Contexto HLTV `Maps` | Auto-gate 65/200; LAN 7/50, online 58/50 | 200+ y 50 por entorno |
+| Model B con odds de apertura | 98 partidos unicos; evaluacion separada | 120+ partidos cerrados con odds de apertura |
+| Stats individuales point-in-time | Auto-gate 88/200 | 200+ con cobertura de ambos equipos |
+| Map/player side stats L5/L10/L20 | Auto-gate 20/200 | 200+ con historial para ambos equipos |
 | Modelo composicional Bo3 por mapas | Disenado; no implementado | Modelo de mapa + veto predictivo |
 | Veto/picks/bans predictivo | Veto real guardado en completados; no predicho prepartido | Historial suficiente de vetos por equipo |
-| Ranking historico HLTV/Valve | Snapshots actuales guardados; no backfill historico completo | Series temporales historicas por fecha |
+| Ranking historico HLTV/Valve | Auto-gate 86/200 con join as-of | 200+ con ranking previo de ambos equipos |
 | Fatiga/travel real | Fatiga simple en flags; travel desconocido | Localizacion/evento/LAN y calendario fiable |
-| Roster/stand-ins como feature fuerte | Roster history y flags; no feature fuerte en Modelo A | Lineups point-in-time y validacion por subgrupo |
+| Roster/stand-ins como feature fuerte | Auto-gate 61/200 con join as-of | 200+ con roster previo completo |
 
 ## 1. HLTV Betting Analytics
 
@@ -32,7 +32,7 @@ Ya existe:
 - Archivo raw en `raw_snapshots(kind='match_analytics')`.
 - Parser de mapas/insights y columnas `analytics_*` preparadas.
 
-No activado aun:
+Preparado para activacion automatica (100/120):
 
 - `analytics_map_win_pct_diff`
 - `analytics_first_pick_pct_diff`
@@ -78,7 +78,7 @@ Ya existe:
 - Flags como `LAN_MATCH`, `ONLINE_MATCH`, `WINNER_ADVANCES`, `ELIMINATION_MATCH`, `SUBSTITUTION_NOTE`.
 - Diagnostico automatico con `MODEL/analyze_context_calibration.py`.
 
-No activado aun:
+Preparado para activacion automatica (65/200; falta llegar a 50 LAN):
 
 - Calibrador contextual de confianza.
 - Features directas del Modelo A:
@@ -92,7 +92,7 @@ No activado aun:
 
 Motivo:
 
-- Ahora hay 65 muestras cerradas con contexto. Es util para diagnostico, no para produccion.
+- Ahora hay 65 muestras cerradas con contexto: 7 LAN y 58 online. Sigue siendo diagnostico hasta superar todos los umbrales.
 - Los subgrupos pequenos pueden enganar: finales, league, semis, eliminacion, etc.
 
 Criterio de activacion:
@@ -163,9 +163,9 @@ Ya existe:
   - star gap
   - weak-link gap
 
-No activado aun:
+Preparado para activacion automatica (88/200):
 
-- Meter esas columnas directamente en el entrenamiento del Modelo A.
+- Las columnas agregadas ya estan conectadas al entrenamiento y scoring, protegidas por el auto-gate.
 - Comparacion pairwise completa jugador vs jugador como matriz de matchups.
 - Sinergia entre jugadores o dependencia de estrella.
 
@@ -177,7 +177,7 @@ Motivo:
 
 Criterio de activacion:
 
-- Construir feature store por jugador/equipo con `captured_at`.
+- Feature store por jugador/equipo con `captured_at` implementado en SQLite.
 - En backtest, usar solo snapshots existentes antes del partido.
 - Evaluar por walk-forward y por cobertura.
 
@@ -267,9 +267,9 @@ Ya existe:
 - Contexto de evento basico.
 - Volatilidad historica del evento aproximada.
 
-No implementado completamente:
+Implementado parcialmente y protegido por auto-gate (86/200):
 
-- Ranking historico exacto "as of match date".
+- Join de ranking exacto "as of match date" para los snapshots ya acumulados.
 - Fuerza del evento/tier aprendida.
 - Prize pool normalizado.
 - Region/event strength.
@@ -297,9 +297,9 @@ Ya existe:
 - Flags de roster reciente y stand-in risk.
 - Notas `SUBSTITUTION_NOTE` desde HLTV `Maps`.
 
-No implementado como feature fuerte:
+Implementado parcialmente y protegido por auto-gate (61/200):
 
-- Dias exactos con lineup de 5 jugadores.
+- Dias desde el primer snapshot observado del roster actual, tamano y riesgo de roster incompleto.
 - Mapas jugados juntos por el quinteto actual.
 - Penalizacion aprendida por stand-in.
 - Cambio de IGL/coach/rol.
@@ -475,11 +475,9 @@ Estado:
 
 ## Orden recomendado de implementacion
 
-1. Acumular muestra y revisar `MODEL/results/CONTEXT_CALIBRATION.md`.
-2. Activar HLTV Analytics cuando supere el umbral de 120 cerrados.
-3. Construir feature store L5/L10/L20 desde `map_player_stats`.
-4. Backfill de ranking historico HLTV/Valve.
-5. Modelo B con odds de apertura cuando haya 120+ cerrados con odds.
-6. Modelo composicional Bo3 por mapas cuando haya suficiente veto/mapstats.
-7. Calibrador contextual si supera 200+ cerrados y mejora walk-forward.
-
+1. Acumular muestra; la activacion de familias implementadas ya es automatica.
+2. Revisar `MODEL/results/REPORT.md` y `feature_policies` despues de cada entreno.
+3. Backfill de ranking historico HLTV/Valve para ampliar cobertura as-of.
+4. Modelo B con odds de apertura cuando haya 120+ cerrados con odds.
+5. Modelo composicional Bo3 por mapas cuando haya suficiente veto/mapstats.
+6. Añadir travel/parches/sanciones solo cuando exista fuente point-in-time fiable.

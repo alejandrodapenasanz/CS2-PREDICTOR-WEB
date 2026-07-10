@@ -5,6 +5,10 @@ scipy>=1.13
 matplotlib>=3.8
 lightgbm>=4.5
 shap>=0.46
+# CatBoost es OPCIONAL: si esta instalado, el trainer anade los candidatos
+# catboost_cal y ensemble3_cal (se eligen solo si mejoran el log loss). Si no
+# esta, esos candidatos se omiten sin romper nada.
+catboost>=1.2 ; python_version < "3.14"
 
 requests>=2.32.4
 parsel>=1.10
