@@ -790,4 +790,52 @@ Principio: la **fuente de verdad** es la base de datos; la matriz de entrenamien
 
 ---
 
+## 16. Next steps — roadmap técnico (código, stats, algoritmos)
+
+Mejoras identificadas tras auditoría + literatura (2024-2026). **Principio:** lo que
+dependa de más muestra se deja *ready-to-use* con **auto-activación por umbral**
+(patrón `AUTO_FEATURE_FAMILIES` en `MODEL/train.py`): se calcula/guarda siempre y
+entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parcial · ⬜ pendiente.
+
+### A. Estadística / metodología
+- ⬜ **A1. Ponderación por recencia en el learner** (`sample_weight` con decaimiento
+  exponencial por fecha, Dixon-Coles), no solo en features. Config `recency_half_life`.
+- ⬜ **A2. Incertidumbre epistémica de la probabilidad** (varianza entre miembros del
+  ensemble / bootstrap) expuesta por el artefacto → **encoge el stake** cuando duda.
+- ⬜ **A3. Calibración/auditoría por segmento** (tier, formato, LAN/online, banda de
+  confianza), no solo global. Recalibración por segmento cuando supere N muestras.
+- ⬜ **A4. Purga + embargo en walk-forward + tests de significancia** (bootstrap/
+  Wilcoxon pareado sobre log loss por-partido; MDE ~0.002-0.005 nats).
+- ⬜ **A5. Poda de features / multicolinealidad** (VIF, permutation importance vs SHAP, RFE).
+- ⬜ **A6. Target más rico**: map-level (≈3× datos), ordinal 2-0/2-1/1-2/0-2, o multi-task
+  con diferencia de rondas como target auxiliar. Habilita props.
+- 🟡 **A7. Strength-of-schedule explícito** (dureza del calendario reciente). Parcial vía `opp_elo`.
+
+### B. Algoritmos / rating
+- ✅ **B0. Ratings MOV, TrueSkill de equipo y por-jugador** — familias auto-gated
+  (`mov_rating` 800, `team_trueskill` 800, `player_rating` 200).
+- ⬜ **B8. Modelo jerárquico bayesiano (Bradley-Terry / Dixon-Coles)** como miembro
+  diverso del super-learner (incertidumbre + partial pooling para equipos con poca muestra).
+- ⬜ **B9. Rating en espacio de estados (Kalman/partícula)** — alternativa suave al Glicko. Experimental.
+- ⬜ **B10. Optuna dentro de CV purgada** optimizando log loss (no accuracy).
+- ⬜ **B11. Modelo composicional Bo3 por mapa + veto** — `P(serie)=p1p2+p1(1-p2)p3+(1-p1)p2p3`.
+  Auto-activa con cobertura suficiente de veto/mapstats. Monetizable (props).
+
+### C. Código / ingeniería (rigor, no accuracy)
+- ⬜ **C12. Detección de drift** (log loss/CLV rodante; ADWIN/Page-Hinkley) + features de régimen (parche, map pool).
+- ⬜ **C13. Config centralizada** (umbrales/hiperparámetros a `config.yaml`/dataclass versionada).
+- ⬜ **C14. CI + `ruff` + `mypy` + smoke de pipeline** en cada commit.
+- 🟡 **C15. Reproducibilidad determinista** (semillas + versionado de datos/config por experimento). Parcial.
+- ⬜ **C16. Auditoría de fuga exhaustiva** (test que verifique `data_up_to_utc < match_date` en TODA feature).
+- ⬜ **C17. Backtest económico realista** (vig, límites de casa, cierre al momento, **CLV**).
+
+### Prioridad (impacto/coste)
+1. A1 · 2. A4 · 3. A2 · 4. B11 + A6 (props, donde está el edge) · 5. C16/C14 (rigor).
+
+> Honestidad: el modelo ya está en el techo predictivo publicado; A1/B10 son marginales
+> en accuracy. El valor grande está en **incertidumbre (A2), rigor (A4/C16), mercados
+> nuevos (A6/B11) y CLV (C17)** — no en exprimir más el moneyline.
+
+---
+
 *Documento de diseño vivo. Cerrar los puntos `[ABIERTO: …]` y actualizar la fecha de validación tras cada revisión mayor.*
