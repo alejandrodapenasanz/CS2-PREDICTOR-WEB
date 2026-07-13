@@ -85,7 +85,7 @@
     }
     .tab .dot { color: var(--red); }
 
-    .controls { display: grid; grid-template-columns: minmax(220px,1.4fr) repeat(4, auto); gap: 10px; padding: 16px 0; align-items: center; }
+    .controls { display: grid; grid-template-columns: minmax(220px,1.4fr) repeat(3, auto); gap: 10px; padding: 16px 0; align-items: center; }
     input, select, button {
       background: var(--panel2); color: var(--text); border: 1px solid var(--line2);
       border-radius: 6px; padding: 10px 12px; font: inherit;
@@ -115,6 +115,18 @@
     tbody tr { cursor: pointer; transition: background .12s; }
     tbody tr:hover { background: rgba(255,39,64,.06); }
     tbody tr.sel { background: rgba(255,39,64,.10); box-shadow: inset 3px 0 0 var(--red); }
+
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { color: var(--text); }
+    th.sortable.active { color: var(--red-soft); }
+    .sortarrow { color: var(--red); font-size: 10px; margin-left: 2px; }
+    .openlink { color: var(--muted); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; font-size: 12px; margin-left: 8px; }
+    .openlink:hover { color: var(--red-soft); border-color: var(--red); text-decoration: none; }
+    .hourcell { min-width: 118px; }
+    .hourcell .h { font-family: ui-monospace, monospace; font-weight: 800; font-size: 18px; line-height: 1.1; }
+    .hourcell .d { color: var(--muted); font-size: 12px; margin-top: 3px; letter-spacing: .3px; }
+    #view-match .backbar { margin: 8px 0 16px; display: flex; gap: 10px; align-items: center; }
+    #view-match .matchwrap { max-width: 980px; margin: 0 auto; }
 
     .matchcell { display: flex; flex-direction: column; gap: 3px; }
     .vs { font-weight: 700; display:flex; align-items:center; gap:7px; }
@@ -241,15 +253,6 @@
           <option value="yes">Con odds</option>
           <option value="no">Sin odds</option>
         </select>
-        <select id="sortBy">
-          <option value="confidence">Orden: confianza</option>
-          <option value="opportunity">Orden: oportunidad</option>
-          <option value="time">Orden: hora</option>
-          <option value="value">Orden: value edge</option>
-          <option value="stake">Orden: stake</option>
-          <option value="flags">Orden: red flags</option>
-          <option value="upset">Orden: fav. upset</option>
-        </select>
         <button class="btn" id="reset">Reset</button>
       </div>
     </div>
@@ -262,7 +265,13 @@
       <div class="layout">
         <div class="panel">
           <div class="panel-title"><span>// Cartelera <span class="accent">[</span><span id="rowCount">0</span><span class="accent">]</span></span><span class="small">click para detalle</span></div>
-          <table><thead><tr><th>Hora</th><th>Partido</th><th>Decisión</th><th>Fav. upset</th><th>Mercado</th><th>Stake</th><th>Fiab.</th><th>Señales</th></tr></thead><tbody id="rows"></tbody></table>
+          <table><thead><tr>
+            <th class="sortable" data-sort="time">Hora / Día <span class="sortarrow" data-arrow="time"></span></th>
+            <th class="sortable" data-sort="match">Partido <span class="sortarrow" data-arrow="match"></span></th>
+            <th class="sortable" data-sort="decision">Decisión <span class="sortarrow" data-arrow="decision"></span></th>
+            <th class="sortable" data-sort="reliability">Fiab. <span class="sortarrow" data-arrow="reliability"></span></th>
+            <th class="sortable" data-sort="flags">Señales <span class="sortarrow" data-arrow="flags"></span></th>
+          </tr></thead><tbody id="rows"></tbody></table>
         </div>
         <aside class="panel detail" id="detail"><div class="empty">Selecciona un partido</div></aside>
       </div>
@@ -277,7 +286,34 @@
           (historial de ambos equipos, incertidumbre Glicko RD, BO1, rival por definir). No es consejo de apuesta.
         </div>
       </div>
+      <div class="controls" id="bestControls" style="grid-template-columns:repeat(3,minmax(150px,1fr)) auto;padding-top:0">
+        <select id="bestDay"><option value="">Día: todos</option></select>
+        <select id="bestProb">
+          <option value="0">Probabilidad: todas</option>
+          <option value="0.6">Prob. ganar ≥ 60%</option>
+          <option value="0.7">Prob. ganar ≥ 70%</option>
+          <option value="0.8">Prob. ganar ≥ 80%</option>
+          <option value="0.9">Prob. ganar ≥ 90%</option>
+        </select>
+        <select id="bestRel">
+          <option value="0">Fiabilidad: todas</option>
+          <option value="0.8">Fiabilidad ALTA (≥80%)</option>
+          <option value="0.55">Fiabilidad MEDIA+ (≥55%)</option>
+        </select>
+        <button class="btn" id="bestReset">Reset</button>
+      </div>
       <div class="opps" id="opps"></div>
+    </section>
+
+    <!-- VIEW: MATCH DETAIL PAGE (routing #/partido/:id) -->
+    <section id="view-match" class="hidden">
+      <div class="matchwrap">
+        <div class="backbar">
+          <a class="btn" id="backLink" href="#">← Volver</a>
+          <span class="small">Página de partido · enlazable y compartible</span>
+        </div>
+        <div class="panel detail"><div id="matchPageBody"><div class="empty">Cargando partido…</div></div></div>
+      </div>
     </section>
 
     <!-- VIEW: MODEL -->
@@ -373,7 +409,8 @@
     const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {} };
     const M = DATA.matches || [];
     const DB = DATA.database || {};
-    const state = { view: "matches", selected: null };
+    const state = { view: "matches", selected: null, sortKey: "time", sortDir: "asc" };
+    const SORT_DEFAULT_DIR = { time: "asc", match: "asc", decision: "desc", reliability: "desc", flags: "desc" };
     const $ = (id) => document.getElementById(id);
 
     // ---------- helpers ----------
@@ -526,21 +563,31 @@
         if (of==="no" && m.odds?.available) return false;
         return true;
       });
-      const s = $("sortBy").value;
-      const c = m => decisionConfidence(m);
-      if (s==="confidence") list.sort((a,b)=>c(b)-c(a));
-      else if (s==="opportunity") list.sort((a,b)=>opportunity(b)-opportunity(a));
-      else if (s==="flags") list.sort((a,b)=>(b.flags?.length||0)-(a.flags?.length||0));
-      else if (s==="value") list.sort((a,b)=>(Math.abs(b.controls?.market?.model_edge_team1||0))-(Math.abs(a.controls?.market?.model_edge_team1||0)));
-      else if (s==="stake") list.sort((a,b)=>(b.staking?.recommended_fraction||0)-(a.staking?.recommended_fraction||0));
-      else if (s==="upset") list.sort((a,b)=>{
-        const ua = upsetView(a).raw, ub = upsetView(b).raw;
-        const sa = (ua.favorite_matches||0) >= 3 ? (ua.favorite_loss_rate ?? -1) : -1;
-        const sb = (ub.favorite_matches||0) >= 3 ? (ub.favorite_loss_rate ?? -1) : -1;
-        return sb - sa;
-      });
-      else list.sort((a,b)=>`${a.date} ${a.hour}`.localeCompare(`${b.date} ${b.hour}`));
+      const key = state.sortKey, dir = state.sortDir === "asc" ? 1 : -1;
+      list.sort((a,b)=>dir*rowCmp(a,b,key));
       return list;
+    }
+    // Comparador para las cabeceras ordenables de la cartelera.
+    function rowCmp(a,b,key){
+      if (key==="time")  return `${a.date||""} ${a.hour||""}`.localeCompare(`${b.date||""} ${b.hour||""}`);
+      if (key==="match") return tn(a,'team1').localeCompare(tn(b,'team1'), 'es', {sensitivity:'base'});
+      if (key==="decision")    return decisionConfidence(a)-decisionConfidence(b);
+      if (key==="reliability") return reliability(a)-reliability(b);
+      if (key==="flags")       return (a.flags?.length||0)-(b.flags?.length||0);
+      return 0;
+    }
+    function updateSortArrows(){
+      document.querySelectorAll("th.sortable").forEach(th=>{
+        const active = th.dataset.sort===state.sortKey;
+        th.classList.toggle("active", active);
+        const arrow = th.querySelector(".sortarrow");
+        if (arrow) arrow.textContent = active ? (state.sortDir==="asc"?"▲":"▼") : "";
+      });
+    }
+    function setSort(key){
+      if (state.sortKey===key) state.sortDir = state.sortDir==="asc" ? "desc" : "asc";
+      else { state.sortKey = key; state.sortDir = SORT_DEFAULT_DIR[key] || "desc"; }
+      renderRows();
     }
     function renderKpis(list){
       const odds = list.filter(m=>m.odds?.available).length;
@@ -558,33 +605,23 @@
     function renderRows(){
       const list = filtered(); renderKpis(list); $("rowCount").textContent = list.length;
       $("rows").innerHTML = list.map(m=>{
-        const p = m.prediction||{}, f = m.features||{};
         const p1 = decisionProb(m);
         const favSide = decisionSide(m);
         const favT1 = favSide==="team1";
         const favName = decisionFavorite(m);
         const conf = decisionConfidence(m);
         const rel = reliability(m); const [rl,rc] = relLabel(rel);
-        const edge = m.controls?.market?.model_edge_team1;
-        const st = m.staking || {};
-        const sv = stakeView(st,m);
-        const uv = upsetView(m);
         return `<tr data-id="${esc(m.id)}" class="${state.selected===m.id?'sel':''}">
-          <td><b class="mono">${esc(m.hour||"")}</b><div class="ev">${esc(m.date||"")}</div></td>
-          <td><div class="matchcell"><div class="vs">${logo(m,'team1')} ${esc(tn(m,'team1'))} <span class="mid">VS</span> ${logo(m,'team2')} ${esc(tn(m,'team2'))}</div><div class="ev">${esc(m.event||"")} · ${esc((m.format||"").toUpperCase())}</div></div></td>
+          <td class="hourcell"><div class="h">${esc(m.hour||"—")}</div><div class="d">${esc(m.date||"")}</div></td>
+          <td><div class="matchcell"><div class="vs">${logo(m,'team1')} ${esc(tn(m,'team1'))} <span class="mid">VS</span> ${logo(m,'team2')} ${esc(tn(m,'team2'))}<a class="openlink" href="#/partido/${encodeURIComponent(m.id)}" title="Abrir página del partido" onclick="event.stopPropagation()">⤢ abrir</a></div><div class="ev">${esc(m.event||"")} · ${esc((m.format||"").toUpperCase())}</div></div></td>
           <td class="predcell"><span class="fav">${esc(favName||"—")}</span> <span class="confnum">${pct(conf)}</span>
             <div class="bar"><i style="width:${Math.round((favT1?p1:1-p1)*100)}%"></i></div></td>
-          <td><span class="mono" style="font-weight:900;color:${uv.color}">${esc(uv.main)}</span>
-            <div class="ev">${esc(uv.row)}</div></td>
-          <td><span class="mono">${m.odds?.average?`${num(m.odds.average.team1_decimal)}/${num(m.odds.average.team2_decimal)}`:"—"}</span>
-            <div class="ev">${edge!=null?`edge ${sg(edge)}`:"sin mercado"}</div></td>
-          <td><span class="mono" style="font-weight:900;color:${sv.color}">${esc(sv.pct)}</span>
-            <div class="ev">${esc(sv.row)}</div></td>
           <td><span class="mono" style="color:${rc};font-weight:800">${rl}</span><div class="meter"><i style="width:${Math.round(rel*100)}%;background:${rc}"></i></div></td>
           <td><div class="flags">${(m.flags||[]).slice(0,3).map(fl=>`<span class="flag ${fl.level}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">OK</span>'}</div></td>
         </tr>`;
-      }).join("") || `<tr><td colspan="8" class="empty">Sin partidos que coincidan</td></tr>`;
+      }).join("") || `<tr><td colspan="5" class="empty">Sin partidos que coincidan</td></tr>`;
       document.querySelectorAll("tr[data-id]").forEach(tr=>tr.onclick=()=>selectMatch(tr.dataset.id));
+      updateSortArrows();
       if(!state.selected && list[0]) selectMatch(list[0].id);
     }
 
@@ -598,6 +635,9 @@
       state.selected = id;
       document.querySelectorAll("tr[data-id]").forEach(tr=>tr.classList.toggle("sel",tr.dataset.id===id));
       const m = M.find(x=>x.id===id); if(!m) return;
+      $("detail").innerHTML = detailHTML(m);
+    }
+    function detailHTML(m){
       const p=m.prediction||{}, f=m.features||{}, ctl=m.controls||{}, mk=ctl.market||{}, mp=ctl.map_pool||{}, ctx=ctl.tournament_context||{};
       const st=m.staking||{};
       const sv=stakeView(st,m);
@@ -616,10 +656,10 @@
       const fatigueRow = s => { const ff=(ctl.fatigue||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: 24h ${ff.last24_count??0} · 48h ${ff.last48_count??0} · mismo día ${ff.same_day_total??0} ${ff.back_to_back?"· ⚠ back-to-back":""}</div>`; };
       const players = roster => (roster?.players||[]).map(pl=>{const s=pl.stats?.stats||{};return `<div class="player"><span>${esc(pl.name)}</span><span class="chip">R ${esc(s["Rating 3.0"]||"—")} · KAST ${esc(s.KAST||"—")}</span></div>`;}).join("") || '<div class="small">Sin roster</div>';
 
-      $("detail").innerHTML = `
+      return `
         <div class="dhead">
           <h2>${esc(tn(m,'team1'))} <span style="color:var(--red)">vs</span> ${esc(tn(m,'team2'))}</h2>
-          <div class="small mono">${esc(m.date)} ${esc(m.hour)} · ${esc(m.event)} · ${esc((m.format||"").toUpperCase())} · <a href="https://www.hltv.org${esc(m.link)}" target="_blank">HLTV ↗</a></div>
+          <div class="small mono">${esc(m.date)} ${esc(m.hour)} · ${esc(m.event)} · ${esc((m.format||"").toUpperCase())} · <a href="https://www.hltv.org${esc(m.link)}" target="_blank">HLTV ↗</a> · <a href="#/partido/${encodeURIComponent(m.id)}" class="openlink">⤢ página</a></div>
           <div style="margin-top:8px"><span class="flag" style="color:${rc};border-color:${rc}">FIABILIDAD ${rl} ${Math.round(rel*100)}%</span> <span class="flag info">snapshot ${m.data_quality?.real_pre_match_snapshot?"real":"legacy"}</span></div>
         </div>
         <div class="box"><b>Predicción del modelo (stats)</b>
@@ -674,9 +714,13 @@
 
     // ---------- best opportunity ----------
     function renderBest(){
+      const dayF = $("bestDay")?.value || "";
+      const probMin = Math.max(0.6, parseFloat($("bestProb")?.value || "0") || 0);
+      const relMin = Math.max(0.45, parseFloat($("bestRel")?.value || "0") || 0);
       const list = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
                     .map(m=>({m, opp:opportunity(m), rel:reliability(m)}))
-                    .filter(x=>decisionConfidence(x.m)>=.6 && x.rel>=.45)
+                    .filter(x=>decisionConfidence(x.m)>=probMin && x.rel>=relMin)
+                    .filter(x=>!dayF || x.m.date===dayF)
                     .sort((a,b)=>b.opp-a.opp).slice(0,18);
       $("bestCount").textContent = list.length ? `(${list.length})` : "";
       $("opps").innerHTML = list.map((x,i)=>{
@@ -860,8 +904,29 @@
       $("view-best").classList.toggle("hidden",v!=="best");
       $("view-model").classList.toggle("hidden",v!=="model");
       $("view-database").classList.toggle("hidden",v!=="database");
+      $("view-match").classList.add("hidden");
       $("controls").style.display = v==="matches" ? "" : "none";
       if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase();
+    }
+
+    // ---------- match detail page (hash routing #/partido/:id) ----------
+    function renderMatchPage(id){
+      const m = M.find(x=>x.id===id);
+      $("matchPageBody").innerHTML = m ? detailHTML(m)
+        : `<div class="empty">Partido no encontrado. <a href="#">Volver</a></div>`;
+    }
+    function applyRoute(){
+      const mth = (location.hash||"").match(/^#\/partido\/(.+)$/);
+      if (mth){
+        renderMatchPage(decodeURIComponent(mth[1]));
+        ["view-matches","view-best","view-model","view-database"].forEach(v=>$(v).classList.add("hidden"));
+        $("view-match").classList.remove("hidden");
+        $("controls").style.display = "none";
+        document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+        window.scrollTo({top:0});
+      } else {
+        setView(state.view || "matches");
+      }
     }
 
     function init(){
@@ -874,11 +939,29 @@
         dbDot.textContent = health === "ok" ? "OK" : "!";
         dbDot.style.color = health === "ok" ? "var(--green)" : health === "warning" ? "var(--amber)" : "var(--red-soft)";
       }
-      document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setView(t.dataset.view));
-      ["search","flagFilter","oddsFilter","sortBy"].forEach(id=>$(id).oninput=renderRows);
-      $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");$("sortBy").value="confidence";renderRows();};
-      $("sortBy").value="confidence";
+      document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+        if((location.hash||"").startsWith("#/partido")) history.replaceState(null,"",location.pathname+location.search);
+        setView(t.dataset.view);
+      });
+      ["search","flagFilter","oddsFilter"].forEach(id=>$(id).oninput=renderRows);
+      document.querySelectorAll("th.sortable").forEach(th=>th.onclick=()=>setSort(th.dataset.sort));
+      $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");state.sortKey="time";state.sortDir="asc";renderRows();};
+
+      // Filtros de la vista Best Opportunity (Favoritos): dia / probabilidad / fiabilidad.
+      const days = [...new Set(M.map(m=>m.date).filter(Boolean))].sort();
+      const bd = $("bestDay");
+      if (bd) bd.innerHTML = '<option value="">Día: todos</option>' + days.map(d=>`<option value="${esc(d)}">${esc(d)}</option>`).join("");
+      ["bestDay","bestProb","bestRel"].forEach(id=>{ const el=$(id); if(el) el.oninput=renderBest; });
+      const br=$("bestReset");
+      if(br) br.onclick=()=>{ if($("bestDay"))$("bestDay").value=""; if($("bestProb"))$("bestProb").value="0"; if($("bestRel"))$("bestRel").value="0"; renderBest(); };
+
+      // Routing de la pagina de partido.
+      const back=$("backLink");
+      if(back) back.onclick=(e)=>{ e.preventDefault(); history.replaceState(null,"",location.pathname+location.search); applyRoute(); };
+      window.addEventListener("hashchange", applyRoute);
+
       renderRows();
+      applyRoute();  // honra deep-link #/partido/:id al cargar
       // pre-cuenta best
       const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&m.prediction?.confidence>=.6&&reliability(m)>=.45).length;
       $("bestCount").textContent = n?`(${n})`:"";
