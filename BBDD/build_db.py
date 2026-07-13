@@ -1379,6 +1379,12 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
     cur = conn.cursor()
     cur.execute("DELETE FROM ratings_history")
     cur.execute("DELETE FROM match_features")
+    # Precarga de (match_id -> team1_id, team2_id) en una sola query, en vez de
+    # un SELECT por equipo dentro del bucle (N+1 + consulta duplicada por partido).
+    match_team_ids: dict[int, tuple[int, int]] = {
+        int(mid): (int(t1), int(t2))
+        for mid, t1, t2 in conn.execute("SELECT match_id, team1_id, team2_id FROM matches")
+    }
     state = ChronologicalState()
     n_ratings = 0
     n_features = 0
@@ -1389,18 +1395,15 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
             match_id = _match_id_for_hltv(conn, hltv_id)
         if match_id is None:
             continue
+        team_ids = match_team_ids.get(match_id)
+        if team_ids is None:
+            continue
         date_obj = row.get("date_obj")
         period = _period_index(date_obj)
         state._advance_to(period)
         for key_name, id_name in (("team1_key", "team1_id"), ("team2_key", "team2_id")):
             team_key = row[key_name]
-            db_team_id_row = conn.execute(
-                "SELECT team1_id, team2_id FROM matches WHERE match_id = ?",
-                (match_id,),
-            ).fetchone()
-            if not db_team_id_row:
-                continue
-            db_team_id = int(db_team_id_row[0] if key_name == "team1_key" else db_team_id_row[1])
+            db_team_id = team_ids[0] if key_name == "team1_key" else team_ids[1]
             card = state.rating_card(team_key, date_obj)
             cur.execute(
                 "INSERT OR REPLACE INTO ratings_history(entity_type, entity_id, before_match_id, "
