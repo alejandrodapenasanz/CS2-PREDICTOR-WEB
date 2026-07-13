@@ -120,11 +120,31 @@ BASE_FEATURE_COLUMNS = [
 ]
 FEATURE_COLUMNS = DIFF_COLUMNS + SYM_COLUMNS
 
-# Rating alternativo TrueSkill (equipo, online). Prototipo detras de flag; NO
-# entra en FEATURE_COLUMNS ni en produccion salvo `--extra-rating trueskill`.
-# Ambas columnas son antisimetricas (DIFF): se niegan al intercambiar A<->B.
+# --- Familias de rating adicionales, AUTO-GATED por muestra en train.py -------
+# Se calculan SIEMPRE (baratas, point-in-time) y solo entran al modelo cuando su
+# columna *_available supera el umbral (AUTO_FEATURE_FAMILIES en train.py). Sin
+# flags manuales: al acumularse muestra suficiente se activan solas.
+
+# TrueSkill de equipo (online, causal). Herbrich et al. 2006.
 TRUESKILL_DIFF_COLUMNS = ["trueskill_diff", "trueskill_prob_centered"]
-TRUESKILL_FEATURE_COLUMNS = TRUESKILL_DIFF_COLUMNS
+TRUESKILL_SYM_COLUMNS = ["trueskill_available"]
+TRUESKILL_FEATURE_COLUMNS = TRUESKILL_DIFF_COLUMNS + TRUESKILL_SYM_COLUMNS
+
+# Rating consciente del MARGEN (Elo-MOV): escala la actualizacion por el margen
+# de mapas (2-0 pesa mas que 2-1). Senal ortogonal al win-only (MOVDA 2025).
+MOV_DIFF_COLUMNS = ["mov_diff", "mov_prob_centered"]
+MOV_SYM_COLUMNS = ["mov_available"]
+MOV_FEATURE_COLUMNS = MOV_DIFF_COLUMNS + MOV_SYM_COLUMNS
+
+# Rating por JUGADOR (TrueSkill por jugador desde box score) agregado al equipo
+# por su ultimo quinteto observado. La habilidad "viaja" con el jugador entre
+# equipos (Skill Issues 2024; GRID: +3.6pp / +14.1pp en lineups nuevos).
+PLAYER_RATING_DIFF_COLUMNS = [
+    "player_skill_mean_diff", "player_skill_max_diff",
+    "player_skill_min_diff", "player_skill_spread_diff",
+]
+PLAYER_RATING_SYM_COLUMNS = ["player_skill_available"]
+PLAYER_RATING_FEATURE_COLUMNS = PLAYER_RATING_DIFF_COLUMNS + PLAYER_RATING_SYM_COLUMNS
 
 MAP_ASSET_DIFF_COLUMNS = [
     "asset_map_winrate_diff",
@@ -305,6 +325,9 @@ EXTENDED_DIFF_COLUMNS = (
     + PLAYER_DIFF_COLUMNS
     + RANKING_DIFF_COLUMNS
     + ROSTER_DIFF_COLUMNS
+    + TRUESKILL_DIFF_COLUMNS
+    + MOV_DIFF_COLUMNS
+    + PLAYER_RATING_DIFF_COLUMNS
 )
 
 
@@ -727,10 +750,18 @@ class ChronologicalState:
         # Elo baseline
         self.elos: dict[str, float] = defaultdict(lambda: 1500.0)
 
-        # TrueSkill de equipo (online, point-in-time). Se computa siempre (barato)
-        # pero solo entra al modelo si el flag lo incluye en las columnas.
+        # TrueSkill de equipo (online, point-in-time). Se computa siempre; entra
+        # al modelo por auto-gating de muestra (no por flag).
         self.trueskill = TeamTrueSkill()
         self.ts_ratings: dict[str, TSRating] = {}
+
+        # Rating consciente del margen (Elo-MOV) a nivel equipo.
+        self.mov: dict[str, float] = defaultdict(lambda: 1500.0)
+
+        # Rating por jugador (TrueSkill por jugador) + agregado del ultimo
+        # quinteto observado por equipo (media/max/min/dispersion de mu).
+        self.player_ts: dict[str, TSRating] = {}
+        self.team_player_skill: dict[str, dict[str, float]] = {}
 
         # rolling de resultados (cada entrada lleva la fecha para decay)
         self.win_hist: dict[str, list[tuple[int, datetime | None]]] = defaultdict(list)
@@ -959,6 +990,20 @@ class ChronologicalState:
         signs = [1.0 if value > 0 else -1.0 if value < 0 else 0.0 for value in strength_signals]
         strength_agreement = abs(sum(signs)) / len(signs)
 
+        # Rating consciente del margen (Elo-MOV).
+        mov_a, mov_b = self.mov[a_key], self.mov[b_key]
+        mov_prob = 1.0 / (1.0 + 10.0 ** (-(mov_a - mov_b) / 400.0))
+
+        # Agregado de habilidad por jugador del ultimo quinteto observado (prior).
+        ps_a = self.team_player_skill.get(a_key)
+        ps_b = self.team_player_skill.get(b_key)
+        ps_ok = bool(ps_a and ps_b)
+        ps_mean = (ps_a["mean"] - ps_b["mean"]) if ps_ok else 0.0
+        ps_max = (ps_a["max"] - ps_b["max"]) if ps_ok else 0.0
+        ps_min = (ps_a["min"] - ps_b["min"]) if ps_ok else 0.0
+        ps_spread = (ps_a["spread"] - ps_b["spread"]) if ps_ok else 0.0
+        rating_ready = float(min(self.n_matches[a_key], self.n_matches[b_key]) >= 1)
+
         feats = {
             "glicko_diff": ra.rating - rb.rating,
             "glicko_prob_centered": glicko_prob - 0.5,
@@ -968,6 +1013,15 @@ class ChronologicalState:
             "elo_prob_centered": elo_prob - 0.5,
             "trueskill_diff": ts_a.mu - ts_b.mu,
             "trueskill_prob_centered": ts_prob - 0.5,
+            "trueskill_available": rating_ready,
+            "mov_diff": mov_a - mov_b,
+            "mov_prob_centered": mov_prob - 0.5,
+            "mov_available": rating_ready,
+            "player_skill_mean_diff": ps_mean,
+            "player_skill_max_diff": ps_max,
+            "player_skill_min_diff": ps_min,
+            "player_skill_spread_diff": ps_spread,
+            "player_skill_available": 1.0 if ps_ok else 0.0,
             "matches_log_diff": math.log1p(self.n_matches[a_key]) - math.log1p(self.n_matches[b_key]),
             "experience_min": float(min(self.n_matches[a_key], self.n_matches[b_key])),
             "experience_total": float(self.n_matches[a_key] + self.n_matches[b_key]),
@@ -1076,6 +1130,20 @@ class ChronologicalState:
         else:
             self.ts_ratings[b], self.ts_ratings[a] = self.trueskill.update(ts_b, ts_a)
 
+        # Elo-MOV: mismo esquema Elo pero con multiplicador por margen de mapas
+        # (formula estilo FiveThirtyEight; 2-0 pesa mas que 2-1).
+        mov_a, mov_b = self.mov[a], self.mov[b]
+        mov_exp_a = 1.0 / (1.0 + 10.0 ** (-(mov_a - mov_b) / 400.0))
+        margin = abs(s1 - s2)
+        winner_gap = (mov_a - mov_b) if a_won else (mov_b - mov_a)
+        mov_mult = math.log(margin + 1.0) * (2.2 / (abs(winner_gap) * 0.001 + 2.2))
+        mov_k = 32.0 * (mov_mult if mov_mult > 0 else 1.0)
+        self.mov[a] = mov_a + mov_k * (actual_a - mov_exp_a)
+        self.mov[b] = mov_b + mov_k * ((1.0 - actual_a) - (1.0 - mov_exp_a))
+
+        # Rating por jugador (si el box score expone el quinteto de ambos equipos).
+        self._observe_player_ratings(match, a, b, a_won)
+
         # rolling
         self.n_matches[a] += 1
         self.n_matches[b] += 1
@@ -1135,6 +1203,56 @@ class ChronologicalState:
             "matches_played": int(self.n_matches.get(key, 0)),
             "days_since_last": int(self._days_since(key, date_obj)),
         }
+
+    def _observe_player_ratings(self, match: dict[str, Any], a_key: str, b_key: str, a_won: bool) -> None:
+        """Actualiza TrueSkill por jugador desde el box score y guarda el agregado
+        del quinteto por equipo (media/max/min/dispersion de mu).
+
+        Point-in-time: emit_features lee el agregado GUARDADO (de partidos previos);
+        aqui se actualiza DESPUES de emitir. Aproximacion de juego por equipos: cada
+        jugador se enfrenta al rating agregado del equipo rival (pre-update).
+        """
+        asset = match.get("asset")
+        if not isinstance(asset, dict):
+            return
+        players_by_team: dict[str, set[str]] = defaultdict(set)
+        for map_payload in asset.get("mapstats") or []:
+            for stat in map_payload.get("player_stats") or []:
+                if stat.get("side") != "total":
+                    continue
+                team_key = _clean_team(stat.get("team_name"))
+                player = _clean_team(stat.get("player_name") or stat.get("nick"))
+                if team_key in (a_key, b_key) and player:
+                    players_by_team[team_key].add(player)
+        team_a_players = players_by_team.get(a_key) or set()
+        team_b_players = players_by_team.get(b_key) or set()
+        if len(team_a_players) < 3 or len(team_b_players) < 3:
+            return  # cobertura insuficiente para un rating por jugador fiable
+
+        def _team_agg(players: set[str]) -> TSRating:
+            rs = [self.player_ts.get(p) or self.trueskill.default() for p in players]
+            mu = sum(r.mu for r in rs) / len(rs)
+            sigma = math.sqrt(sum(r.sigma * r.sigma for r in rs)) / len(rs)
+            return TSRating(mu, max(sigma, 1e-3))
+
+        opp_for_a = _team_agg(team_b_players)   # rival de los jugadores de A (pre-update)
+        opp_for_b = _team_agg(team_a_players)
+        for p in team_a_players:
+            r = self.player_ts.get(p) or self.trueskill.default()
+            self.player_ts[p] = (self.trueskill.update(r, opp_for_a)[0] if a_won
+                                 else self.trueskill.update(opp_for_a, r)[1])
+        for p in team_b_players:
+            r = self.player_ts.get(p) or self.trueskill.default()
+            self.player_ts[p] = (self.trueskill.update(r, opp_for_b)[0] if not a_won
+                                 else self.trueskill.update(opp_for_b, r)[1])
+        for team_key, players in ((a_key, team_a_players), (b_key, team_b_players)):
+            mus = [(self.player_ts.get(p) or self.trueskill.default()).mu for p in players]
+            self.team_player_skill[team_key] = {
+                "mean": sum(mus) / len(mus),
+                "max": max(mus),
+                "min": min(mus),
+                "spread": max(mus) - min(mus),
+            }
 
     def _observe_asset(self, match: dict[str, Any]) -> None:
         asset = match.get("asset")
