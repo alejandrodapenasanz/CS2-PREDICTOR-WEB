@@ -798,8 +798,8 @@ dependa de más muestra se deja *ready-to-use* con **auto-activación por umbral
 entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parcial · ⬜ pendiente.
 
 ### A. Estadística / metodología
-- ⬜ **A1. Ponderación por recencia en el learner** (`sample_weight` con decaimiento
-  exponencial por fecha, Dixon-Coles), no solo en features. Config `recency_half_life`.
+- ✅ **A1. Ponderación por recencia en el learner** (`sample_weight` con decaimiento
+  exponencial por fecha, Dixon-Coles). `--recency-half-life` (default 365d, activo).
 - ⬜ **A2. Incertidumbre epistémica de la probabilidad** (varianza entre miembros del
   ensemble / bootstrap) expuesta por el artefacto → **encoge el stake** cuando duda.
 - ⬜ **A3. Calibración/auditoría por segmento** (tier, formato, LAN/online, banda de

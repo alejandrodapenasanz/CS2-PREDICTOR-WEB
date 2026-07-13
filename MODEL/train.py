@@ -136,6 +136,21 @@ def _matrix(rows: list[dict[str, float]], cols: list[str]) -> np.ndarray:
     return np.array([[r.get(c, np.nan) for c in cols] for r in rows], dtype=float)
 
 
+def _recency_weights(periods_subset: np.ndarray, half_life_days: float) -> np.ndarray | None:
+    """Pesos por recencia (Dixon-Coles): 0.5**(edad_dias/half_life). None si off.
+
+    A1: el meta reciente pesa mas en el entrenamiento. Los periodos son semanales
+    (PERIOD_DAYS=7), asi que la edad en dias = (periodo_max - periodo) * 7.
+    """
+    if not half_life_days or half_life_days <= 0:
+        return None
+    p = np.asarray(periods_subset, dtype=float)
+    if p.size == 0:
+        return None
+    ages = (p.max() - p) * 7.0
+    return np.clip(0.5 ** (ages / float(half_life_days)), 1e-3, 1.0)
+
+
 def select_feature_columns(
     X_dicts: list[dict[str, float]],
     feature_profile: str = "error-aware",
@@ -455,15 +470,35 @@ def _new_estimator(kind: str, cols: list[str], verbose: bool = False):
     raise ValueError(f"Tipo de estimador desconocido: {kind}")
 
 
+def _weight_key(est) -> str:
+    """Nombre del kwarg de peso: las Pipelines lo enrutan al paso final (model)."""
+    from sklearn.pipeline import Pipeline
+    return f"{est.steps[-1][0]}__sample_weight" if isinstance(est, Pipeline) else "sample_weight"
+
+
 def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
-              random_state: int = 0, verbose: bool = False):
+              random_state: int = 0, verbose: bool = False,
+              sample_weight: np.ndarray | None = None):
     """Ajusta el base con augmentacion por simetria y, en GBDT, early stopping
-    sobre un holdout interno por log loss (evita fijar n_estimators a mano)."""
+    sobre un holdout interno por log loss (evita fijar n_estimators a mano).
+
+    `sample_weight` (alineado a X_tr) pondera cada fila; augment lo duplica para
+    las filas espejo A<->B. Si el estimador no acepta pesos, cae a sin pesos.
+    """
     est = _new_estimator(kind, cols, verbose=verbose)
+
+    def _augw(idx: np.ndarray):
+        if sample_weight is None:
+            return None
+        w = np.asarray(sample_weight)[idx]
+        return np.concatenate([w, w])  # augment apila [X, X_rev] -> [w, w]
+
     if kind in ("gbm", "catboost", "xgboost"):
         try:
             tr, va = chronological_holdout_indices(y_tr, 0.15)
             Xf, yf = augment(X_tr[tr], y_tr[tr], cols)
+            wf = _augw(tr)
+            wkw = {"sample_weight": wf} if wf is not None else {}
             if kind == "gbm":
                 try:
                     import lightgbm as lgb
@@ -476,6 +511,7 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                             lgb.early_stopping(80, verbose=verbose),
                             lgb.log_evaluation(50 if verbose else 0),
                         ],
+                        **wkw,
                     )
                     return est
                 except Exception:
@@ -486,6 +522,7 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                     eval_set=(X_tr[va], y_tr[va]),
                     use_best_model=True,
                     verbose=100 if verbose else False,
+                    **wkw,
                 )
                 return est
             else:  # xgboost
@@ -493,15 +530,29 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                     Xf, yf,
                     eval_set=[(X_tr[va], y_tr[va])],
                     verbose=50 if verbose else False,
+                    **wkw,
                 )
                 return est
         except Exception:
             pass
         est = _new_estimator(kind, cols, verbose=verbose)  # fallback robusto sin early stopping
         Xf, yf = augment(X_tr, y_tr, cols)
-        est.fit(Xf, yf)
+        wf = _augw(np.arange(len(X_tr)))
+        try:
+            est.fit(Xf, yf, **({"sample_weight": wf} if wf is not None else {}))
+        except Exception:
+            est.fit(Xf, yf)
         return est
+
+    # logistic / random_forest (Pipeline)
     Xf, yf = augment(X_tr, y_tr, cols)
+    wf = _augw(np.arange(len(X_tr)))
+    if wf is not None:
+        try:
+            est.fit(Xf, yf, **{_weight_key(est): wf})
+            return est
+        except Exception:
+            est = _new_estimator(kind, cols, verbose=verbose)
     est.fit(Xf, yf)
     return est
 
@@ -518,15 +569,18 @@ def _make_calibrator(base, X_cal: np.ndarray, y_cal: np.ndarray, method: str):
 def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                          methods: tuple[str, ...] = CALIBRATION_METHODS,
                          cal_frac: float = 0.2, random_state: int = 0,
-                         verbose: bool = False):
+                         verbose: bool = False, sample_weight: np.ndarray | None = None):
     """Ajusta el base UNA vez y devuelve (base, {metodo: estimador_calibrado}).
 
     El base se entrena sobre tr_idx (augmentado) y cada calibrador sobre cal_idx.
     Compartir el base hace barato comparar sigmoid/isotonica/beta por fold.
+    `sample_weight` (recencia) se aplica solo al base; el calibrador se ajusta sin
+    pesos sobre el holdout reciente (ya sesgado a lo actual por ser cronologico).
     """
     tr_idx, cal_idx = chronological_holdout_indices(y_tr, cal_frac)
+    sw_tr = np.asarray(sample_weight)[tr_idx] if sample_weight is not None else None
     base = _fit_base(kind, X_tr[tr_idx], y_tr[tr_idx], cols,
-                     random_state=random_state, verbose=verbose)
+                     random_state=random_state, verbose=verbose, sample_weight=sw_tr)
     cals: dict[str, Any] = {}
     for m in methods:
         try:
@@ -642,6 +696,7 @@ def walk_forward(
     gap: int = 0,
     algorithm_kinds: tuple[str, ...] = ("logistic", "gbm"),
     verbose: bool = False,
+    recency_half_life: float = 0.0,
 ) -> dict[str, list[dict[str, Any]]]:
     """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
 
@@ -674,6 +729,7 @@ def walk_forward(
         X_te, y_te = X_all[test_mask], y_all[test_mask]
         te_meta = [meta[i] for i in np.where(test_mask)[0]]
         base_rate = float(np.mean(y_tr))
+        sw_tr = _recency_weights(periods[train_mask], recency_half_life)
         if verbose:
             print(
                 f"      fold {wi+1:03d}/{len(test_periods):03d} period={period}: "
@@ -692,7 +748,8 @@ def walk_forward(
                 if verbose:
                     print(f"        fitting {kind}...", flush=True)
                 fitted[kind] = fit_calibrated_multi(
-                    kind, X_tr, y_tr, cols, random_state=wi, verbose=verbose
+                    kind, X_tr, y_tr, cols, random_state=wi, verbose=verbose,
+                    sample_weight=sw_tr,
                 )
             except Exception:
                 fitted[kind] = None
@@ -1157,6 +1214,9 @@ def main() -> int:
                         help="Vida media (dias) del decaimiento de la forma. Tunable.")
     parser.add_argument("--wf-gap", type=int, default=0,
                         help="Periodos de separacion train->test en walk-forward (anti-fuga).")
+    parser.add_argument("--recency-half-life", type=float, default=365.0,
+                        help="A1: vida media (dias) del peso por recencia en el learner "
+                             "(sample_weight, Dixon-Coles). 0 desactiva. Activo por defecto.")
     parser.add_argument("--no-catboost", action="store_true",
                         help="No usar CatBoost como candidato aunque este instalado.")
     parser.add_argument(
@@ -1241,7 +1301,7 @@ def main() -> int:
     preds = walk_forward(
         X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
         args.min_train, gap=args.wf_gap, algorithm_kinds=enabled_kinds,
-        verbose=args.verbose,
+        verbose=args.verbose, recency_half_life=args.recency_half_life,
     )
     metrics = summarize(preds)
     n_test = max((int(item.get("n", 0)) for item in metrics.values()), default=0)
@@ -1303,7 +1363,8 @@ def main() -> int:
             print(f"      fitting final {kind}...", flush=True)
         fitted_full[kind] = fit_calibrated_multi(kind, X_all, y_all, model_columns,
                                                  cal_frac=0.18, random_state=7,
-                                                 verbose=args.verbose)
+                                                 verbose=args.verbose,
+                                                 sample_weight=_recency_weights(periods, args.recency_half_life))
     _component_kind = {
         "logistic": "logistic",
         "gbm": "lightgbm",
@@ -1374,6 +1435,7 @@ def main() -> int:
             "feature_profile": args.feature_profile,
             "inner_split": "chronological_holdout",
             "form_half_life_days": args.form_half_life,
+            "recency_half_life_days": args.recency_half_life,
             "walk_forward_gap": args.wf_gap,
             "catboost_enabled": has_catboost,
             "xgboost_enabled": has_xgboost,
