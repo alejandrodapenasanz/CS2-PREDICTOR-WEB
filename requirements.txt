@@ -15,9 +15,7 @@ requests>=2.32.4
 parsel>=1.10
 cloudscraper==1.2.71
 Scrapy==2.14.2
-scrapy-selenium==0.0.7
 scrapy-impersonate==1.7.0
-selenium==4.30.0
 nodriver==0.50.3
 itemadapter==0.11.0
 
