@@ -42,6 +42,9 @@ from cs2model.features import (
     STRENGTH_INTERACTION_COLUMNS,
     DIFF_COLUMNS,
     ANALYTICS_FEATURE_COLUMNS,
+    ANALYTICS_EXTENDED_FEATURE_COLUMNS,
+    ANNOUNCED_LINEUP_FEATURE_COLUMNS,
+    EVENT_METADATA_FEATURE_COLUMNS,
     CONTEXT_FEATURE_COLUMNS,
     PLAYER_FEATURE_COLUMNS,
     MAP_ASSET_FEATURE_COLUMNS,
@@ -70,6 +73,13 @@ ODDS_FEATURE_COLUMNS = [
 ]
 EXTRA_DIFF_COLUMNS = {"opening_odds_prob_centered"}
 ANALYTICS_MIN_TRAIN_ROWS = 120
+ANALYTICS_EXTENDED_MIN_TRAIN_ROWS = 200
+# Una alineacion anunciada completa tiene varias variables correlacionadas; se
+# exige una muestra cerrada mayor antes de dejar que altere produccion.
+ANNOUNCED_LINEUP_MIN_TRAIN_ROWS = 200
+# Prize pool/tamano del evento son contexto de calibracion, no una ventaja de
+# lado. Requieren mas eventos antes de permitir interacciones no lineales.
+EVENT_METADATA_MIN_TRAIN_ROWS = 300
 CONTEXT_MIN_TRAIN_ROWS = 200
 CONTEXT_MIN_ENV_ROWS = 50
 PLAYER_MIN_TRAIN_ROWS = 200
@@ -99,6 +109,9 @@ AUTO_FEATURE_FAMILIES = (
     ("map_box_scores", MAP_ASSET_FEATURE_COLUMNS, "asset_available", MAP_ASSET_MIN_TRAIN_ROWS),
     ("event_history", EVENT_HISTORY_FEATURE_COLUMNS, "event_history_available", EVENT_HISTORY_MIN_TRAIN_ROWS),
     ("analytics", ANALYTICS_FEATURE_COLUMNS, "analytics_available", ANALYTICS_MIN_TRAIN_ROWS),
+    ("analytics_extended", ANALYTICS_EXTENDED_FEATURE_COLUMNS, "analytics_extended_available", ANALYTICS_EXTENDED_MIN_TRAIN_ROWS),
+    ("announced_lineups", ANNOUNCED_LINEUP_FEATURE_COLUMNS, "announced_lineup_available", ANNOUNCED_LINEUP_MIN_TRAIN_ROWS),
+    ("event_metadata", EVENT_METADATA_FEATURE_COLUMNS, "event_metadata_available", EVENT_METADATA_MIN_TRAIN_ROWS),
     ("player_snapshots", PLAYER_FEATURE_COLUMNS, "player_snapshot_available", PLAYER_MIN_TRAIN_ROWS),
     ("rankings", RANKING_FEATURE_COLUMNS, "ranking_available", RANKING_MIN_TRAIN_ROWS),
     ("roster", ROSTER_FEATURE_COLUMNS, "roster_available", ROSTER_MIN_TRAIN_ROWS),
@@ -207,6 +220,11 @@ MONOTONE_INCREASING = {
     "h2h_winrate_centered", "format_h2h_winrate_centered",
     "asset_map_winrate_diff", "asset_rating_l10_diff",
     "event_winrate_diff", "analytics_map_win_pct_diff",
+    "announced_lineup_rating_diff", "announced_lineup_rating_top2_avg_diff",
+    "announced_lineup_rating_bottom2_avg_diff", "announced_lineup_kpr_diff",
+    "announced_lineup_kast_diff", "announced_lineup_adr_diff",
+    "announced_lineup_multi_kill_rating_diff", "announced_lineup_round_swing_diff",
+    "announced_lineup_standin_advantage",
     "player_rating_diff", "player_kpr_diff", "player_adr_diff", "player_impact_diff",
     "player_opening_kpr_diff",
     "ranking_hltv_position_advantage", "ranking_hltv_points_diff",

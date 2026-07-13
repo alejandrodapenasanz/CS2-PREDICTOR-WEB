@@ -188,7 +188,13 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
     event_cache = build_db._load_event_cache(conn)
     team1_id = build_db._team_id_for(cur, team_cache, team_hltv_cache, name=team1["name"], hltv_id=team1.get("id"))
     team2_id = build_db._team_id_for(cur, team_cache, team_hltv_cache, name=team2["name"], hltv_id=team2.get("id"))
-    event_id = build_db._event_id_for(cur, event_cache, record.get("event"))
+    analytics = record.get("analytics") or {}
+    event_metadata = dict(record.get("event_metadata") or {})
+    if isinstance(analytics, dict) and isinstance(analytics.get("event_metadata"), dict):
+        event_metadata.update({key: value for key, value in analytics["event_metadata"].items() if value is not None})
+        event_metadata.setdefault("captured_at", analytics.get("captured_at"))
+        event_metadata.setdefault("source_file", analytics.get("source_file"))
+    event_id = build_db._event_id_for(cur, event_cache, record.get("event"), event_metadata)
     context = context_from_record(record) or {}
     environment = context.get("environment") if context.get("environment") in {"lan", "online"} else "unknown"
     stage = schema_stage(context.get("stage")) if context else None
@@ -216,6 +222,24 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
         )
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(hltv_match_id) DO UPDATE SET
+            -- Antes de empezar HLTV puede corregir/renombrar un participante,
+            -- hora o fase. El hecho actual se actualiza; las fotos raw y la
+            -- primera cuota permanecen append-only en sus propias tablas.
+            event_id=CASE WHEN matches.status <> 'completed' THEN excluded.event_id ELSE matches.event_id END,
+            datetime_utc=CASE WHEN matches.status <> 'completed' THEN excluded.datetime_utc ELSE matches.datetime_utc END,
+            team1_id=CASE WHEN matches.status <> 'completed' THEN excluded.team1_id ELSE matches.team1_id END,
+            team2_id=CASE WHEN matches.status <> 'completed' THEN excluded.team2_id ELSE matches.team2_id END,
+            best_of=CASE WHEN matches.status <> 'completed' THEN excluded.best_of ELSE matches.best_of END,
+            stage=CASE WHEN matches.status <> 'completed' THEN excluded.stage ELSE matches.stage END,
+            environment=CASE WHEN matches.status <> 'completed' THEN excluded.environment ELSE matches.environment END,
+            stage_detail=CASE WHEN matches.status <> 'completed' THEN excluded.stage_detail ELSE matches.stage_detail END,
+            incentive_label=CASE WHEN matches.status <> 'completed' THEN excluded.incentive_label ELSE matches.incentive_label END,
+            high_stakes=CASE WHEN matches.status <> 'completed' THEN excluded.high_stakes ELSE matches.high_stakes END,
+            opening_match=CASE WHEN matches.status <> 'completed' THEN excluded.opening_match ELSE matches.opening_match END,
+            winner_advances=CASE WHEN matches.status <> 'completed' THEN excluded.winner_advances ELSE matches.winner_advances END,
+            loser_eliminated=CASE WHEN matches.status <> 'completed' THEN excluded.loser_eliminated ELSE matches.loser_eliminated END,
+            bracket=CASE WHEN matches.status <> 'completed' THEN excluded.bracket ELSE matches.bracket END,
+            context_json=CASE WHEN matches.status <> 'completed' THEN excluded.context_json ELSE matches.context_json END,
             status=CASE WHEN excluded.status='completed' THEN 'completed' ELSE matches.status END,
             data_tier=CASE WHEN excluded.status='completed' THEN 'completed' ELSE matches.data_tier END,
             result_filled_at_utc=COALESCE(matches.result_filled_at_utc, excluded.result_filled_at_utc),
@@ -503,6 +527,24 @@ def ingest_run(
         }
         counts["odds_rows"] += build_db.insert_odds(conn.cursor(), master, match_id_map)
         counts["roster_history_rows"] += build_db.insert_roster_history(conn.cursor(), team_ids_by_hltv)
+        prematch_lineup_counts = build_db.insert_prematch_lineup_snapshots(
+            conn.cursor(),
+            run_dir,
+            match_id_map,
+            team_ids,
+            team_ids_by_hltv,
+        )
+        for key, value in prematch_lineup_counts.items():
+            counts[key] += value
+        analytics_counts = build_db.insert_match_analytics_snapshots(
+            conn.cursor(),
+            run_dir,
+            match_id_map,
+            team_ids,
+            team_ids_by_hltv,
+        )
+        for key, value in analytics_counts.items():
+            counts[key] += value
         asset_counts = build_db.insert_hltv_assets(
             conn.cursor(),
             master,

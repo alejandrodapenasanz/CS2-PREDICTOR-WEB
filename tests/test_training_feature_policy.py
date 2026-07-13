@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT / "MODEL"))
 from cs2model.dataio import external_snapshot_features_asof
 from cs2model.features import (
     ANALYTICS_FEATURE_COLUMNS,
+    ANNOUNCED_LINEUP_FEATURE_COLUMNS,
+    EVENT_METADATA_FEATURE_COLUMNS,
     EVENT_HISTORY_FEATURE_COLUMNS,
     FEATURE_COLUMNS,
     MAP_ASSET_FEATURE_COLUMNS,
@@ -21,6 +23,8 @@ from cs2model.features import (
 )
 from train import (
     ANALYTICS_MIN_TRAIN_ROWS,
+    ANNOUNCED_LINEUP_MIN_TRAIN_ROWS,
+    EVENT_METADATA_MIN_TRAIN_ROWS,
     EVENT_HISTORY_MIN_TRAIN_ROWS,
     MAP_ASSET_MIN_TRAIN_ROWS,
     PLAYER_MIN_TRAIN_ROWS,
@@ -121,6 +125,8 @@ class TrainingFeaturePolicyTests(unittest.TestCase):
         families = [
             ("map_box_scores", "asset_available", MAP_ASSET_MIN_TRAIN_ROWS, MAP_ASSET_FEATURE_COLUMNS),
             ("event_history", "event_history_available", EVENT_HISTORY_MIN_TRAIN_ROWS, EVENT_HISTORY_FEATURE_COLUMNS),
+            ("announced_lineups", "announced_lineup_available", ANNOUNCED_LINEUP_MIN_TRAIN_ROWS, ANNOUNCED_LINEUP_FEATURE_COLUMNS),
+            ("event_metadata", "event_metadata_available", EVENT_METADATA_MIN_TRAIN_ROWS, EVENT_METADATA_FEATURE_COLUMNS),
             ("rankings", "ranking_available", RANKING_MIN_TRAIN_ROWS, RANKING_FEATURE_COLUMNS),
             ("roster", "roster_available", ROSTER_MIN_TRAIN_ROWS, ROSTER_FEATURE_COLUMNS),
         ]

@@ -85,6 +85,11 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
 - **HLTV Analytics:** map pool, pick/ban y señales de la pestaña Analytics. Se
   activa automáticamente cuando haya suficientes partidos cerrados con Analytics
   point-in-time.
+- **Alineación anunciada y metadatos del evento:** los cinco anunciados se
+  guardan separados de la alineación real y se usan solo si la foto precede al
+  inicio. Sus diferencias de Rating/KPR/KAST/ADR, profundidad, Round Swing y
+  stand-ins se activan automáticamente con 200 casos cerrados; prize pool y
+  número de equipos, con 300. No hay switch manual.
 - **Contexto de torneo:** LAN/online, fase (`opening`, `group`, `swiss`,
   `quarter`, `semi`, `final`, playoffs/bracket), winner advances y elimination.
   Se guarda ya en BBDD y se entrena solo cuando haya muestra suficiente y no
@@ -93,6 +98,14 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
   adaptativo (`past3months` si hay muestra, si no `past6months`, si no
   `past12months`). Entran automaticamente al llegar a 200 partidos cerrados con
   cobertura point-in-time.
+- **Comparacion de roster:** los cinco jugadores de un equipo se comparan en una
+  misma ventana temporal representativa (3, 6 o 12 meses). El vector conserva
+  media, mejor jugador, media de los dos mejores, mediana, media de los dos
+  peores y dispersion; evita derivadas redundantes como `spread`, `star_gap` y
+  `weak_link_gap`. No presupone que una estrella pueda siempre ganar sola: ese
+  efecto se aprende y se valida en walk-forward cuando haya 200 partidos con
+  snapshots pre-partido completos (minimo cuatro jugadores y cinco mapas por
+  jugador en ambos equipos).
 - **Box score/mapas, historial de evento, rankings y roster:** cada familia tiene
   su columna de disponibilidad y umbral propio. `MODEL/train.py` decide `ON/OFF`
   en cada reentrenamiento; no hay switches manuales.

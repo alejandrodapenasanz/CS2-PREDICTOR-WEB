@@ -163,6 +163,54 @@ ANALYTICS_SYM_COLUMNS = [
 ]
 ANALYTICS_FEATURE_COLUMNS = ANALYTICS_DIFF_COLUMNS + ANALYTICS_SYM_COLUMNS
 
+# Señales adicionales del Analytics Center. Se almacenan desde ahora, pero su
+# familia tiene un umbral de cobertura propio en train.py para que una novedad
+# de scraping no cambie el modelo con unas pocas decenas de casos.
+ANALYTICS_EXTENDED_DIFF_COLUMNS = [
+    "analytics_standin_advantage",
+    "analytics_core_lineup_risk_advantage",
+    "analytics_series_win_pct_diff",
+    "analytics_map_handicap_margin_diff",
+]
+ANALYTICS_EXTENDED_SYM_COLUMNS = [
+    "analytics_extended_available",
+    "analytics_series_sample_min",
+    "analytics_overtime_pct_abs_diff",
+    "analytics_map_handicap_common_maps",
+]
+ANALYTICS_EXTENDED_FEATURE_COLUMNS = ANALYTICS_EXTENDED_DIFF_COLUMNS + ANALYTICS_EXTENDED_SYM_COLUMNS
+
+# La alineacion anunciada en la pagina del partido es una fuente distinta del
+# roster historico: identifica los cinco que HLTV esperaba antes del inicio.
+# Se mantiene como familia propia para que su cobertura y su activacion se
+# puedan auditar sin mezclarla con snapshots generales de perfil.
+ANNOUNCED_LINEUP_DIFF_COLUMNS = [
+    "announced_lineup_rating_diff",
+    "announced_lineup_rating_top2_avg_diff",
+    "announced_lineup_rating_bottom2_avg_diff",
+    "announced_lineup_kpr_diff",
+    "announced_lineup_kast_diff",
+    "announced_lineup_adr_diff",
+    "announced_lineup_multi_kill_rating_diff",
+    "announced_lineup_round_swing_diff",
+    "announced_lineup_standin_advantage",
+]
+ANNOUNCED_LINEUP_SYM_COLUMNS = [
+    "announced_lineup_available",
+    "announced_lineup_players_min",
+    "announced_lineup_rating_coverage_min",
+]
+ANNOUNCED_LINEUP_FEATURE_COLUMNS = ANNOUNCED_LINEUP_DIFF_COLUMNS + ANNOUNCED_LINEUP_SYM_COLUMNS
+
+# Metadatos comunes del evento. No inclinan por si solos A frente a B, pero un
+# modelo no lineal puede usarlos para calibrar interacciones con contexto y
+# fortaleza. Se activan con un umbral mas alto en train.py.
+EVENT_METADATA_FEATURE_COLUMNS = [
+    "event_metadata_available",
+    "event_prize_pool_log",
+    "event_teams_competing",
+]
+
 CONTEXT_STAGE_COLUMNS = [
     "context_stage_group",
     "context_stage_swiss",
@@ -195,22 +243,24 @@ CONTEXT_FEATURE_COLUMNS = [
 PLAYER_DIFF_COLUMNS = [
     "player_rating_diff",
     "player_rating_max_diff",
-    "player_rating_min_diff",
+    "player_rating_top2_avg_diff",
+    "player_rating_median_diff",
+    "player_rating_bottom2_avg_diff",
     "player_rating_std_diff",
-    "player_rating_spread_diff",
-    "player_star_gap_diff",
-    "player_weak_link_gap_diff",
     "player_kpr_diff",
     "player_kast_diff",
     "player_adr_diff",
     "player_impact_diff",
     "player_round_swing_diff",
+    "player_round_swing_top2_avg_diff",
     "player_opening_kpr_diff",
+    "player_opening_kpr_top2_avg_diff",
 ]
 PLAYER_SYM_COLUMNS = [
     "player_snapshot_available",
     "player_coverage_min",
     "player_maps_min",
+    "player_maps_per_player_min",
 ]
 PLAYER_FEATURE_COLUMNS = PLAYER_DIFF_COLUMNS + PLAYER_SYM_COLUMNS
 
@@ -243,6 +293,8 @@ EXTENDED_DIFF_COLUMNS = (
     MAP_ASSET_DIFF_COLUMNS
     + EVENT_HISTORY_DIFF_COLUMNS
     + ANALYTICS_DIFF_COLUMNS
+    + ANALYTICS_EXTENDED_DIFF_COLUMNS
+    + ANNOUNCED_LINEUP_DIFF_COLUMNS
     + PLAYER_DIFF_COLUMNS
     + RANKING_DIFF_COLUMNS
     + ROSTER_DIFF_COLUMNS
@@ -377,7 +429,7 @@ def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
     These are same-match pre-game features, not rolling state. They are only
     used by training when coverage is high enough; otherwise they stay inert.
     """
-    feats = {col: 0.0 for col in ANALYTICS_FEATURE_COLUMNS}
+    feats = {col: 0.0 for col in ANALYTICS_FEATURE_COLUMNS + ANALYTICS_EXTENDED_FEATURE_COLUMNS}
     analytics = match.get("analytics") or {}
     if not isinstance(analytics, dict) or not analytics.get("available"):
         return feats
@@ -455,6 +507,165 @@ def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
             scores[line_team] -= 1.0
     feats["analytics_insight_total"] = float(insight_total)
     feats["analytics_insight_score_diff"] = scores.get(t1, 0.0) - scores.get(t2, 0.0)
+
+    def named_payload(payload: dict[str, Any], name: str) -> dict[str, Any]:
+        for team, value in (payload or {}).items():
+            if _clean_team(team) == name and isinstance(value, dict):
+                return value
+        return {}
+
+    def named_list(payload: dict[str, Any], name: str) -> list[Any]:
+        for team, value in (payload or {}).items():
+            if _clean_team(team) == name and isinstance(value, list):
+                return value
+        return []
+
+    def team_series(side: str, name: str) -> dict[str, Any]:
+        value = (analytics.get("series_stats") or {}).get(side) or {}
+        if isinstance(value, dict) and (_clean_team(value.get("team")) in {"", name}):
+            return value
+        for candidate in (analytics.get("series_stats") or {}).values():
+            if isinstance(candidate, dict) and _clean_team(candidate.get("team")) == name:
+                return candidate
+        return {}
+
+    standins = analytics.get("standins") or {}
+    core_lineup = analytics.get("core_lineup") or {}
+    standins1 = len(named_list(standins, t1))
+    standins2 = len(named_list(standins, t2))
+    core1 = named_payload(core_lineup, t1)
+    core2 = named_payload(core_lineup, t2)
+    # Positivo = ventaja para team1: menos sustituciones o menor alerta de core.
+    feats["analytics_standin_advantage"] = float(standins2 - standins1)
+    feats["analytics_core_lineup_risk_advantage"] = float(bool(core2)) - float(bool(core1))
+
+    series1 = team_series("team1", t1)
+    series2 = team_series("team2", t2)
+    dist1 = series1.get("score_distribution") or {}
+    dist2 = series2.get("score_distribution") or {}
+    win1 = _safe_float(dist1.get("2_0_wins")) or 0.0
+    win1 += _safe_float(dist1.get("2_1_wins")) or 0.0
+    win2 = _safe_float(dist2.get("2_0_wins")) or 0.0
+    win2 += _safe_float(dist2.get("2_1_wins")) or 0.0
+    if series1 and series2:
+        feats["analytics_series_win_pct_diff"] = (win1 - win2) / 100.0
+        samples = [_safe_float(series1.get("matches")), _safe_float(series2.get("matches"))]
+        if all(value is not None for value in samples):
+            feats["analytics_series_sample_min"] = min(samples)
+        overtime1 = _safe_float(series1.get("overtime_pct"))
+        overtime2 = _safe_float(series2.get("overtime_pct"))
+        if overtime1 is not None and overtime2 is not None:
+            feats["analytics_overtime_pct_abs_diff"] = abs(overtime1 - overtime2) / 100.0
+
+    handicap_rows: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for row in analytics.get("map_handicap") or []:
+        if not isinstance(row, dict):
+            continue
+        team = _clean_team(row.get("team"))
+        map_name = str(row.get("map") or "").strip().lower()
+        if team and map_name and map_name != "overall":
+            handicap_rows[map_name][team] = row
+    margins: list[float] = []
+    for teams in handicap_rows.values():
+        row1, row2 = teams.get(t1), teams.get(t2)
+        if not row1 or not row2:
+            continue
+        lost1, won1 = _safe_float(row1.get("avg_rounds_lost_in_wins")), _safe_float(row1.get("avg_rounds_won_in_losses"))
+        lost2, won2 = _safe_float(row2.get("avg_rounds_lost_in_wins")), _safe_float(row2.get("avg_rounds_won_in_losses"))
+        if None not in {lost1, won1, lost2, won2}:
+            margins.append((won1 - lost1) - (won2 - lost2))
+    feats["analytics_map_handicap_common_maps"] = float(len(margins))
+    feats["analytics_map_handicap_margin_diff"] = _avg(margins)
+    feats["analytics_extended_available"] = 1.0 if (
+        standins1 or standins2 or core1 or core2 or (series1 and series2) or margins
+    ) else 0.0
+    return feats
+
+
+def _lineup_metric(players: list[dict[str, Any]], metric: str, aggregate: str = "avg") -> float:
+    values = [_safe_float(player.get(metric)) for player in players]
+    values = [value for value in values if value is not None]
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    if aggregate == "top2_avg":
+        selected = ordered[-min(2, len(ordered)) :]
+        return _avg(selected)
+    if aggregate == "bottom2_avg":
+        selected = ordered[: min(2, len(ordered))]
+        return _avg(selected)
+    return _avg(values)
+
+
+def announced_lineup_features(match: dict[str, Any]) -> dict[str, float]:
+    """Five-versus-five features from the announced pre-match lineup.
+
+    The caller must pass the snapshot that was captured before kick-off. This
+    function deliberately does not fall back to a current roster: a missing
+    announced lineup is safer than silently substituting post-match knowledge.
+    """
+    feats = {col: 0.0 for col in ANNOUNCED_LINEUP_FEATURE_COLUMNS}
+    lineups = match.get("prematch_lineups") or match.get("announced_lineups") or {}
+    if not isinstance(lineups, dict):
+        return feats
+    team1 = lineups.get("team1") or {}
+    team2 = lineups.get("team2") or {}
+    players1 = team1.get("players") if isinstance(team1, dict) else None
+    players2 = team2.get("players") if isinstance(team2, dict) else None
+    if not isinstance(players1, list) or not isinstance(players2, list):
+        return feats
+    players1 = [player for player in players1 if isinstance(player, dict)]
+    players2 = [player for player in players2 if isinstance(player, dict)]
+    ratings1 = [_safe_float(player.get("rating")) for player in players1]
+    ratings2 = [_safe_float(player.get("rating")) for player in players2]
+    ratings1 = [value for value in ratings1 if value is not None]
+    ratings2 = [value for value in ratings2 if value is not None]
+
+    feats["announced_lineup_players_min"] = float(min(len(players1), len(players2)))
+    feats["announced_lineup_rating_coverage_min"] = float(min(len(ratings1), len(ratings2)))
+    # Five announced players on both sides and four ratings per team protect
+    # the feature family from partial/placeholder lineups.
+    if len(players1) < 5 or len(players2) < 5 or len(ratings1) < 4 or len(ratings2) < 4:
+        return feats
+
+    feats["announced_lineup_available"] = 1.0
+    feats["announced_lineup_rating_diff"] = _avg(ratings1) - _avg(ratings2)
+    feats["announced_lineup_rating_top2_avg_diff"] = (
+        _lineup_metric(players1, "rating", "top2_avg") - _lineup_metric(players2, "rating", "top2_avg")
+    )
+    feats["announced_lineup_rating_bottom2_avg_diff"] = (
+        _lineup_metric(players1, "rating", "bottom2_avg") - _lineup_metric(players2, "rating", "bottom2_avg")
+    )
+    for source, target in (
+        ("kpr", "announced_lineup_kpr_diff"),
+        ("kast", "announced_lineup_kast_diff"),
+        ("adr", "announced_lineup_adr_diff"),
+        ("multi_kill_rating", "announced_lineup_multi_kill_rating_diff"),
+        ("round_swing", "announced_lineup_round_swing_diff"),
+    ):
+        feats[target] = _lineup_metric(players1, source) - _lineup_metric(players2, source)
+    standins1 = sum(1 for player in players1 if _context_bool(player, "is_standin"))
+    standins2 = sum(1 for player in players2 if _context_bool(player, "is_standin"))
+    # Positivo = ventaja para team1 porque tiene menos sustituciones anunciadas.
+    feats["announced_lineup_standin_advantage"] = float(standins2 - standins1)
+    return feats
+
+
+def event_metadata_features(match: dict[str, Any]) -> dict[str, float]:
+    """Point-in-time event size metadata captured with HLTV Analytics."""
+    feats = {col: 0.0 for col in EVENT_METADATA_FEATURE_COLUMNS}
+    metadata = match.get("event_metadata") or {}
+    if not isinstance(metadata, dict):
+        return feats
+    prize_pool = _safe_float(metadata.get("prize_pool"))
+    teams_competing = _safe_float(metadata.get("teams_competing"))
+    if prize_pool is None and teams_competing is None:
+        return feats
+    feats["event_metadata_available"] = 1.0
+    if prize_pool is not None and prize_pool >= 0:
+        feats["event_prize_pool_log"] = math.log1p(prize_pool)
+    if teams_competing is not None and teams_competing >= 0:
+        feats["event_teams_competing"] = teams_competing
     return feats
 
 
@@ -978,6 +1189,8 @@ def build_training_frame(
             m["team1_key"], m["team2_key"], m.get("date_obj"), m.get("event") or "", m.get("format") or "bo3"
         )
         feats.update(analytics_match_features(m))
+        feats.update(announced_lineup_features(m))
+        feats.update(event_metadata_features(m))
         feats.update(context_match_features(m))
         feats.update(player_snapshot_features(m))
         feats.update(external_snapshot_features(m))

@@ -1,8 +1,8 @@
 # Context Calibration Diagnostic
 
-Generado: 2026-07-13T05:49:43Z
-Muestras cerradas con prediccion pre-partido: **175**
-Muestras con contexto HLTV: **175**
+Generado: 2026-07-13T08:31:46Z  
+Muestras cerradas con prediccion pre-partido: **175**  
+Muestras con contexto HLTV: **175**  
 
 ## Resultado
 
@@ -28,32 +28,33 @@ Muestras con contexto HLTV: **175**
 | 2026-07-13 10:00 | GenOne vs RUSTEC | online | Group D elimination match | GenOne | 0.6659 | [link](https://www.hltv.org/matches/2395532/genone-vs-ex-rustec-european-pro-league-series-8) |
 | 2026-07-13 10:00 | Inner Circle Academy vs BIG Academy | online | Group B opening match | BIG Academy | 0.5766 | [link](https://www.hltv.org/matches/2395796/inner-circle-academy-vs-big-academy-nodwin-clutch-series-10-closed-qualifier) |
 | 2026-07-13 12:30 | BRUTE vs Honvéd | online | Group D winners' match | BRUTE | 0.5342 | [link](https://www.hltv.org/matches/2395533/brute-vs-honvd-european-pro-league-series-8) |
-| 2026-07-13 13:00 | Honvéd vs Julie&Cie | online | Group A opening match | Honvéd | 0.6723 | [link](https://www.hltv.org/matches/2395797/honvd-vs-juliecie-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-13 15:00 | Inner Circle Academy vs BRUTE | online | Group A decider match | BRUTE | 0.5983 | [link](https://www.hltv.org/matches/2395820/inner-circle-academy-vs-brute-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | The Last Resort vs QUAZAR | online | Group B decider match | The Last Resort | 0.5815 | [link](https://www.hltv.org/matches/2395821/the-last-resort-vs-quazar-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | Just Players vs Entropy | online | Group C decider match | Just Players | 0.6669 | [link](https://www.hltv.org/matches/2395822/just-players-vs-entropy-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | MOUZ NXT vs SPARTA | online | Group D decider match | MOUZ NXT | 0.5475 | [link](https://www.hltv.org/matches/2395823/mouz-nxt-vs-sparta-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 16:00 | Mai Tai vs megoshort | online | Group A opening match | megoshort | 0.5403 | [link](https://www.hltv.org/matches/2395798/mai-tai-vs-megoshort-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-13 19:00 | ex-MANA vs DONSTU | online | Group B opening match | DONSTU | 0.5111 | [link](https://www.hltv.org/matches/2395799/ex-mana-vs-donstu-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-14 10:00 | ENCE vs SPARTA | online | Group C decider match | SPARTA | 0.5699 | [link](https://www.hltv.org/matches/2395534/ence-vs-sparta-european-pro-league-series-8) |
-| 2026-07-14 15:00 | METANOIA Wolves vs Patins da Ferrari | online | Swiss round 1 | Patins da Ferrari | 0.5448 | [link](https://www.hltv.org/matches/2395732/metanoia-wolves-vs-patins-da-ferrari-cct-2026-south-america-series-4) |
-| 2026-07-14 18:00 | paiN Academy vs ODDIK | online | Swiss round 1 | ODDIK | 0.7077 | [link](https://www.hltv.org/matches/2395733/pain-academy-vs-oddik-cct-2026-south-america-series-4) |
-| 2026-07-14 21:00 | Vasco vs MAGICOS | online | Swiss round 1 | Vasco | 0.6542 | [link](https://www.hltv.org/matches/2395734/vasco-vs-magicos-cct-2026-south-america-series-4) |
-| 2026-07-15 00:00 | ex-KRÜ vs ALZON | online | Swiss round 1 | ex-KRÜ | 0.5940 | [link](https://www.hltv.org/matches/2395735/ex-kr-vs-alzon-cct-2026-south-america-series-4) |
-| 2026-07-15 10:00 | Lavked vs Just Players/WBT loser | online | Group A decider match | Lavked | 0.5154 | [link](https://www.hltv.org/matches/2395536/lavked-vs-just-players-european-pro-league-series-8) |
-| 2026-07-15 12:00 | Ninjas in Pyjamas vs K27 | lan | Upper bracket quarter-final | K27 | 0.5194 | [link](https://www.hltv.org/matches/2395696/ninjas-in-pyjamas-vs-k27-stake-ranked-episode-3) |
-| 2026-07-15 12:30 | The Last Resort vs Enjoy | online | Group B decider match | The Last Resort | 0.5148 | [link](https://www.hltv.org/matches/2395537/the-last-resort-vs-enjoy-european-pro-league-series-8) |
-| 2026-07-15 14:30 | 3DMAX vs HEROIC | lan | Upper bracket quarter-final | HEROIC | 0.5183 | [link](https://www.hltv.org/matches/2395697/3dmax-vs-heroic-stake-ranked-episode-3) |
-| 2026-07-15 15:00 | Procyon vs Red Feet | online | Swiss round 1 | Procyon | 0.5389 | [link](https://www.hltv.org/matches/2395736/procyon-vs-red-feet-cct-2026-south-america-series-4) |
-| 2026-07-15 17:00 | Wildcard vs Gentle Mates | lan | Upper bracket quarter-final | Gentle Mates | 0.5801 | [link](https://www.hltv.org/matches/2395698/wildcard-vs-gentle-mates-stake-ranked-episode-3) |
-| 2026-07-15 18:00 | GameHunters vs Blitzkrieg | online | Swiss round 1 | GameHunters | 0.6456 | [link](https://www.hltv.org/matches/2395737/gamehunters-vs-blitzkrieg-cct-2026-south-america-series-4) |
-| 2026-07-15 19:30 | paiN vs Phantom | lan | Upper bracket quarter-final | paiN | 0.6167 | [link](https://www.hltv.org/matches/2395699/pain-vs-phantom-stake-ranked-episode-3) |
-| 2026-07-15 21:00 | BESTIA Academy vs GUARA | online | Swiss round 1 | BESTIA Academy | 0.6071 | [link](https://www.hltv.org/matches/2395738/bestia-academy-vs-guara-cct-2026-south-america-series-4) |
-| 2026-07-16 00:00 | ALKA vs BORRACHEIROS | online | Swiss round 1 | ALKA | 0.5392 | [link](https://www.hltv.org/matches/2395739/alka-vs-borracheiros-cct-2026-south-america-series-4) |
-| 2026-07-17 02:00 | THUNDER dOWNUNDER vs Mindfreak | lan | Group A opening match | THUNDER dOWNUNDER | 0.6868 | [link](https://www.hltv.org/matches/2395780/thunder-downunder-vs-mindfreak-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 02:00 | Abyssal vs Rooster | lan | Group A opening match | Rooster | 0.5945 | [link](https://www.hltv.org/matches/2395781/abyssal-vs-rooster-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 07:00 | FlyQuest vs DXA | lan | Group B opening match | FlyQuest | 0.6495 | [link](https://www.hltv.org/matches/2395785/flyquest-vs-dxa-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 07:00 | Ground Zero vs Arcade | lan | Group B opening match | Ground Zero | 0.7483 | [link](https://www.hltv.org/matches/2395786/ground-zero-vs-arcade-dfrag-hyperx-nationals-2026) |
+| 2026-07-13 13:00 | Honvéd vs Julie&Cie | online | Group A opening match | Honvéd | 0.6673 | [link](https://www.hltv.org/matches/2395797/honvd-vs-juliecie-nodwin-clutch-series-10-closed-qualifier) |
+| 2026-07-13 15:00 | Inner Circle Academy vs BRUTE | online | Group A decider match | BRUTE | 0.5976 | [link](https://www.hltv.org/matches/2395820/inner-circle-academy-vs-brute-esl-challenger-league-season-52-europe-cup-1) |
+| 2026-07-13 15:00 | The Last Resort vs QUAZAR | online | Group B decider match | The Last Resort | 0.5888 | [link](https://www.hltv.org/matches/2395821/the-last-resort-vs-quazar-esl-challenger-league-season-52-europe-cup-1) |
+| 2026-07-13 15:00 | Just Players vs Entropy | online | Group C decider match | Just Players | 0.6703 | [link](https://www.hltv.org/matches/2395822/just-players-vs-entropy-esl-challenger-league-season-52-europe-cup-1) |
+| 2026-07-13 15:00 | MOUZ NXT vs SPARTA | online | Group D decider match | MOUZ NXT | 0.5510 | [link](https://www.hltv.org/matches/2395823/mouz-nxt-vs-sparta-esl-challenger-league-season-52-europe-cup-1) |
+| 2026-07-13 16:00 | Mai Tai vs megoshort | online | Group A opening match | megoshort | 0.5399 | [link](https://www.hltv.org/matches/2395798/mai-tai-vs-megoshort-nodwin-clutch-series-10-closed-qualifier) |
+| 2026-07-13 19:00 | ex-MANA vs DONSTU | online | Group B opening match | DONSTU | 0.5112 | [link](https://www.hltv.org/matches/2395799/ex-mana-vs-donstu-nodwin-clutch-series-10-closed-qualifier) |
+| 2026-07-14 10:00 | ENCE vs SPARTA | online | Group C decider match | SPARTA | 0.5737 | [link](https://www.hltv.org/matches/2395534/ence-vs-sparta-european-pro-league-series-8) |
+| 2026-07-14 12:30 | Honvéd vs GenOne/ex-RUSTEC winner | online | Group D decider match | Honvéd | 0.5135 | [link](https://www.hltv.org/matches/2395535/honvd-vs-genone-ex-rustec-winner-european-pro-league-series-8) |
+| 2026-07-14 15:00 | METANOIA Wolves vs Patins da Ferrari | online | Swiss round 1 | Patins da Ferrari | 0.6743 | [link](https://www.hltv.org/matches/2395732/metanoia-wolves-vs-patins-da-ferrari-cct-2026-south-america-series-4) |
+| 2026-07-14 18:00 | paiN Academy vs ODDIK | online | Swiss round 1 | ODDIK | 0.7049 | [link](https://www.hltv.org/matches/2395733/pain-academy-vs-oddik-cct-2026-south-america-series-4) |
+| 2026-07-14 21:00 | Vasco vs MAGICOS | online | Swiss round 1 | Vasco | 0.6868 | [link](https://www.hltv.org/matches/2395734/vasco-vs-magicos-cct-2026-south-america-series-4) |
+| 2026-07-15 00:00 | ex-KRÜ vs ALZON | online | Swiss round 1 | ex-KRÜ | 0.5972 | [link](https://www.hltv.org/matches/2395735/ex-kr-vs-alzon-cct-2026-south-america-series-4) |
+| 2026-07-15 10:00 | Lavked vs Just Players | online | Group A decider match | Lavked | 0.5560 | [link](https://www.hltv.org/matches/2395536/lavked-vs-just-players-european-pro-league-series-8) |
+| 2026-07-15 12:00 | Ninjas in Pyjamas vs K27 | lan | Upper bracket quarter-final | K27 | 0.5129 | [link](https://www.hltv.org/matches/2395696/ninjas-in-pyjamas-vs-k27-stake-ranked-episode-3) |
+| 2026-07-15 12:30 | The Last Resort vs Enjoy | online | Group B decider match | The Last Resort | 0.5169 | [link](https://www.hltv.org/matches/2395537/the-last-resort-vs-enjoy-european-pro-league-series-8) |
+| 2026-07-15 14:30 | 3DMAX vs HEROIC | lan | Upper bracket quarter-final | HEROIC | 0.5188 | [link](https://www.hltv.org/matches/2395697/3dmax-vs-heroic-stake-ranked-episode-3) |
+| 2026-07-15 15:00 | Procyon vs Red Feet | online | Swiss round 1 | Procyon | 0.5904 | [link](https://www.hltv.org/matches/2395736/procyon-vs-red-feet-cct-2026-south-america-series-4) |
+| 2026-07-15 17:00 | Wildcard vs Gentle Mates | lan | Upper bracket quarter-final | Gentle Mates | 0.5793 | [link](https://www.hltv.org/matches/2395698/wildcard-vs-gentle-mates-stake-ranked-episode-3) |
+| 2026-07-15 18:00 | GameHunters vs Blitzkrieg | online | Swiss round 1 | GameHunters | 0.6452 | [link](https://www.hltv.org/matches/2395737/gamehunters-vs-blitzkrieg-cct-2026-south-america-series-4) |
+| 2026-07-15 19:30 | paiN vs Phantom | lan | Upper bracket quarter-final | paiN | 0.6204 | [link](https://www.hltv.org/matches/2395699/pain-vs-phantom-stake-ranked-episode-3) |
+| 2026-07-15 21:00 | BESTIA Academy vs GUARA | online | Swiss round 1 | BESTIA Academy | 0.6392 | [link](https://www.hltv.org/matches/2395738/bestia-academy-vs-guara-cct-2026-south-america-series-4) |
+| 2026-07-16 00:00 | ALKA vs BORRACHEIROS | online | Swiss round 1 | ALKA | 0.6942 | [link](https://www.hltv.org/matches/2395739/alka-vs-borracheiros-cct-2026-south-america-series-4) |
+| 2026-07-17 02:00 | THUNDER dOWNUNDER vs Mindfreak | lan | Group A opening match | THUNDER dOWNUNDER | 0.6830 | [link](https://www.hltv.org/matches/2395780/thunder-downunder-vs-mindfreak-dfrag-hyperx-nationals-2026) |
+| 2026-07-17 02:00 | Abyssal vs Rooster | lan | Group A opening match | Rooster | 0.5948 | [link](https://www.hltv.org/matches/2395781/abyssal-vs-rooster-dfrag-hyperx-nationals-2026) |
+| 2026-07-17 07:00 | FlyQuest vs DXA | lan | Group B opening match | FlyQuest | 0.6524 | [link](https://www.hltv.org/matches/2395785/flyquest-vs-dxa-dfrag-hyperx-nationals-2026) |
+| 2026-07-17 07:00 | Ground Zero vs Arcade | lan | Group B opening match | Ground Zero | 0.7492 | [link](https://www.hltv.org/matches/2395786/ground-zero-vs-arcade-dfrag-hyperx-nationals-2026) |
 
 ## Calibrador Contextual Diagnostico
 

@@ -36,12 +36,16 @@ CREATE TABLE players (
 CREATE TABLE events (
     event_id    INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
+    hltv_event_id TEXT UNIQUE,
     tier        TEXT,                   -- 'S','A','B','C' o como prefieras tipificar
     is_lan      INTEGER NOT NULL DEFAULT 0 CHECK (is_lan IN (0,1)),
     region      TEXT,
     prize_pool  INTEGER,
+    teams_competing INTEGER,
     start_date  TEXT,                   -- ISO-8601
-    end_date    TEXT
+    end_date    TEXT,
+    source_captured_at_utc TEXT,
+    source_file TEXT
 );
 
 -- ============================================================================
@@ -150,6 +154,21 @@ CREATE TABLE match_lineups (
     player_id   INTEGER NOT NULL REFERENCES players(player_id),
     is_standin  INTEGER NOT NULL DEFAULT 0 CHECK (is_standin IN (0,1)),
     PRIMARY KEY (match_id, team_id, player_id)
+);
+
+-- AlineaciÃ³n anunciada ANTES de jugar. Es independiente de `match_lineups`
+-- (alineaciÃ³n real posterior) para no introducir leakage ni ocultar stand-ins.
+CREATE TABLE prematch_lineup_snapshots (
+    prematch_lineup_snapshot_id INTEGER PRIMARY KEY,
+    match_id    INTEGER NOT NULL REFERENCES matches(match_id),
+    team_id     INTEGER NOT NULL REFERENCES teams(team_id),
+    player_id   INTEGER NOT NULL REFERENCES players(player_id),
+    captured_at_utc TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    is_standin  INTEGER NOT NULL DEFAULT 0 CHECK (is_standin IN (0,1)),
+    source_file TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    UNIQUE (match_id, team_id, player_id, captured_at_utc, source_file)
 );
 
 -- Registro atómico de rendimiento: lo que un jugador hizo en UN mapa concreto.
@@ -368,6 +387,53 @@ CREATE TABLE team_ranking_snapshots (
     UNIQUE (ranking_type, run_id, hltv_team_id, position)
 );
 
+-- Analytics Center de HLTV, capturado como una foto temporal y también en
+-- tablas consultables. `payload_json` conserva todo el response parseado.
+CREATE TABLE match_analytics_snapshots (
+    analytics_snapshot_id INTEGER PRIMARY KEY,
+    match_id        INTEGER NOT NULL REFERENCES matches(match_id),
+    captured_at_utc TEXT NOT NULL,
+    run_id          TEXT NOT NULL,
+    source_file     TEXT NOT NULL,
+    event_name      TEXT,
+    hltv_event_id   TEXT,
+    prize_pool      INTEGER,
+    teams_competing INTEGER,
+    team1_core_matches_lt INTEGER,
+    team2_core_matches_lt INTEGER,
+    team1_matches_sample INTEGER,
+    team1_maps_sample INTEGER,
+    team2_matches_sample INTEGER,
+    team2_maps_sample INTEGER,
+    team1_overtime_pct REAL,
+    team2_overtime_pct REAL,
+    payload_json    TEXT NOT NULL,
+    UNIQUE (match_id, captured_at_utc, source_file)
+);
+
+CREATE TABLE match_analytics_map_stats (
+    analytics_snapshot_id INTEGER NOT NULL REFERENCES match_analytics_snapshots(analytics_snapshot_id),
+    team_id         INTEGER REFERENCES teams(team_id),
+    team_name       TEXT,
+    map_name        TEXT NOT NULL,
+    first_pick_pct  REAL,
+    first_ban_pct   REAL,
+    win_pct         REAL,
+    played          INTEGER,
+    comment         TEXT,
+    PRIMARY KEY (analytics_snapshot_id, team_name, map_name)
+);
+
+CREATE TABLE match_analytics_map_handicap (
+    analytics_snapshot_id INTEGER NOT NULL REFERENCES match_analytics_snapshots(analytics_snapshot_id),
+    team_id         INTEGER REFERENCES teams(team_id),
+    team_name       TEXT,
+    map_name        TEXT NOT NULL,
+    avg_rounds_lost_in_wins REAL,
+    avg_rounds_won_in_losses REAL,
+    PRIMARY KEY (analytics_snapshot_id, team_name, map_name)
+);
+
 -- ============================================================================
 -- 4c. PREDICCIONES DEL MODELO  (auditoría: qué predijo el modelo y cuándo)
 --     Una fila por (partido, versión de modelo). Guarda la probabilidad
@@ -472,6 +538,7 @@ CREATE INDEX idx_mps_side_team        ON map_player_side_stats(team_id, side);
 CREATE INDEX idx_rosters_player       ON team_rosters(player_id);
 CREATE INDEX idx_rosters_team         ON team_rosters(team_id);
 CREATE INDEX idx_rosters_validity     ON team_rosters(team_id, valid_from, valid_to);
+CREATE INDEX idx_prematch_lineups_match ON prematch_lineup_snapshots(match_id, captured_at_utc);
 
 CREATE INDEX idx_ratings_lookup       ON ratings_history(entity_type, entity_id, as_of_date);
 CREATE INDEX idx_odds_match           ON odds(match_id, market_type);
@@ -481,11 +548,14 @@ CREATE INDEX idx_predictions_version  ON predictions(model_version);
 CREATE INDEX idx_predictions_context  ON predictions(context_environment, context_stage);
 CREATE INDEX idx_teams_name           ON teams(name);
 CREATE INDEX idx_events_name          ON events(name);
+CREATE INDEX idx_events_hltv          ON events(hltv_event_id);
 CREATE INDEX idx_raw_snapshots_run    ON raw_snapshots(run_id, kind);
 CREATE INDEX idx_raw_snapshots_match  ON raw_snapshots(hltv_match_id);
 CREATE INDEX idx_player_stats_player  ON player_stat_snapshots(hltv_player_id, captured_at_utc);
 CREATE INDEX idx_team_rankings_team   ON team_ranking_snapshots(hltv_team_id, ranking_type, captured_at_utc);
 CREATE INDEX idx_fetch_state_eligible ON fetch_state(entity_type, next_eligible_at_utc);
+CREATE INDEX idx_analytics_snapshot_match ON match_analytics_snapshots(match_id, captured_at_utc);
+CREATE INDEX idx_analytics_map_stats_snapshot ON match_analytics_map_stats(analytics_snapshot_id, map_name);
 
 -- ============================================================================
 -- 6. VISTA DE EJEMPLO  (roster activo de cada equipo a día de hoy)

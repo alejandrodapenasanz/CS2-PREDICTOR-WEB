@@ -224,6 +224,9 @@ Tablas clave y qué preservan:
 - `player_stat_snapshots`: stats individuales capturadas en el run pre-partido desde `/stats/players/compare` y el perfil `/stats/players/{id}/{slug}`: jugador HLTV, `time_filter` elegido de forma adaptativa (`past3months` si tiene muestra suficiente; si no `past6months`; si no `past12months`), rating, KPR, DPR, APR, KAST, Impact, ADR, Round Swing, multi-kill rating, AWP KPR, HS %, opening KPR/DPR, flash assists y `payload_json` completo. Esto conserva las stats **tal como estaban disponibles en ese momento**.
 - `map_player_stats` y `map_player_side_stats`: box score real por jugador/mapa y por lado `total`/`ct`/`t` cuando el partido ya tiene assets/mapstats. Es la fuente granular para recalcular forma L5/L10/L20 sin consultar páginas históricas cambiantes.
 - `team_rosters`: pertenencia temporal real por jugador/equipo (`valid_from`, `valid_to`, `source_run_id`, `source_signature`). Un jugador no "es" de un equipo: estuvo en él durante un intervalo observado.
+- `prematch_lineup_snapshots`: announced pre-match lineup with capture time, player, team, and stand-in marker. It is intentionally separate from `match_lineups`, the actual lineup after mapstats.
+- `match_analytics_snapshots`, `match_analytics_map_stats`, and `match_analytics_map_handicap`: point-in-time Analytics Center data: map first pick/ban, win rate and sample; BO3 distribution, overtime, round margins, core/stand-in signals, and event metadata. Raw HTML and `payload_json` remain available for audit.
+- `events`: stores HLTV event ID, prize pool, teams competing, and source provenance. A scheduled match can update corrected participants, time, or stage without rewriting any historical snapshot.
 - `odds`: cuotas por bookmaker y timestamp, separando `opening`, `live` y `closing`. La apertura sirve para benchmark y EV; el cierre se guarda para auditoría, no como feature pre-partido.
 - `predictions`: congela la probabilidad pura (`prob_team1`), la probabilidad operativa (`decision_prob_team1`), fiabilidad, peso de mercado, política, favorito, cuota mínima de value (`decision_min_value_odds`, `team1_min_value_odds`, `team2_min_value_odds`), contexto normalizado (`context_environment`, `context_stage`, `context_stage_detail`, `context_incentive_label`, `context_high_stakes`, `context_winner_advances`, `context_loser_eliminated`, `context_opening_match`, `context_bracket`, `context_json`) y los JSON completos de `prediction`, `features`, `odds`, `staking`, `controls`, `flags`, `data_quality` y `rosters`.
 
@@ -376,10 +379,50 @@ Estado implementado:
 - Estas métricas quedan en `features`, `rosters` y `player_stat_snapshots`. El join cronologico usa solo snapshots con `captured_at_utc <= datetime_utc`; `MODEL/train.py` activa automaticamente sus columnas al llegar a 200 partidos cerrados con cobertura de ambos equipos.
 - Si HLTV no devuelve una métrica de forma inequívoca para ambos lados en el HTML parseable, se guarda el raw/payload y no se inventa el valor. Es preferible una cobertura parcial honesta a contaminar el modelo con números mal asignados.
 
+### 6.3.1. Politica de comparacion de jugadores (actualizacion 2026-07-13)
+
+La comparacion no reduce el roster a una media simple ni impone un coeficiente
+fijo de "carry". Para cada equipo se escoge una sola ventana comun:
+`past3months` si hay al menos cuatro jugadores y cinco mapas por jugador; si no,
+`past6months`, despues `past12months`, y solo al final la ventana con mejor
+cobertura disponible. Asi no se compara la forma de tres meses de un jugador con
+un ano de otro compañero.
+
+El vector entrenable por enfrentamiento usa diferencias A-B de:
+
+- Rating medio, mejor jugador, media de los dos mejores, mediana, media de los
+  dos peores y desviacion estandar. Esto separa estrella aislada, duo fuerte y
+  profundidad/weak core.
+- KPR, KAST, ADR e Impact medios, mas Round Swing y Opening KPR medios y de los
+  dos mejores. `Round Swing` aporta valor contextual de ronda; no sustituye al
+  resto de dimensiones de rendimiento.
+- Cobertura, mapas totales y minimo de mapas por jugador. Solo se activa la
+  familia cuando ambos lados tienen cobertura >=80% y al menos cinco mapas por
+  jugador.
+
+`min`, `spread`, `star_gap` y `weak_link_gap` se mantienen en el snapshot y la
+web como diagnostico, pero no entran al vector: son combinaciones algebraicas de
+media/maximo/minimo y volverian inestable la estimacion lineal sin aportar
+informacion nueva. La literatura de agregacion de habilidades no sostiene que
+el maximo sea siempre la mejor regla en CS; por eso se conserva toda la forma de
+la distribucion y se deja al modelo aprender el peso de una estrella frente a la
+profundidad en validacion walk-forward.
+
+Los snapshots de jugador solo pasan de observabilidad a modelo al alcanzar 200
+partidos cerrados point-in-time. Antes se guardan, se muestran y se auditan, pero
+no se reentrena produccion con una muestra insuficiente.
+
+Referencias de diseno: Dehpanah et al. (2021), *Evaluating Team Skill
+Aggregation in Online Competitive Games*; PNX et al. (2020), *Valuing Player
+Actions in Counter-Strike: Global Offensive*; y la documentacion de HLTV Rating
+3.0 sobre sus subratings y Round Swing.
+
 ### 6.4. Contexto de mapas / veto
 - Pool activo, mapas que cada equipo suele pickear/banear, ventaja esperada por mapa.
 
 ### 6.4.1. HLTV Betting Analytics
+
+El scraper captura Analytics Center como JSON/HTML raw y filas SQLite normalizadas. La primera foto pre-match y la cuota de apertura son inmutables; mientras un partido esta programado, cuotas, Analytics, contexto y alineacion anunciada se refrescan cada 6 horas (cada 2 horas en las ultimas 24 horas), anexando cada observacion. El entrenamiento lee exclusivamente la ultima foto completa cuya hora sea anterior al inicio: nunca el roster real ni un Analytics posterior. Analytics basico entra automaticamente con 120 resultados cerrados point-in-time; su familia extendida (core/stand-ins, distribucion BO3 y margenes de rondas) y las alineaciones anunciadas 5v5 entran con 200. Prize pool y numero de equipos del evento quedan guardados desde ya como contexto de calibracion y se activan automaticamente con 300 casos point-in-time.
 
 La pestaña **Betting Analytics** de cada partido se captura en todos los scrapeos futuros cuando HLTV la expone. Se guarda como snapshot bruto (`analytics/*.json`) y se archiva en SQLite como `raw_snapshots(kind='match_analytics')`.
 
@@ -732,6 +775,7 @@ Principio: la **fuente de verdad** es la base de datos; la matriz de entrenamien
 ## 15. Referencias
 
 - Xenopoulos, P., et al. (2020). *Valuing Player Actions in Counter-Strike: Global Offensive.* IEEE BigData. (Win probability por ronda con XGBoost.)
+- Dehpanah, S., et al. (2021). *Evaluating Team Skill Aggregation in Online Competitive Games.* Analiza agregadores `SUM`, `MAX` y `MIN`, incluido CS:GO; se usa para no imponer una regla de estrella unica.
 - Björklund, A., et al. (2018). *Predicting the outcome of CS:GO games using machine learning.* Chalmers University of Technology.
 - Makarov, I., et al. (2017). Trabajo sobre predicción de resultados de e-sports con métodos clásicos.
 - Estudio comparativo con TrueSkill aplicado a predicción de CS:GO (IEEE).

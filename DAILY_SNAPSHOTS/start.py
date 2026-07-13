@@ -80,6 +80,14 @@ FETCH_URL_QUARANTINE_SECONDS = float(os.environ.get("HLTV_URL_QUARANTINE_SECONDS
 FETCH_MAX_HTTP_REQUESTS_PER_RUN = int(os.environ.get("HLTV_MAX_HTTP_REQUESTS_PER_RUN", "2500"))
 PLAYER_CORE_STAT_LABELS = ("Rating 3.0", "KPR", "DPR", "APR", "KAST", "Impact", "ADR")
 
+# Un partido ya fotografiado conserva su primera foto pre-match, pero sus datos
+# dinámicos (cuotas, lineup anunciada y Analytics) se vuelven a consultar con
+# cadencia limitada. Así se guarda el movimiento sin convertir cada arranque en
+# un re-scrape completo.
+PREMATCH_REFRESH_HOURS = float(os.environ.get("HLTV_PREMATCH_REFRESH_HOURS", "6"))
+PREMATCH_NEAR_START_REFRESH_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_START_REFRESH_HOURS", "2"))
+PREMATCH_NEAR_START_WINDOW_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_START_WINDOW_HOURS", "24"))
+
 # --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
 # Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
 # stealth que resuelve el challenge de Cloudflare y acuña cf_clearance. Ambos
@@ -1548,12 +1556,35 @@ def parse_analytics_metric_line(line: str) -> dict[str, Any] | None:
     }
 
 
+def parse_analytics_percentage(value: str | None) -> float | None:
+    if not value:
+        return None
+    text = clean_text(value) or ""
+    if text in {"-", "--"}:
+        return None
+    return parse_float(text.replace("%", ""))
+
+
+def analytics_team_key(value: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (value or "").lower())
+
+
+def parse_analytics_standin_names(text: str) -> list[str]:
+    match = re.search(r"stand-?ins?\s*:\s*(.+?)\s+instead\s+of\s+", text, flags=re.I)
+    if not match:
+        return []
+    return [clean_text(name) or "" for name in match.group(1).split(",") if clean_text(name)]
+
+
 def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: list[str]) -> dict[str, Any]:
+    """Parsea las tablas estables del Analytics Center de HLTV.
+
+    Se conserva también el texto por si HLTV ajusta el HTML. Los campos
+    estructurados no toman nada de votos, streams ni promociones: solo
+    información deportiva pre-partido expuesta por la propia página.
+    """
     selector = Selector(text=html)
-    lines = [
-        clean_text(line)
-        for line in selector.xpath("//body//text()").getall()
-    ]
+    lines = [clean_text(line) for line in selector.xpath("//body//text()").getall()]
     lines = [line for line in lines if line]
     lower_lines = [line.lower() for line in lines]
 
@@ -1582,56 +1613,188 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
         "worse ranked",
         "won ",
         "core lineup",
+        "matches with core",
+        "stand-in",
+        "standin",
         "past 30 days",
         "current event",
         "maps in the past",
     )
-    insights = [
-        line for line in summary_lines
-        if any(term in line.lower() for term in insight_terms)
-    ][:80]
+    insights = [line for line in summary_lines if any(term in line.lower() for term in insight_terms)][:80]
+
+    structured_insights: list[dict[str, str]] = []
+    core_lineup: dict[str, dict[str, Any]] = {}
+    standins: dict[str, list[str]] = {}
+    for card in selector.css(".analytics-insights-container"):
+        team = clean_text(card.css(".analytics-insights-team-header .team-name::text, .analytics-insights-team-header .team-name *::text").get())
+        if not team:
+            team = clean_text(card.css(".team-name::text").get())
+        for row in card.css(".analytics-insights-insight"):
+            text = clean_text(" ".join(row.css(".analytics-insights-info *::text, .analytics-insights-info::text").getall()))
+            if not text:
+                continue
+            classes = " ".join(row.css(".analytics-insights-indicator::attr(class)").getall()).lower()
+            direction = "against" if "against" in classes else "in_favor" if "favor" in classes else "unknown"
+            structured_insights.append({"team": team or "", "direction": direction, "text": text})
+            if team and text not in insights and any(term in text.lower() for term in insight_terms):
+                insights.append(text)
+            if not team:
+                continue
+            core = re.search(r"(.+?)\s+has\s+played\s+less\s+than\s+(\d+)\s+matches\s+with\s+core", text, flags=re.I)
+            if core:
+                core_lineup[team] = {
+                    "players": [clean_text(name) or "" for name in core.group(1).split(",") if clean_text(name)],
+                    "matches_lt": int(core.group(2)),
+                }
+            names = parse_analytics_standin_names(text)
+            if names:
+                standins[team] = names
+
+    event_metadata: dict[str, Any] = {}
+    for info in selector.css(".analytics-event-info .analytics-info"):
+        label = (clean_text(" ".join(info.css(".analytics-info-sub-title *::text, .analytics-info-sub-title::text").getall())) or "").lower()
+        value = clean_text(" ".join(info.css(".analytics-info-header *::text, .analytics-info-header::text").getall()))
+        if not label or not value:
+            continue
+        if "prize" in label:
+            amount = re.sub(r"[^0-9]", "", value)
+            event_metadata["prize_pool"] = int(amount) if amount else None
+        elif "teams competing" in label:
+            event_metadata["teams_competing"] = parse_int(value)
+        elif label == "event":
+            event_metadata["name"] = value
 
     map_stats: list[dict[str, Any]] = []
     seen_rows: set[tuple[str, str]] = set()
-    for idx, line in enumerate(lines):
-        map_name = line.strip()
-        if map_name.lower() not in ANALYTICS_MAP_NAMES:
+    # HLTV da una fila por equipo; la celda del mapa usa rowspan y solo aparece
+    # en la primera fila. Mantener `current_map` evita el parser frágil basado
+    # en proximidad de texto que dejaba la tabla vacía.
+    for table in selector.css("table"):
+        if not table.css(".analytics-map-stats-team"):
             continue
-        for team in team_names:
-            if not team:
+        current_map = None
+        for row in table.css("tbody > tr"):
+            current_map = clean_text(row.css(".analytics-map-name::text").get()) or current_map
+            team = clean_text(row.css(".maps-team-name::text").get())
+            if not current_map or not team:
                 continue
-            team_idx = None
-            for probe in range(idx + 1, min(idx + 28, len(lines))):
-                if lines[probe].lower() == team.lower():
-                    team_idx = probe
-                    break
-            if team_idx is None:
-                continue
-            metrics = None
-            metric_idx = None
-            for probe in range(team_idx + 1, min(team_idx + 7, len(lines))):
-                metrics = parse_analytics_metric_line(lines[probe])
-                if metrics:
-                    metric_idx = probe
-                    break
-            if not metrics:
-                continue
-            row_key = (map_name.lower(), team.lower())
+            row_key = (current_map.lower(), team.lower())
             if row_key in seen_rows:
                 continue
             seen_rows.add(row_key)
-            comment = None
-            if metric_idx is not None and metric_idx + 1 < len(lines):
-                next_line = lines[metric_idx + 1]
-                if (
-                    next_line.lower() not in ANALYTICS_MAP_NAMES
-                    and next_line.lower() not in {name.lower() for name in team_names if name}
-                    and not parse_analytics_metric_line(next_line)
-                    and "first pick" not in next_line.lower()
-                    and "first ban" not in next_line.lower()
-                ):
-                    comment = next_line
-            map_stats.append({"map": map_name, "team": team, **metrics, "comment": comment})
+            map_stats.append(
+                {
+                    "map": current_map,
+                    "team": team,
+                    "first_pick_pct": parse_analytics_percentage(row.css(".analytics-map-stats-pick-percentage::text").get()),
+                    "first_ban_pct": parse_analytics_percentage(row.css(".analytics-map-stats-ban-percentage::text").get()),
+                    "win_pct": parse_analytics_percentage(row.css(".analytics-map-stats-win-percentage::text").get()),
+                    "played": parse_int(row.css(".analytics-map-stats-played::text").get()),
+                    "comment": clean_text(" ".join(row.css(".analytics-map-stats-comment *::text, .analytics-map-stats-comment::text").getall())),
+                }
+            )
+
+    # Fallback para snapshots HTML antiguos, y para que los tests offline sigan
+    # cubriendo un HTML mínimo sin las clases actuales de HLTV.
+    if not map_stats:
+        for idx, line in enumerate(lines):
+            map_name = line.strip()
+            if map_name.lower() not in ANALYTICS_MAP_NAMES:
+                continue
+            for team in team_names:
+                if not team:
+                    continue
+                team_idx = next((probe for probe in range(idx + 1, min(idx + 28, len(lines))) if lines[probe].lower() == team.lower()), None)
+                if team_idx is None:
+                    continue
+                metrics = None
+                metric_idx = None
+                for probe in range(team_idx + 1, min(team_idx + 7, len(lines))):
+                    metrics = parse_analytics_metric_line(lines[probe])
+                    if metrics:
+                        metric_idx = probe
+                        break
+                if not metrics:
+                    continue
+                row_key = (map_name.lower(), team.lower())
+                if row_key in seen_rows:
+                    continue
+                seen_rows.add(row_key)
+                comment = None
+                if metric_idx is not None and metric_idx + 1 < len(lines):
+                    next_line = lines[metric_idx + 1]
+                    if (
+                        next_line.lower() not in ANALYTICS_MAP_NAMES
+                        and next_line.lower() not in {name.lower() for name in team_names if name}
+                        and not parse_analytics_metric_line(next_line)
+                    ):
+                        comment = next_line
+                map_stats.append({"map": map_name, "team": team, **metrics, "comment": comment})
+
+    series_stats: dict[str, dict[str, Any]] = {}
+    for table in selector.css("table.analytics-handicap-table"):
+        side_class = " ".join(table.css("::attr(class)").getall()).lower()
+        side = "team1" if "team1" in side_class else "team2" if "team2" in side_class else "unknown"
+        team = clean_text(table.css(".team-name::text").get())
+        if not team:
+            continue
+        counts = clean_text(table.css(".match-map-count::text").get()) or ""
+        count_match = re.search(r"(\d+)\s+matches\s*,\s*(\d+)\s+maps", counts, flags=re.I)
+        stats: dict[str, Any] = {
+            "team": team,
+            "side": side,
+            "matches": int(count_match.group(1)) if count_match else None,
+            "maps": int(count_match.group(2)) if count_match else None,
+            "score_distribution": {},
+            "overtime_pct": None,
+        }
+        for row in table.css("tbody > tr"):
+            cells = [clean_text(text) or "" for text in row.css("td::text").getall()]
+            label = next((cell for cell in cells if re.search(r"(?:[012]\s*-\s*[012]\s+(?:wins|losses)|overtimes)", cell, flags=re.I)), "")
+            value = clean_text(row.css(".handicap-data::text").get())
+            pct = parse_analytics_percentage(value)
+            if not label or pct is None:
+                continue
+            normalized = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")
+            if normalized == "overtimes":
+                stats["overtime_pct"] = pct
+            else:
+                stats["score_distribution"][normalized] = pct
+        series_stats[side] = stats
+
+    map_handicap: list[dict[str, Any]] = []
+    for container in selector.css(".analytics-handicap-map-container"):
+        classes = " ".join(container.css("::attr(class)").getall()).lower()
+        side = "team1" if "team1" in classes else "team2" if "team2" in classes else "unknown"
+        team = team_names[0] if side == "team1" and team_names else team_names[1] if side == "team2" and len(team_names) > 1 else None
+        if not team:
+            continue
+        overall = {}
+        for row in container.css(".analytics-handicap-map-data-overall-container .analytics-handicap-map-data"):
+            values = [cleaned for text in row.css("div::text").getall() if (cleaned := clean_text(text))]
+            if len(values) < 2:
+                continue
+            value = parse_float(values[0])
+            label = values[-1].lower()
+            if "lost in wins" in label:
+                overall["avg_rounds_lost_in_wins"] = value
+            elif "won in losses" in label:
+                overall["avg_rounds_won_in_losses"] = value
+        if overall:
+            map_handicap.append({"team": team, "map": "overall", **overall})
+        for row in container.css("table tbody > tr"):
+            map_name = clean_text(row.css(".mapname::text").get())
+            values = [parse_float(value) for value in row.css(".analytics-handicap-map-data-avg::text").getall()]
+            if not map_name or len(values) < 2:
+                continue
+            map_handicap.append(
+                {
+                    "team": team,
+                    "map": map_name,
+                    "avg_rounds_lost_in_wins": values[0],
+                    "avg_rounds_won_in_losses": values[1],
+                }
+            )
 
     return {
         "available": bool(lines),
@@ -1639,7 +1802,13 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
         "url": hltv_url(analytics_link_from_match(match_link) or match_link),
         "captured_at": now_utc(),
         "summary_lines": summary_lines[:120],
-        "insights": insights,
+        "insights": insights[:80],
+        "structured_insights": structured_insights,
+        "core_lineup": core_lineup,
+        "standins": standins,
+        "event_metadata": event_metadata,
+        "series_stats": series_stats,
+        "map_handicap": map_handicap,
         "map_stats": map_stats,
         "line_count": len(lines),
     }
@@ -1659,7 +1828,11 @@ def scrape_match_analytics(match_link: str, run_dir: Path, match_id: str, team_n
         raw_html = save_raw_html(run_dir, "analytics_page", match_id, analytics_link, html)
         payload = parse_analytics_html(html, match_id, analytics_link, team_names)
         payload["raw_html"] = raw_html
-        log(f"analytics {match_id}: available={payload.get('available')} lines={payload.get('line_count')}")
+        log(
+            f"analytics {match_id}: available={payload.get('available')} lines={payload.get('line_count')} "
+            f"map_rows={len(payload.get('map_stats') or [])} "
+            f"core_flags={len(payload.get('core_lineup') or {})}"
+        )
     except Exception as exc:
         log(f"analytics {match_id}: ERROR {exc}")
         payload = {
@@ -2429,13 +2602,19 @@ def result_from_detail(detail: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def scrape_match_detail(match_link: str, output_path: Path) -> tuple[dict[str, Any] | None, str]:
+def scrape_match_detail(
+    match_link: str,
+    output_path: Path,
+    *,
+    initial_html: str | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Obtiene el detalle; reutiliza el HTML ya descargado por el snapshot."""
     try:
-        html = fetch_html(match_link)
+        html = initial_html if initial_html is not None else fetch_html(match_link)
         detail = parse_match_detail_html(html)
         if detail and (detail.get("match") or {}).get("team1", {}).get("name"):
             write_json(output_path, [detail])
-            return detail, "direct_fetch"
+            return detail, "snapshot_html" if initial_html is not None else "direct_fetch"
     except Exception as exc:
         direct_error = str(exc)
     else:
@@ -2454,6 +2633,89 @@ def scrape_match_detail(match_link: str, output_path: Path) -> tuple[dict[str, A
     if not isinstance(detail, dict) or not (detail.get("match") or {}).get("team1", {}).get("name"):
         return None, f"direct_fetch_failed={direct_error}\n{logs}"
     return detail, f"direct_fetch_failed={direct_error}\n{logs}"
+
+
+def parse_event_metadata_from_match_html(html: str) -> dict[str, Any]:
+    selector = Selector(text=html)
+    link = selector.css(".teamsBox .event a::attr(href), .teamsBoxDropdown .event a::attr(href)").get()
+    name = clean_text(selector.css(".teamsBox .event a::text, .teamsBox .event::text").get())
+    event_id = None
+    if link:
+        match = re.search(r"/events/(\d+)", link)
+        event_id = match.group(1) if match else None
+    return {
+        "name": name,
+        "hltv_event_id": event_id,
+        "source": "match_page",
+    }
+
+
+def parse_prematch_lineups_html(html: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Extrae la alineación anunciada y sus stats visibles de la ficha HLTV.
+
+    No se mezcla con `match_lineups`, que representa quién jugó de verdad una
+    vez finalizada la serie. Esta es una foto pre-partido, append-only.
+    """
+    selector = Selector(text=html)
+    detail_match = (detail or {}).get("match") or {}
+    output: dict[str, Any] = {}
+    for number in (1, 2):
+        side = f"team{number}"
+        raw = selector.css(f"[data-team{number}-players-data]::attr(data-team{number}-players-data)").get()
+        if not raw:
+            continue
+        try:
+            players_payload = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        players: list[dict[str, Any]] = []
+        for player in players_payload.values() if isinstance(players_payload, dict) else []:
+            player_id = str(player.get("playerId") or "").strip()
+            if not player_id:
+                continue
+            players.append(
+                {
+                    "hltv_player_id": player_id,
+                    "nickname": clean_text(player.get("nickname")),
+                    "profile_link": player.get("profileLinkUrl"),
+                    "stats_link": player.get("statsLinkUrl"),
+                    "rating": parse_float(player.get("rating")),
+                    "kpr": parse_float(player.get("kpr")),
+                    "dpr": parse_float(player.get("dpr")),
+                    "kast": parse_analytics_percentage(player.get("kast")),
+                    "adr": parse_float(player.get("adr")),
+                    "multi_kill_rating": parse_float(player.get("multiKillRating")),
+                    "round_swing": parse_analytics_percentage(player.get("roundSwing")),
+                    "is_standin": False,
+                }
+            )
+        team = detail_match.get(side) or {}
+        output[side] = {
+            "team_name": team.get("name"),
+            "hltv_team_id": str(team.get("id") or "") or None,
+            "players": players,
+        }
+    return output
+
+
+def mark_prematch_standins(lineups: dict[str, Any], analytics: dict[str, Any]) -> None:
+    standins = analytics.get("standins") or {}
+    if not isinstance(standins, dict):
+        return
+    for lineup in lineups.values():
+        if not isinstance(lineup, dict):
+            continue
+        team_key = analytics_team_key(lineup.get("team_name"))
+        standin_keys = {
+            analytics_team_key(player)
+            for team, players in standins.items()
+            if analytics_team_key(team) == team_key
+            for player in (players or [])
+        }
+        if not standin_keys:
+            continue
+        for player in lineup.get("players") or []:
+            player["is_standin"] = analytics_team_key(player.get("nickname")) in standin_keys
 
 
 def team_names_for_analytics(record: dict[str, Any], detail: dict[str, Any] | None = None) -> list[str]:
@@ -3315,24 +3577,25 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
         raise ValueError(f"Cannot parse match id from {match.get('link')}")
 
     detail_path = run_dir / "match_details" / f"{match_id}.json"
-    detail, detail_logs = scrape_match_detail(match["link"], detail_path)
-
     odds = {"available": False, "bookmaker_count": 0, "providers": [], "average": None}
     match_context = None
+    prematch_lineups: dict[str, Any] = {}
+    event_metadata: dict[str, Any] = {}
     odds_error = None
     html_error = None
+    html = None
     try:
         html = fetch_html(match["link"])
         raw_html_meta = save_raw_html(run_dir, "match_snapshot", match_id, match["link"], html)
         match_context = (parse_veto_html(html).get("context") or None)
         odds = parse_odds(html)
-        if detail is None:
-            detail = parse_match_basic_html(html)
+        event_metadata = parse_event_metadata_from_match_html(html)
     except Exception as exc:
         raw_html_meta = None
         html_error = str(exc)
         odds_error = str(exc)
 
+    detail, detail_logs = scrape_match_detail(match["link"], detail_path, initial_html=html)
     if detail is None:
         detail = detail_from_upcoming_row(match)
 
@@ -3346,10 +3609,19 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
         if capture_analytics
         else {"available": False, "reason": "skipped"}
     )
+    analytics_event = analytics.get("event_metadata") if isinstance(analytics, dict) else None
+    if isinstance(analytics_event, dict):
+        event_metadata = {**event_metadata, **{key: value for key, value in analytics_event.items() if value is not None}}
+    if html is not None:
+        prematch_lineups = parse_prematch_lineups_html(html, detail)
+        mark_prematch_standins(prematch_lineups, analytics)
+
+    snapshot_path = run_dir / "match_snapshots" / f"{match_id}.json"
 
     snapshot = {
         "id": match_id,
         "captured_at": now_utc(),
+        "source_file": str(snapshot_path.relative_to(DATA_ROOT)),
         "data_quality": {
             "real_pre_match_snapshot": True,
             "legacy_backfill": False,
@@ -3370,10 +3642,51 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
         "html_error": html_error,
         "raw_html": raw_html_meta,
         "analytics": analytics,
+        "event_metadata": event_metadata,
+        "prematch_lineups": prematch_lineups,
         "status": "completed" if detail and is_completed_detail(detail) else "pending",
     }
-    write_json(run_dir / "match_snapshots" / f"{match_id}.json", snapshot)
+    write_json(snapshot_path, snapshot)
     return snapshot
+
+
+def upcoming_match_datetime(match: dict[str, Any]) -> datetime | None:
+    date_text = parse_hltv_date(match.get("date"))
+    hour = clean_text(match.get("hour")) or ""
+    if not date_text or not re.fullmatch(r"\d{1,2}:\d{2}", hour):
+        return None
+    try:
+        return datetime.strptime(f"{date_text} {hour}", "%Y-%m-%d %H:%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def scheduled_snapshot_refresh_reason(record: dict[str, Any], match: dict[str, Any], now: datetime | None = None) -> str | None:
+    """Decide si corresponde una foto incremental, sin tocar la primera."""
+    if record.get("status") == "completed":
+        return None
+    if not has_usable_odds(record):
+        return "missing_odds"
+    analytics = record.get("analytics") or {}
+    if not analytics.get("available"):
+        return "missing_analytics"
+    if not record.get("prematch_lineups"):
+        return "missing_advertised_lineup"
+    last_raw = record.get("last_prematch_refresh_at") or record.get("last_seen_at") or record.get("first_seen_at")
+    if not last_raw:
+        return "no_previous_refresh"
+    try:
+        last_refresh = datetime.fromisoformat(str(last_raw).replace("Z", "+00:00"))
+    except ValueError:
+        return "invalid_refresh_timestamp"
+    now = now or datetime.now(timezone.utc)
+    interval_hours = PREMATCH_REFRESH_HOURS
+    scheduled_at = upcoming_match_datetime(match)
+    if scheduled_at is not None and 0 <= (scheduled_at - now).total_seconds() <= PREMATCH_NEAR_START_WINDOW_HOURS * 3600:
+        interval_hours = PREMATCH_NEAR_START_REFRESH_HOURS
+    if now - last_refresh >= timedelta(hours=max(0.25, interval_hours)):
+        return f"ttl_{interval_hours:g}h"
+    return None
 
 
 def materialize_persistent_match_snapshot(
@@ -3432,6 +3745,8 @@ def materialize_persistent_match_snapshot(
             },
             "analytics": record.get("analytics") or {},
             "match_context": record.get("match_context"),
+            "event_metadata": record.get("event_metadata") or {},
+            "prematch_lineups": record.get("prematch_lineups") or {},
         }
 
     snapshot["upcoming_row"] = match
@@ -3452,6 +3767,8 @@ def materialize_persistent_match_snapshot(
 def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_dir: Path) -> None:
     match_id = snapshot["id"]
     record = master.get(match_id, {"id": match_id, "first_seen_at": snapshot["captured_at"]})
+    was_completed = record.get("status") == "completed"
+    snapshot_file = str((run_dir / "match_snapshots" / f"{match_id}.json").relative_to(DATA_ROOT))
     record.update(
         {
             "id": match_id,
@@ -3461,8 +3778,9 @@ def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_d
             "event": snapshot.get("event"),
             "format": snapshot.get("format"),
             "last_seen_at": snapshot["captured_at"],
-            "status": snapshot.get("status", "pending"),
-            "latest_snapshot_file": str((run_dir / "match_snapshots" / f"{match_id}.json").relative_to(DATA_ROOT)),
+            "last_prematch_refresh_at": snapshot["captured_at"],
+            "status": "completed" if was_completed else snapshot.get("status", "pending"),
+            "latest_snapshot_file": snapshot_file,
             "latest_odds": snapshot.get("odds"),
             "data_quality": snapshot.get("data_quality"),
         }
@@ -3475,6 +3793,10 @@ def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_d
             record["latest_analytics_file"] = snapshot["analytics"]["source_file"]
     if snapshot.get("match_context"):
         record["match_context"] = snapshot["match_context"]
+    if snapshot.get("event_metadata"):
+        record["event_metadata"] = snapshot["event_metadata"]
+    if snapshot.get("prematch_lineups"):
+        record["prematch_lineups"] = snapshot["prematch_lineups"]
     if snapshot["status"] == "completed":
         result = result_from_detail(snapshot["detail"])
         if result:
@@ -3489,7 +3811,9 @@ def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_d
         if record.get("status") == "completed":
             record.setdefault("closing_odds", odds_point)
     record.setdefault("snapshot_files", [])
-    record["snapshot_files"].append(record["latest_snapshot_file"])
+    if snapshot_file not in record["snapshot_files"]:
+        record["snapshot_files"].append(snapshot_file)
+    record.setdefault("first_prematch_snapshot_file", snapshot_file)
     master[match_id] = record
 
 
@@ -3595,11 +3919,39 @@ def main() -> int:
 
     snapshots = []
     reused_photographed = 0
+    refreshed_photographed = 0
     missing_persistent_snapshot = 0
     for index, match in enumerate(upcoming, start=1):
         log(f"[snapshot {index}/{len(upcoming)}] {match_label(match)}", force=VERBOSE)
         match_id = str(match.get("id") or match_id_from_link(match.get("link") or "") or "")
         if db_match_already_photographed(match_id):
+            refresh_reason = scheduled_snapshot_refresh_reason(master.get(match_id) or {}, match)
+            if refresh_reason:
+                log(
+                    f"[snapshot {index}/{len(upcoming)}] refreshing scheduled pre-match data ({refresh_reason})",
+                    force=VERBOSE,
+                )
+                snapshot = build_match_snapshot(match, run_dir, capture_analytics=not args.skip_analytics)
+                quality = dict(snapshot.get("data_quality") or {})
+                quality["scheduled_refresh"] = True
+                quality["refresh_reason"] = refresh_reason
+                snapshot["data_quality"] = quality
+                snapshots.append(snapshot)
+                refreshed_photographed += 1
+                upsert_master_record(master, snapshot, run_dir)
+                if promote_run:
+                    write_json(MASTER_MATCHES, master)
+                odds = snapshot.get("odds") or {}
+                analytics = snapshot.get("analytics") or {}
+                lineups = snapshot.get("prematch_lineups") or {}
+                log(
+                    f"[snapshot {index}/{len(upcoming)}] refreshed odds={odds.get('available')} "
+                    f"books={odds.get('bookmaker_count')} analytics={analytics.get('available')} "
+                    f"lineup_players={sum(len((side or {}).get('players') or []) for side in lineups.values())}",
+                    force=VERBOSE,
+                )
+                time.sleep(0.2)
+                continue
             cached_snapshot = materialize_persistent_match_snapshot(master, match, run_dir)
             if cached_snapshot is not None:
                 snapshots.append(cached_snapshot)
@@ -3635,6 +3987,7 @@ def main() -> int:
     manifest["steps"]["match_snapshots"] = {
         "count": len(snapshots),
         "captured_online": len(snapshots) - reused_photographed,
+        "refreshed_scheduled_prematch": refreshed_photographed,
         "reused_from_persistent_snapshot": reused_photographed,
         "persistent_snapshot_missing_recaptured": missing_persistent_snapshot,
         "skipped_already_photographed": 0,

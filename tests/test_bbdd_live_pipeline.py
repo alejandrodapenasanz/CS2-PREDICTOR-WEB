@@ -75,9 +75,140 @@ class LiveDatabasePipelineTests(unittest.TestCase):
 
         self.assertIn("fetch_state", tables)
         self.assertIn("ingest_runs", tables)
+        self.assertIn("prematch_lineup_snapshots", tables)
+        self.assertIn("match_analytics_snapshots", tables)
+        self.assertIn("match_analytics_map_stats", tables)
         self.assertIn("hltv_match_id", columns)
         self.assertIn("prematch_captured_at_utc", columns)
         self.assertIn("result_filled_at_utc", columns)
+
+    def test_prematch_lineups_and_analytics_are_persisted_structurally(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        self.seed_completed_match(db_path)
+        run_dir = Path(tmp.name) / "runs" / "run_analytics"
+        (run_dir / "match_snapshots").mkdir(parents=True)
+        (run_dir / "analytics").mkdir()
+        snapshot = {
+            "id": "2390001",
+            "captured_at": "2026-01-02T09:00:00Z",
+            "source_file": "runs/run_analytics/match_snapshots/2390001.json",
+            "prematch_lineups": {
+                "team1": {"team_name": "Alpha", "hltv_team_id": "10", "players": [{"hltv_player_id": "101", "nickname": "A", "is_standin": False}]},
+                "team2": {"team_name": "Beta", "hltv_team_id": "20", "players": [{"hltv_player_id": "202", "nickname": "B", "is_standin": True}]},
+            },
+        }
+        analytics = {
+            "available": True,
+            "match_id": "2390001",
+            "captured_at": "2026-01-02T09:00:00Z",
+            "source_file": "runs/run_analytics/analytics/2390001.json",
+            "event_metadata": {"name": "DB Test Cup", "prize_pool": 50000, "teams_competing": 16},
+            "core_lineup": {"Beta": {"matches_lt": 5}},
+            "series_stats": {
+                "team1": {"team": "Alpha", "matches": 20, "maps": 45, "overtime_pct": 4.0},
+                "team2": {"team": "Beta", "matches": 18, "maps": 40, "overtime_pct": 7.0},
+            },
+            "map_stats": [{"team": "Alpha", "map": "Mirage", "first_pick_pct": 50, "first_ban_pct": 10, "win_pct": 60, "played": 10}],
+            "map_handicap": [{"team": "Beta", "map": "Mirage", "avg_rounds_lost_in_wins": 7.0, "avg_rounds_won_in_losses": 8.5}],
+        }
+        (run_dir / "match_snapshots" / "2390001.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        (run_dir / "analytics" / "2390001.json").write_text(json.dumps(analytics), encoding="utf-8")
+
+        conn = build_db.connect_live_db(db_path)
+        lineups = build_db.insert_prematch_lineup_snapshots(
+            conn.cursor(), run_dir, {"2390001": 1}, {"alpha": 1, "beta": 2}, {"10": 1, "20": 2}
+        )
+        analytics_counts = build_db.insert_match_analytics_snapshots(
+            conn.cursor(), run_dir, {"2390001": 1}, {"alpha": 1, "beta": 2}, {"10": 1, "20": 2}
+        )
+        conn.commit()
+        stored_lineups = conn.execute("SELECT COUNT(*) FROM prematch_lineup_snapshots").fetchone()[0]
+        stored_analytics = conn.execute("SELECT COUNT(*) FROM match_analytics_snapshots").fetchone()[0]
+        stored_maps = conn.execute("SELECT COUNT(*) FROM match_analytics_map_stats").fetchone()[0]
+        event = conn.execute("SELECT prize_pool, teams_competing FROM events WHERE event_id=1").fetchone()
+        conn.close()
+
+        self.assertEqual(lineups["prematch_lineup_rows"], 2)
+        self.assertEqual(analytics_counts["analytics_snapshot_rows"], 1)
+        self.assertEqual((stored_lineups, stored_analytics, stored_maps), (2, 1, 1))
+        self.assertEqual(tuple(event), (50000, 16))
+
+    def test_training_loader_uses_only_complete_prestart_lineup_and_analytics(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        self.seed_completed_match(db_path)
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys = ON")
+        for team_id, prefix, ratings in ((1, "a", (1.20, 1.10, 1.00, 0.95, 0.90)), (2, "b", (1.05, 1.00, 0.95, 0.90, 0.85))):
+            for index, rating in enumerate(ratings, start=1):
+                player_id = team_id * 10 + index
+                conn.execute(
+                    "INSERT INTO players(player_id, nick, hltv_id) VALUES (?,?,?)",
+                    (player_id, f"{prefix}{index}", str(player_id)),
+                )
+                payload = {
+                    "hltv_player_id": str(player_id),
+                    "rating": rating,
+                    "kpr": rating / 2,
+                    "kast": rating * 70,
+                    "adr": rating * 75,
+                    "multi_kill_rating": rating,
+                    "round_swing": rating - 1,
+                }
+                conn.execute(
+                    """
+                    INSERT INTO prematch_lineup_snapshots(
+                        match_id, team_id, player_id, captured_at_utc, run_id,
+                        is_standin, source_file, payload_json
+                    ) VALUES (1,?,?,?,?,?,?,?)
+                    """,
+                    (team_id, player_id, "2026-01-02T09:00:00Z", "pre", 0, f"pre-{player_id}.json", json.dumps(payload)),
+                )
+                # A deliberately stronger post-start row must be ignored.
+                payload["rating"] = 9.99
+                conn.execute(
+                    """
+                    INSERT INTO prematch_lineup_snapshots(
+                        match_id, team_id, player_id, captured_at_utc, run_id,
+                        is_standin, source_file, payload_json
+                    ) VALUES (1,?,?,?,?,?,?,?)
+                    """,
+                    (team_id, player_id, "2026-01-02T19:00:00Z", "post", 0, f"post-{player_id}.json", json.dumps(payload)),
+                )
+        pre_analytics = {
+            "available": True,
+            "captured_at": "2026-01-02T09:00:00Z",
+            "event_metadata": {"prize_pool": 50000, "teams_competing": 16},
+        }
+        post_analytics = {
+            "available": True,
+            "captured_at": "2026-01-02T19:00:00Z",
+            "event_metadata": {"prize_pool": 9999999, "teams_competing": 99},
+        }
+        for captured_at, source_file, payload in (
+            ("2026-01-02T09:00:00Z", "pre-analytics.json", pre_analytics),
+            ("2026-01-02T19:00:00Z", "post-analytics.json", post_analytics),
+        ):
+            conn.execute(
+                """
+                INSERT INTO match_analytics_snapshots(
+                    match_id, captured_at_utc, run_id, source_file, payload_json
+                ) VALUES (1,?,?,?,?)
+                """,
+                (captured_at, "test", source_file, json.dumps(payload)),
+            )
+        conn.commit()
+        conn.close()
+
+        rows = dataio.load_training_rows_from_db(db_path)
+
+        self.assertEqual(len(rows), 1)
+        lineup = rows[0]["prematch_lineups"]
+        self.assertEqual(len(lineup["team1"]["players"]), 5)
+        self.assertAlmostEqual(lineup["team1"]["players"][0]["rating"], 1.20)
+        self.assertEqual(rows[0]["event_metadata"], {"prize_pool": 50000, "teams_competing": 16})
 
     def test_fetch_state_ttl_marks_entities_fresh_until_next_eligible(self) -> None:
         tmp, db_path = self.make_db()
@@ -269,6 +400,38 @@ class LiveDatabasePipelineTests(unittest.TestCase):
         self.assertIsNotNone(row[3])
         self.assertEqual((row[4], row[5], row[6]), (0, 0, 0))
         self.assertEqual((row[7], row[8]), (2, 0))
+
+    def test_scheduled_match_updates_participant_without_rewriting_first_snapshot(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        conn = build_db.connect_live_db(db_path)
+        conn.execute("INSERT INTO teams(team_id, name, hltv_id) VALUES (1,'Alpha',10),(2,'Beta',20)")
+        conn.execute("INSERT INTO events(event_id, name) VALUES (1,'DB Test Cup')")
+        conn.execute(
+            """
+            INSERT INTO matches(match_id, hltv_match_id, event_id, datetime_utc, team1_id, team2_id,
+                                best_of, status, data_tier, prematch_captured_at_utc)
+            VALUES (1,'2390004',1,'2026-01-02T18:00:00Z',1,2,3,'scheduled','prematch_captured','2026-01-01T09:00:00Z')
+            """
+        )
+        conn.commit()
+        ingest.upsert_match(
+            conn,
+            {
+                "id": "2390004", "date": "2026-01-02", "hour": "19:00", "event": "DB Test Cup", "format": "bo3",
+                "status": "scheduled", "team1": {"name": "Alpha", "id": "10"}, "team2": {"name": "ex-Beta", "id": "30"},
+                "match_context": {"environment": "online", "stage": "group"},
+            },
+            captured_at="2026-01-02T08:00:00Z",
+        )
+        row = conn.execute(
+            """
+            SELECT t.name, t.hltv_id, m.datetime_utc, m.prematch_captured_at_utc
+            FROM matches m JOIN teams t ON t.team_id=m.team2_id WHERE m.hltv_match_id='2390004'
+            """
+        ).fetchone()
+        conn.close()
+        self.assertEqual(tuple(row), ("ex-Beta", 30, "2026-01-02T19:00:00Z", "2026-01-01T09:00:00Z"))
 
     def test_ingest_run_records_request_and_freshness_counters(self) -> None:
         tmp, db_path = self.make_db()

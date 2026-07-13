@@ -31,7 +31,9 @@ try:
     from cs2model.features import (
         build_training_frame as cs2_build_state,
         analytics_match_features as cs2_analytics_match_features,
+        announced_lineup_features as cs2_announced_lineup_features,
         context_match_features as cs2_context_match_features,
+        event_metadata_features as cs2_event_metadata_features,
         PLAYER_DIFF_COLUMNS as CS2_PLAYER_DIFF_COLUMNS,
         PLAYER_SYM_COLUMNS as CS2_PLAYER_SYM_COLUMNS,
         RANKING_DIFF_COLUMNS as CS2_RANKING_DIFF_COLUMNS,
@@ -48,7 +50,13 @@ except Exception:  # pragma: no cover - entorno sin librería
     def cs2_analytics_match_features(_match: dict[str, Any]) -> dict[str, float]:
         return {}
 
+    def cs2_announced_lineup_features(_match: dict[str, Any]) -> dict[str, float]:
+        return {}
+
     def cs2_context_match_features(_match: dict[str, Any]) -> dict[str, float]:
+        return {}
+
+    def cs2_event_metadata_features(_match: dict[str, Any]) -> dict[str, float]:
         return {}
     CS2_PLAYER_DIFF_COLUMNS = []
     CS2_PLAYER_SYM_COLUMNS = []
@@ -452,8 +460,16 @@ def choose_player_snapshot(bundle: dict[str, Any], min_maps: int = 5) -> dict[st
 
 
 def aggregate_player_stats(players: list[dict[str, Any]], time_filter: str | None = None) -> dict[str, Any]:
-    out: dict[str, Any] = {"covered_players": 0, "maps_total": 0, "metrics": {}, "top": {}, "bottom": {}}
+    out: dict[str, Any] = {
+        "covered_players": 0,
+        "maps_total": 0,
+        "maps_min": 0,
+        "metrics": {},
+        "top": {},
+        "bottom": {},
+    }
     per_metric: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    player_maps: list[int] = []
     for player in players:
         snapshot = None
         if time_filter:
@@ -467,7 +483,9 @@ def aggregate_player_stats(players: list[dict[str, Any]], time_filter: str | Non
         stats = snapshot.get("stats") or {}
         if stats:
             out["covered_players"] += 1
-        out["maps_total"] += parse_int(snapshot.get("maps")) or 0
+        maps = parse_int(snapshot.get("maps")) or 0
+        out["maps_total"] += maps
+        player_maps.append(maps)
         for metric in PLAYER_STAT_ALIASES:
             value = player_stat_value(stats, metric)
             if value is not None:
@@ -475,6 +493,9 @@ def aggregate_player_stats(players: list[dict[str, Any]], time_filter: str | Non
 
     for metric, pairs in per_metric.items():
         values = [value for value, _ in pairs]
+        ordered = sorted(values)
+        top_two = ordered[-min(2, len(ordered)) :]
+        bottom_two = ordered[: min(2, len(ordered))]
         top_value, top_name = max(pairs, key=lambda item: item[0])
         low_value, low_name = min(pairs, key=lambda item: item[0])
         avg_value = avg(values, default=None)
@@ -483,12 +504,16 @@ def aggregate_player_stats(players: list[dict[str, Any]], time_filter: str | Non
             "avg": avg_value,
             "max": top_value,
             "min": low_value,
+            "top2_avg": avg(top_two, default=None),
+            "bottom2_avg": avg(bottom_two, default=None),
+            "median": statistics.median(ordered),
             "std": std_value,
             "spread": top_value - low_value,
             "n": len(values),
         }
         out["top"][metric] = {"name": top_name, "value": top_value}
         out["bottom"][metric] = {"name": low_name, "value": low_value}
+    out["maps_min"] = min(player_maps) if player_maps else 0
     return out
 
 
@@ -514,37 +539,46 @@ def roster_summary(team_id: str | None, profiles: dict[str, Any], player_stats: 
                 "preferred_time_filter": bundle.get("preferred_time_filter") if isinstance(bundle, dict) else None,
             }
         )
-    covered = [
-        player
-        for player in players
-        if player["stats"] and (parse_int(player["stats"].get("maps")) or 0) > 0
-    ]
     summary = {
-        "coverage": len(covered) / max(len(players), 1),
+        "coverage": 0.0,
         "players": players,
         "avg": {},
         "windows": {},
         "distribution": {},
         "preferred_time_filter": None,
     }
-    preferred_agg = aggregate_player_stats(players)
-    summary["distribution"] = preferred_agg
-    for metric, values in preferred_agg.get("metrics", {}).items():
-        summary["avg"][metric] = values.get("avg")
-        legacy = PLAYER_LEGACY_NAMES.get(metric)
-        if legacy:
-            summary["avg"][legacy] = values.get("avg")
     available_windows = sorted({window for p in players for window in (p.get("stats_by_window") or {})})
     for window in [*PLAYER_TIME_FILTER_PRIORITY, *[w for w in available_windows if w not in PLAYER_TIME_FILTER_PRIORITY]]:
         window_agg = aggregate_player_stats(players, window)
         if window_agg.get("covered_players"):
             summary["windows"][window] = window_agg
+    # Use one window for the whole roster: mixing a three-month sample from one
+    # player with a year-long sample from another makes star and depth signals
+    # incomparable. Widen only when the current window lacks a real five-man sample.
     for window in PLAYER_TIME_FILTER_PRIORITY:
-        if window in summary["windows"]:
+        candidate = summary["windows"].get(window)
+        if candidate and candidate["covered_players"] >= 4 and candidate["maps_min"] >= 5:
             summary["preferred_time_filter"] = window
             break
     if not summary["preferred_time_filter"] and summary["windows"]:
-        summary["preferred_time_filter"] = next(iter(summary["windows"]))
+        summary["preferred_time_filter"] = max(
+            summary["windows"],
+            key=lambda window: (
+                summary["windows"][window]["covered_players"],
+                summary["windows"][window]["maps_min"],
+                summary["windows"][window]["maps_total"],
+            ),
+        )
+    if summary["preferred_time_filter"]:
+        summary["distribution"] = summary["windows"][summary["preferred_time_filter"]]
+    else:
+        summary["distribution"] = aggregate_player_stats(players)
+    summary["coverage"] = summary["distribution"]["covered_players"] / max(len(players), 1)
+    for metric, values in summary["distribution"].get("metrics", {}).items():
+        summary["avg"][metric] = values.get("avg")
+        legacy = PLAYER_LEGACY_NAMES.get(metric)
+        if legacy:
+            summary["avg"][legacy] = values.get("avg")
     return summary
 
 
@@ -602,6 +636,8 @@ def model_probability_team1(
     analytics_match: dict[str, Any] | None = None,
     match_context: dict[str, Any] | None = None,
     extra_features: dict[str, float] | None = None,
+    announced_lineups: dict[str, Any] | None = None,
+    event_metadata: dict[str, Any] | None = None,
 ) -> float:
     """Probabilidad calibrada de que gane team1 según el modelo entrenado.
 
@@ -630,6 +666,22 @@ def model_probability_team1(
                 }
             )
         )
+    if isinstance(announced_lineups, dict) and announced_lineups:
+        f1.update(cs2_announced_lineup_features({"prematch_lineups": announced_lineups}))
+        f2.update(
+            cs2_announced_lineup_features(
+                {
+                    "prematch_lineups": {
+                        "team1": announced_lineups.get("team2"),
+                        "team2": announced_lineups.get("team1"),
+                    }
+                }
+            )
+        )
+    if isinstance(event_metadata, dict) and event_metadata:
+        event_features = cs2_event_metadata_features({"event_metadata": event_metadata})
+        f1.update(event_features)
+        f2.update(event_features)
     if extra_features:
         f1.update(model_external_features_for_order(extra_features, reverse=False))
         f2.update(model_external_features_for_order(extra_features, reverse=True))
@@ -2107,6 +2159,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         rating2_min = roster_metric(roster2, "rating", "min", rating2) or rating2
         rating1_std = roster_metric(roster1, "rating", "std", 0.0) or 0.0
         rating2_std = roster_metric(roster2, "rating", "std", 0.0) or 0.0
+        rating1_top2 = roster_metric(roster1, "rating", "top2_avg", rating1_max)
+        rating2_top2 = roster_metric(roster2, "rating", "top2_avg", rating2_max)
+        rating1_bottom2 = roster_metric(roster1, "rating", "bottom2_avg", rating1_min)
+        rating2_bottom2 = roster_metric(roster2, "rating", "bottom2_avg", rating2_min)
+        rating1_median = roster_metric(roster1, "rating", "median", rating1)
+        rating2_median = roster_metric(roster2, "rating", "median", rating2)
+        rating1_top2 = rating1_max if rating1_top2 is None else rating1_top2
+        rating2_top2 = rating2_max if rating2_top2 is None else rating2_top2
+        rating1_bottom2 = rating1_min if rating1_bottom2 is None else rating1_bottom2
+        rating2_bottom2 = rating2_min if rating2_bottom2 is None else rating2_bottom2
+        rating1_median = rating1 if rating1_median is None else rating1_median
+        rating2_median = rating2 if rating2_median is None else rating2_median
         real_rating1 = ((player_form1.get("team_windows") or {}).get("last5") or {}).get("rating")
         real_rating2 = ((player_form2.get("team_windows") or {}).get("last5") or {}).get("rating")
         map_advantage = map_pool.get("map_pool_advantage_team1") or 0.0
@@ -2119,6 +2183,10 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         player_maps_min = min(
             (roster1.get("distribution") or {}).get("maps_total") or 0,
             (roster2.get("distribution") or {}).get("maps_total") or 0,
+        )
+        player_maps_per_player_min = min(
+            (roster1.get("distribution") or {}).get("maps_min") or 0,
+            (roster2.get("distribution") or {}).get("maps_min") or 0,
         )
         features = {
             "elo_team1": elo1,
@@ -2143,8 +2211,9 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "player_coverage_team1": roster1["coverage"],
             "player_coverage_team2": roster2["coverage"],
             "player_coverage_min": player_coverage_min,
-            "player_snapshot_available": 1.0 if player_coverage_min >= 0.8 else 0.0,
+            "player_snapshot_available": 1.0 if player_coverage_min >= 0.8 and player_maps_per_player_min >= 5 else 0.0,
             "player_maps_min": player_maps_min,
+            "player_maps_per_player_min": player_maps_per_player_min,
             "player_rating_team1": rating1,
             "player_rating_team2": rating2,
             "player_rating_diff": rating1 - rating2,
@@ -2157,6 +2226,15 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "player_rating_std_team1": rating1_std,
             "player_rating_std_team2": rating2_std,
             "player_rating_std_diff": rating1_std - rating2_std,
+            "player_rating_top2_avg_team1": rating1_top2,
+            "player_rating_top2_avg_team2": rating2_top2,
+            "player_rating_top2_avg_diff": rating1_top2 - rating2_top2,
+            "player_rating_bottom2_avg_team1": rating1_bottom2,
+            "player_rating_bottom2_avg_team2": rating2_bottom2,
+            "player_rating_bottom2_avg_diff": rating1_bottom2 - rating2_bottom2,
+            "player_rating_median_team1": rating1_median,
+            "player_rating_median_team2": rating2_median,
+            "player_rating_median_diff": rating1_median - rating2_median,
             "player_rating_spread_team1": rating1_max - rating1_min,
             "player_rating_spread_team2": rating2_max - rating2_min,
             "player_rating_spread_diff": (rating1_max - rating1_min) - (rating2_max - rating2_min),
@@ -2171,7 +2249,11 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "player_adr_diff": (roster_metric(roster1, "adr", "avg", 75.0) or 75.0) - (roster_metric(roster2, "adr", "avg", 75.0) or 75.0),
             "player_impact_diff": (roster_metric(roster1, "impact", "avg", 1.0) or 1.0) - (roster_metric(roster2, "impact", "avg", 1.0) or 1.0),
             "player_round_swing_diff": (roster_metric(roster1, "round_swing", "avg", 0.0) or 0.0) - (roster_metric(roster2, "round_swing", "avg", 0.0) or 0.0),
+            "player_round_swing_top2_avg_diff": (roster_metric(roster1, "round_swing", "top2_avg", 0.0) or 0.0)
+            - (roster_metric(roster2, "round_swing", "top2_avg", 0.0) or 0.0),
             "player_opening_kpr_diff": (roster_metric(roster1, "opening_kpr", "avg", 0.0) or 0.0) - (roster_metric(roster2, "opening_kpr", "avg", 0.0) or 0.0),
+            "player_opening_kpr_top2_avg_diff": (roster_metric(roster1, "opening_kpr", "top2_avg", 0.0) or 0.0)
+            - (roster_metric(roster2, "opening_kpr", "top2_avg", 0.0) or 0.0),
             "player_stats_window_team1": roster1.get("preferred_time_filter"),
             "player_stats_window_team2": roster2.get("preferred_time_filter"),
             "player_real_form_coverage_team1": player_form1["real_form_coverage"],
@@ -2205,7 +2287,11 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "team2_key": t2,
             "analytics": snapshot.get("analytics"),
         }
+        announced_lineups = snapshot.get("prematch_lineups") or {}
+        event_metadata = snapshot.get("event_metadata") or ((snapshot.get("analytics") or {}).get("event_metadata")) or {}
         features.update(cs2_analytics_match_features(analytics_match))
+        features.update(cs2_announced_lineup_features({"prematch_lineups": announced_lineups}))
+        features.update(cs2_event_metadata_features({"event_metadata": event_metadata}))
         volatility = event_volatility(state["event_outcomes"], event)
         features["event_volatility"] = volatility["volatility"]
         features["event_volatility_label"] = volatility["label"]
@@ -2249,6 +2335,8 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                     analytics_match,
                     tournament,
                     features,
+                    announced_lineups=announced_lineups,
+                    event_metadata=event_metadata,
                 )
                 card1 = engine["state"].rating_card(t1, match_dt)
                 card2 = engine["state"].rating_card(t2, match_dt)

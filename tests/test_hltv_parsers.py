@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 import unittest
 from datetime import date
@@ -198,6 +199,71 @@ class HltvParserTests(unittest.TestCase):
         self.assertEqual(alpha["win_pct"], 60)
         self.assertEqual(alpha["played"], 5)
         self.assertEqual(beta["win_pct"], None)
+
+    def test_parse_current_analytics_markup_and_advertised_lineups(self) -> None:
+        team1 = {
+            "101": {
+                "playerId": 101,
+                "nickname": "AlphaStar",
+                "rating": "1.20",
+                "kpr": "0.75",
+                "dpr": "0.60",
+                "kast": "74.0%",
+                "adr": "82.0",
+                "multiKillRating": "1.19",
+                "roundSwing": "+2.00%",
+                "profileLinkUrl": "/player/101/alphastar",
+            }
+        }
+        team2 = {
+            "202": {
+                "playerId": 202,
+                "nickname": "StandIn",
+                "rating": "0.90",
+                "kpr": "0.60",
+                "dpr": "0.72",
+                "kast": "68.0%",
+                "adr": "66.0",
+                "multiKillRating": "0.91",
+                "roundSwing": "-1.20%",
+                "profileLinkUrl": "/player/202/standin",
+            }
+        }
+        html = f"""
+        <div class="teamsBox"><div class="event"><a href="/events/88/test-event">Test event</a></div></div>
+        <div data-team1-players-data='{json.dumps(team1)}'></div>
+        <div data-team2-players-data='{json.dumps(team2)}'></div>
+        <div class="analytics-event-info">
+          <div class="analytics-info"><div class="analytics-info-header">Test event</div><div class="analytics-info-sub-title">Event</div></div>
+          <div class="analytics-info"><div class="analytics-info-header">$50,000</div><div class="analytics-info-sub-title">Prize pool at event</div></div>
+          <div class="analytics-info"><div class="analytics-info-header">16</div><div class="analytics-info-sub-title">Teams competing</div></div>
+        </div>
+        <div class="analytics-insights-container">
+          <div class="analytics-insights-team-header"><div class="team-name">Beta</div></div>
+          <div class="analytics-insights-insight"><div class="analytics-insights-indicator against"></div><div class="analytics-insights-info">Beta is playing with stand-ins: StandIn instead of Regular</div></div>
+          <div class="analytics-insights-insight"><div class="analytics-insights-indicator against"></div><div class="analytics-insights-info">StandIn has played less than 5 matches with core</div></div>
+        </div>
+        <table class="table-container"><thead><tr><th class="analytics-map-stats-map">Map</th></tr></thead><tbody>
+          <tr><td rowspan="2"><div class="analytics-map-name">Mirage</div></td><td class="analytics-map-stats-team"><div class="maps-team-name">Alpha</div></td><td class="analytics-map-stats-pick-percentage">60%</td><td class="analytics-map-stats-ban-percentage">10%</td><td class="analytics-map-stats-win-percentage">70%</td><td class="analytics-map-stats-played">10</td><td class="analytics-map-stats-comment">Comfort pick</td></tr>
+          <tr><td class="analytics-map-stats-team"><div class="maps-team-name">Beta</div></td><td class="analytics-map-stats-pick-percentage">0%</td><td class="analytics-map-stats-ban-percentage">50%</td><td class="analytics-map-stats-win-percentage">40%</td><td class="analytics-map-stats-played">8</td></tr>
+        </tbody></table>
+        <table class="analytics-handicap-table team1"><thead><tr><th><span class="team-name">Alpha</span><span class="match-map-count">20 matches, 50 maps.</span></th></tr></thead><tbody><tr><td>2 - 0 wins</td><td class="handicap-data">40%</td></tr><tr><td>2 - 1 wins</td><td class="handicap-data">20%</td></tr><tr><td>Overtimes</td><td class="handicap-data">5%</td></tr></tbody></table>
+        <table class="analytics-handicap-table team2"><thead><tr><th><span class="team-name">Beta</span><span class="match-map-count">15 matches, 36 maps.</span></th></tr></thead><tbody><tr><td>2 - 0 wins</td><td class="handicap-data">20%</td></tr><tr><td>2 - 1 wins</td><td class="handicap-data">20%</td></tr><tr><td>Overtimes</td><td class="handicap-data">10%</td></tr></tbody></table>
+        """
+        parsed = start.parse_analytics_html(html, "123", "/matches/123/alpha-vs-beta", ["Alpha", "Beta"])
+        self.assertEqual(parsed["event_metadata"], {"name": "Test event", "prize_pool": 50000, "teams_competing": 16})
+        self.assertEqual(len(parsed["map_stats"]), 2)
+        self.assertEqual(parsed["core_lineup"]["Beta"]["matches_lt"], 5)
+        self.assertEqual(parsed["standins"]["Beta"], ["StandIn"])
+        self.assertEqual(parsed["series_stats"]["team1"]["score_distribution"]["2_0_wins"], 40.0)
+
+        lineups = start.parse_prematch_lineups_html(
+            html,
+            {"match": {"team1": {"name": "Alpha", "id": "10"}, "team2": {"name": "Beta", "id": "20"}}},
+        )
+        start.mark_prematch_standins(lineups, parsed)
+        self.assertEqual(lineups["team1"]["players"][0]["hltv_player_id"], "101")
+        self.assertTrue(lineups["team2"]["players"][0]["is_standin"])
 
 
 if __name__ == "__main__":

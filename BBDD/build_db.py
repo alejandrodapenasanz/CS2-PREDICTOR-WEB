@@ -80,6 +80,13 @@ MATCH_LIVE_COLUMNS: dict[str, str] = {
     "has_veto": "INTEGER NOT NULL DEFAULT 0 CHECK (has_veto IN (0,1))",
 }
 
+EVENT_LIVE_COLUMNS: dict[str, str] = {
+    "hltv_event_id": "TEXT",
+    "teams_competing": "INTEGER",
+    "source_captured_at_utc": "TEXT",
+    "source_file": "TEXT",
+}
+
 
 def configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON;")
@@ -104,6 +111,11 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
     for column, ddl in MATCH_LIVE_COLUMNS.items():
         if column not in existing:
             conn.execute(f"ALTER TABLE matches ADD COLUMN {column} {ddl}")
+
+    event_columns = table_columns(conn, "events")
+    for column, ddl in EVENT_LIVE_COLUMNS.items():
+        if column not in event_columns:
+            conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
 
     conn.executescript(
         """
@@ -130,10 +142,68 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
             requests_skipped_by_freshness INTEGER,
             note          TEXT
         );
+        CREATE TABLE IF NOT EXISTS prematch_lineup_snapshots (
+            prematch_lineup_snapshot_id INTEGER PRIMARY KEY,
+            match_id    INTEGER NOT NULL REFERENCES matches(match_id),
+            team_id     INTEGER NOT NULL REFERENCES teams(team_id),
+            player_id   INTEGER NOT NULL REFERENCES players(player_id),
+            captured_at_utc TEXT NOT NULL,
+            run_id      TEXT NOT NULL,
+            is_standin  INTEGER NOT NULL DEFAULT 0 CHECK (is_standin IN (0,1)),
+            source_file TEXT NOT NULL,
+            payload_json TEXT NOT NULL,
+            UNIQUE (match_id, team_id, player_id, captured_at_utc, source_file)
+        );
+        CREATE TABLE IF NOT EXISTS match_analytics_snapshots (
+            analytics_snapshot_id INTEGER PRIMARY KEY,
+            match_id        INTEGER NOT NULL REFERENCES matches(match_id),
+            captured_at_utc TEXT NOT NULL,
+            run_id          TEXT NOT NULL,
+            source_file     TEXT NOT NULL,
+            event_name      TEXT,
+            hltv_event_id   TEXT,
+            prize_pool      INTEGER,
+            teams_competing INTEGER,
+            team1_core_matches_lt INTEGER,
+            team2_core_matches_lt INTEGER,
+            team1_matches_sample INTEGER,
+            team1_maps_sample INTEGER,
+            team2_matches_sample INTEGER,
+            team2_maps_sample INTEGER,
+            team1_overtime_pct REAL,
+            team2_overtime_pct REAL,
+            payload_json    TEXT NOT NULL,
+            UNIQUE (match_id, captured_at_utc, source_file)
+        );
+        CREATE TABLE IF NOT EXISTS match_analytics_map_stats (
+            analytics_snapshot_id INTEGER NOT NULL REFERENCES match_analytics_snapshots(analytics_snapshot_id),
+            team_id         INTEGER REFERENCES teams(team_id),
+            team_name       TEXT,
+            map_name        TEXT NOT NULL,
+            first_pick_pct  REAL,
+            first_ban_pct   REAL,
+            win_pct         REAL,
+            played          INTEGER,
+            comment         TEXT,
+            PRIMARY KEY (analytics_snapshot_id, team_name, map_name)
+        );
+        CREATE TABLE IF NOT EXISTS match_analytics_map_handicap (
+            analytics_snapshot_id INTEGER NOT NULL REFERENCES match_analytics_snapshots(analytics_snapshot_id),
+            team_id         INTEGER REFERENCES teams(team_id),
+            team_name       TEXT,
+            map_name        TEXT NOT NULL,
+            avg_rounds_lost_in_wins REAL,
+            avg_rounds_won_in_losses REAL,
+            PRIMARY KEY (analytics_snapshot_id, team_name, map_name)
+        );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_hltv ON matches(hltv_match_id);
         CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
         CREATE INDEX IF NOT EXISTS idx_matches_tier ON matches(data_tier);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_hltv ON events(hltv_event_id) WHERE hltv_event_id IS NOT NULL;
         CREATE INDEX IF NOT EXISTS idx_fetch_state_eligible ON fetch_state(entity_type, next_eligible_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_prematch_lineups_match ON prematch_lineup_snapshots(match_id, captured_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_analytics_snapshot_match ON match_analytics_snapshots(match_id, captured_at_utc);
+        CREATE INDEX IF NOT EXISTS idx_analytics_map_stats_snapshot ON match_analytics_map_stats(analytics_snapshot_id, map_name);
         """
     )
 
@@ -727,6 +797,197 @@ def insert_hltv_assets(
     return counts
 
 
+def _analytics_team_value(payload: dict, team_name: str | None, field: str) -> int | None:
+    if not team_name:
+        return None
+    wanted = dataio.clean_team(team_name)
+    for team, value in (payload or {}).items():
+        if dataio.clean_team(str(team)) != wanted or not isinstance(value, dict):
+            continue
+        return parse_int(value.get(field))
+    return None
+
+
+def insert_prematch_lineup_snapshots(
+    cur: sqlite3.Cursor,
+    run_dir: Path,
+    match_id_map: dict[str, int],
+    team_ids: dict[str, int],
+    team_ids_by_hltv: dict[str, int],
+) -> dict[str, int]:
+    counts = {"prematch_lineup_matches": 0, "prematch_lineup_rows": 0}
+    player_cache: dict[str, int] = {}
+    for path in sorted((run_dir / "match_snapshots").glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        hltv_match_id = str(payload.get("id") or path.stem)
+        match_id = match_id_map.get(hltv_match_id)
+        lineups = payload.get("prematch_lineups") or {}
+        if match_id is None or not isinstance(lineups, dict):
+            continue
+        captured_at = payload.get("captured_at")
+        if not captured_at:
+            continue
+        inserted_for_match = False
+        for lineup in lineups.values():
+            if not isinstance(lineup, dict):
+                continue
+            team_id = resolve_team_id(
+                {"hltv_id": lineup.get("hltv_team_id"), "name": lineup.get("team_name")},
+                team_ids,
+                team_ids_by_hltv,
+            )
+            if team_id is None:
+                continue
+            for player in lineup.get("players") or []:
+                player_hltv_id = str(player.get("hltv_player_id") or "").strip()
+                if not player_hltv_id:
+                    continue
+                player_id = get_player_id(
+                    cur,
+                    {"hltv_id": player_hltv_id, "nick": player.get("nickname") or player_hltv_id},
+                    player_cache,
+                )
+                cur.execute(
+                    "INSERT OR IGNORE INTO prematch_lineup_snapshots("
+                    "match_id, team_id, player_id, captured_at_utc, run_id, is_standin, source_file, payload_json"
+                    ") VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        match_id,
+                        team_id,
+                        player_id,
+                        captured_at,
+                        run_dir.name,
+                        1 if player.get("is_standin") else 0,
+                        payload.get("source_file") or source_name(path),
+                        json.dumps(player, ensure_ascii=False),
+                    ),
+                )
+                counts["prematch_lineup_rows"] += cur.rowcount
+                inserted_for_match = inserted_for_match or bool(cur.rowcount)
+        counts["prematch_lineup_matches"] += int(inserted_for_match)
+    return counts
+
+
+def insert_match_analytics_snapshots(
+    cur: sqlite3.Cursor,
+    run_dir: Path,
+    match_id_map: dict[str, int],
+    team_ids: dict[str, int],
+    team_ids_by_hltv: dict[str, int],
+) -> dict[str, int]:
+    counts = {"analytics_snapshot_rows": 0, "analytics_map_stats_rows": 0, "analytics_map_handicap_rows": 0}
+    for path in sorted((run_dir / "analytics").glob("*.json")):
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        hltv_match_id = str(payload.get("match_id") or path.stem)
+        match_id = match_id_map.get(hltv_match_id)
+        captured_at = payload.get("captured_at")
+        if match_id is None or not captured_at or not payload.get("available"):
+            continue
+        event = payload.get("event_metadata") or {}
+        series = payload.get("series_stats") or {}
+        core = payload.get("core_lineup") or {}
+        team1 = (series.get("team1") or {}).get("team")
+        team2 = (series.get("team2") or {}).get("team")
+        source_file = payload.get("source_file") or source_name(path)
+        event_row = cur.execute("SELECT event_id FROM matches WHERE match_id=?", (match_id,)).fetchone()
+        if event_row:
+            cur.execute(
+                """
+                UPDATE events
+                SET prize_pool=COALESCE(?, prize_pool),
+                    teams_competing=COALESCE(?, teams_competing),
+                    source_captured_at_utc=?, source_file=?
+                WHERE event_id=?
+                """,
+                (
+                    parse_int(event.get("prize_pool")),
+                    parse_int(event.get("teams_competing")),
+                    captured_at,
+                    source_file,
+                    int(event_row[0]),
+                ),
+            )
+        cur.execute(
+            "INSERT OR IGNORE INTO match_analytics_snapshots("
+            "match_id, captured_at_utc, run_id, source_file, event_name, hltv_event_id, prize_pool, teams_competing, "
+            "team1_core_matches_lt, team2_core_matches_lt, team1_matches_sample, team1_maps_sample, "
+            "team2_matches_sample, team2_maps_sample, team1_overtime_pct, team2_overtime_pct, payload_json"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                match_id,
+                captured_at,
+                run_dir.name,
+                source_file,
+                event.get("name"),
+                event.get("hltv_event_id"),
+                parse_int(event.get("prize_pool")),
+                parse_int(event.get("teams_competing")),
+                _analytics_team_value(core, team1, "matches_lt"),
+                _analytics_team_value(core, team2, "matches_lt"),
+                parse_int((series.get("team1") or {}).get("matches")),
+                parse_int((series.get("team1") or {}).get("maps")),
+                parse_int((series.get("team2") or {}).get("matches")),
+                parse_int((series.get("team2") or {}).get("maps")),
+                safe_float((series.get("team1") or {}).get("overtime_pct")),
+                safe_float((series.get("team2") or {}).get("overtime_pct")),
+                json.dumps(payload, ensure_ascii=False),
+            ),
+        )
+        counts["analytics_snapshot_rows"] += cur.rowcount
+        snapshot_row = cur.execute(
+            "SELECT analytics_snapshot_id FROM match_analytics_snapshots "
+            "WHERE match_id=? AND captured_at_utc=? AND source_file=?",
+            (match_id, captured_at, source_file),
+        ).fetchone()
+        if not snapshot_row:
+            continue
+        analytics_snapshot_id = int(snapshot_row[0])
+        for row in payload.get("map_stats") or []:
+            if not isinstance(row, dict) or not row.get("map"):
+                continue
+            team_id = resolve_team_id({"name": row.get("team")}, team_ids, team_ids_by_hltv)
+            cur.execute(
+                "INSERT INTO match_analytics_map_stats("
+                "analytics_snapshot_id, team_id, team_name, map_name, first_pick_pct, first_ban_pct, win_pct, played, comment"
+                ") VALUES (?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(analytics_snapshot_id, team_name, map_name) DO UPDATE SET "
+                "team_id=COALESCE(match_analytics_map_stats.team_id, excluded.team_id)",
+                (
+                    analytics_snapshot_id,
+                    team_id,
+                    row.get("team"),
+                    row.get("map"),
+                    safe_float(row.get("first_pick_pct")),
+                    safe_float(row.get("first_ban_pct")),
+                    safe_float(row.get("win_pct")),
+                    parse_int(row.get("played")),
+                    row.get("comment"),
+                ),
+            )
+            counts["analytics_map_stats_rows"] += cur.rowcount
+        for row in payload.get("map_handicap") or []:
+            if not isinstance(row, dict) or not row.get("map"):
+                continue
+            team_id = resolve_team_id({"name": row.get("team")}, team_ids, team_ids_by_hltv)
+            cur.execute(
+                "INSERT INTO match_analytics_map_handicap("
+                "analytics_snapshot_id, team_id, team_name, map_name, avg_rounds_lost_in_wins, avg_rounds_won_in_losses"
+                ") VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(analytics_snapshot_id, team_name, map_name) DO UPDATE SET "
+                "team_id=COALESCE(match_analytics_map_handicap.team_id, excluded.team_id)",
+                (
+                    analytics_snapshot_id,
+                    team_id,
+                    row.get("team"),
+                    row.get("map"),
+                    safe_float(row.get("avg_rounds_lost_in_wins")),
+                    safe_float(row.get("avg_rounds_won_in_losses")),
+                ),
+            )
+            counts["analytics_map_handicap_rows"] += cur.rowcount
+    return counts
+
+
 def insert_team_rankings(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int]) -> int:
     runs_dir = DAILY_ROOT / "runs"
     if not runs_dir.exists():
@@ -1012,19 +1273,69 @@ def backup_database(db_path: Path, backup_dir: Path | None, mirror_dir: Path | N
     return result
 
 
-def _event_id_for(cur: sqlite3.Cursor, event_cache: dict[str, int], name: str | None) -> int:
-    event_name = name or "Unknown event"
+def _event_id_for(
+    cur: sqlite3.Cursor,
+    event_cache: dict[str, int],
+    name: str | None,
+    metadata: dict | None = None,
+) -> int:
+    """Resuelve el evento y enriquece solo campos observados por HLTV."""
+    metadata = metadata if isinstance(metadata, dict) else {}
+    event_name = metadata.get("name") or name or "Unknown event"
+    hltv_event_id = str(metadata.get("hltv_event_id") or "").strip() or None
     if event_name in event_cache:
-        return event_cache[event_name]
+        event_id = event_cache[event_name]
+    else:
+        row = None
+        if hltv_event_id:
+            row = cur.execute("SELECT event_id FROM events WHERE hltv_event_id = ?", (hltv_event_id,)).fetchone()
+        if row is None:
+            row = cur.execute("SELECT event_id FROM events WHERE name = ?", (event_name,)).fetchone()
+        if row is None:
+            cur.execute(
+                "INSERT INTO events(name, hltv_event_id, is_lan, prize_pool, teams_competing, source_captured_at_utc, source_file) "
+                "VALUES (?,?,?,?,?,?,?)",
+                (
+                    event_name,
+                    hltv_event_id,
+                    0,
+                    parse_int(metadata.get("prize_pool")),
+                    parse_int(metadata.get("teams_competing")),
+                    metadata.get("captured_at"),
+                    metadata.get("source_file"),
+                ),
+            )
+            event_id = int(cur.lastrowid)
+        else:
+            event_id = int(row[0])
+        event_cache[event_name] = event_id
+
     cur.execute(
-        "INSERT OR IGNORE INTO events(name, is_lan) VALUES (?,0)",
-        (event_name,),
+        """
+        UPDATE events
+        SET hltv_event_id=COALESCE(hltv_event_id, ?),
+            prize_pool=COALESCE(?, prize_pool),
+            teams_competing=COALESCE(?, teams_competing),
+            source_captured_at_utc=CASE WHEN ? IS NOT NULL THEN ? ELSE source_captured_at_utc END,
+            source_file=CASE WHEN ? IS NOT NULL THEN ? ELSE source_file END
+        WHERE event_id=?
+        """,
+        (
+            hltv_event_id,
+            parse_int(metadata.get("prize_pool")),
+            parse_int(metadata.get("teams_competing")),
+            metadata.get("captured_at"),
+            metadata.get("captured_at"),
+            metadata.get("source_file"),
+            metadata.get("source_file"),
+            event_id,
+        ),
     )
-    row = cur.execute("SELECT event_id FROM events WHERE name = ?", (event_name,)).fetchone()
+    row = cur.execute("SELECT event_id FROM events WHERE event_id = ?", (event_id,)).fetchone()
     if not row:
         raise RuntimeError(f"No se pudo crear/leer event: {event_name}")
     event_cache[event_name] = int(row[0])
-    return event_cache[event_name]
+    return int(row[0])
 
 
 def _team_id_for(

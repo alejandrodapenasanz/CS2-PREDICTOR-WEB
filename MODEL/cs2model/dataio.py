@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import math
 import sqlite3
+import statistics
 import sys
 from bisect import bisect_right
 from datetime import datetime
@@ -118,11 +119,17 @@ def _analytics_is_point_in_time(payload: dict[str, Any] | None, rec: dict[str, A
     if not payload:
         return False
     captured_at = payload.get("captured_at")
-    match_date = rec.get("date")
+    match_time = rec.get("datetime_utc") or rec.get("datetime")
+    match_date = rec.get("date") or match_time
     if not captured_at or not match_date:
         return False
-    # Conservative date-level guard. The scraper captures analytics for upcoming
-    # matches; if a payload appears after the match date, do not train on it.
+    # When both timestamps exist, reject even a same-day post-start capture.
+    # Legacy JSON only has a date, where this falls back to a conservative
+    # date-level guard for backwards compatibility.
+    captured_dt = _iso_date(captured_at)
+    match_dt = _iso_date(match_time) if match_time and "T" in str(match_time) else None
+    if captured_dt and match_dt:
+        return captured_dt <= match_dt
     return str(captured_at)[:10] <= str(match_date)[:10]
 
 
@@ -299,6 +306,7 @@ def load_daily_completed(master_path: str | Path) -> list[dict[str, Any]]:
             "opening_bookmaker_count": opening_avg.get("bookmaker_count"),
             "asset": asset_payload,
             "analytics": analytics_payload,
+            "event_metadata": (analytics_payload or {}).get("event_metadata") or {},
             "match_context": context_payload,
         }
         rows.append(row)
@@ -391,6 +399,7 @@ def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]
 
 PLAYER_TIME_FILTER_PRIORITY = ("past3months", "past6months", "past12months")
 PLAYER_METRICS = ("rating", "kpr", "kast", "adr", "impact", "round_swing", "opening_kpr")
+PLAYER_MIN_MAPS_PER_PLAYER = 5
 
 
 def _safe_float(value: Any) -> float | None:
@@ -407,6 +416,110 @@ def _iso_date(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
         return parse_date(str(value))
+
+
+def _latest_analytics_by_match_asof(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    """Latest Analytics snapshot strictly captured before each completed match."""
+    try:
+        rows = conn.execute(
+            """
+            SELECT mas.match_id, mas.captured_at_utc, mas.payload_json, m.datetime_utc
+            FROM match_analytics_snapshots mas
+            JOIN matches m ON m.match_id = mas.match_id
+            WHERE m.status = 'completed'
+              AND mas.captured_at_utc IS NOT NULL
+              AND m.datetime_utc IS NOT NULL
+              AND mas.captured_at_utc <= m.datetime_utc
+            ORDER BY mas.match_id, mas.captured_at_utc DESC, mas.analytics_snapshot_id DESC
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    out: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        match_id = int(row["match_id"])
+        if match_id in out:
+            continue
+        captured_at = _iso_date(row["captured_at_utc"])
+        match_dt = _iso_date(row["datetime_utc"])
+        if captured_at is None or match_dt is None or captured_at > match_dt:
+            continue
+        payload = _json_or_none(row["payload_json"])
+        if isinstance(payload, dict) and payload.get("available"):
+            out[match_id] = payload
+    return out
+
+
+def _prematch_lineups_by_match_asof(
+    conn: sqlite3.Connection,
+    matches: list[sqlite3.Row],
+) -> dict[int, dict[str, Any]]:
+    """Returns the latest complete announced 5v5 snapshot before kick-off.
+
+    Snapshots are stored per player, so the grouping uses one shared capture
+    timestamp and requires five unique players for both actual match sides.
+    This prevents a later roster correction or a partial scrape from becoming
+    an accidental training feature.
+    """
+    wanted = {
+        int(row["match_id"]): {
+            "team1_id": int(row["team1_id"]),
+            "team2_id": int(row["team2_id"]),
+            "match_dt": _iso_date(row["datetime_utc"]),
+        }
+        for row in matches
+    }
+    if not wanted:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT pls.match_id, pls.team_id, pls.player_id, pls.captured_at_utc,
+                   pls.is_standin, pls.payload_json, m.datetime_utc
+            FROM prematch_lineup_snapshots pls
+            JOIN matches m ON m.match_id = pls.match_id
+            WHERE pls.captured_at_utc IS NOT NULL
+              AND m.datetime_utc IS NOT NULL
+              AND pls.captured_at_utc <= m.datetime_utc
+            ORDER BY pls.match_id, pls.captured_at_utc, pls.team_id, pls.player_id,
+                     pls.prematch_lineup_snapshot_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    grouped: dict[tuple[int, str], dict[int, dict[int, dict[str, Any]]]] = {}
+    for row in rows:
+        match_id = int(row["match_id"])
+        match = wanted.get(match_id)
+        if match is None:
+            continue
+        captured_at = _iso_date(row["captured_at_utc"])
+        match_dt = match["match_dt"]
+        if captured_at is None or match_dt is None or captured_at > match_dt:
+            continue
+        payload = _json_or_none(row["payload_json"])
+        if not isinstance(payload, dict):
+            continue
+        payload = dict(payload)
+        payload["is_standin"] = bool(row["is_standin"]) or bool(payload.get("is_standin"))
+        key = (match_id, str(row["captured_at_utc"]))
+        grouped.setdefault(key, {}).setdefault(int(row["team_id"]), {})[int(row["player_id"])] = payload
+
+    out: dict[int, dict[str, Any]] = {}
+    # Timestamps are ISO UTC and therefore lexicographically chronological.
+    for (match_id, captured_at), teams in sorted(grouped.items(), key=lambda item: item[0][1]):
+        match = wanted[match_id]
+        team1 = list((teams.get(match["team1_id"]) or {}).values())
+        team2 = list((teams.get(match["team2_id"]) or {}).values())
+        if len(team1) < 5 or len(team2) < 5:
+            continue
+        out[match_id] = {
+            "captured_at": captured_at,
+            "team1": {"players": team1},
+            "team2": {"players": team2},
+        }
+    return out
 
 
 def _pick_player_snapshot(rows: list[sqlite3.Row], match_dt: datetime | None) -> sqlite3.Row | None:
@@ -451,13 +564,53 @@ def _team_player_snapshot_summary(
     by_player: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
         by_player.setdefault(str(row["hltv_player_id"]), []).append(row)
-    selected = [_pick_player_snapshot(player_rows, match_dt) for player_rows in by_player.values()]
-    selected = [row for row in selected if row is not None and int(row["maps"] or 0) > 0]
+    available_windows = [
+        str(row["time_filter"])
+        for player_rows in by_player.values()
+        for row in player_rows
+        if row["time_filter"]
+    ]
+    windows = [
+        *PLAYER_TIME_FILTER_PRIORITY,
+        *sorted({window for window in available_windows if window not in PLAYER_TIME_FILTER_PRIORITY}),
+    ]
+    candidates: list[tuple[str | None, list[sqlite3.Row]]] = []
+    for window in windows:
+        chosen = [
+            _pick_player_snapshot(
+                [row for row in player_rows if str(row["time_filter"] or "") == window],
+                match_dt,
+            )
+            for player_rows in by_player.values()
+        ]
+        chosen = [row for row in chosen if row is not None and int(row["maps"] or 0) > 0]
+        if chosen:
+            candidates.append((window, chosen))
+    selected_window: str | None = None
+    selected: list[sqlite3.Row] = []
+    for window, candidate in candidates:
+        if len(candidate) >= 4 and min(int(row["maps"] or 0) for row in candidate) >= PLAYER_MIN_MAPS_PER_PLAYER:
+            selected_window, selected = window, candidate
+            break
+    if not selected and candidates:
+        selected_window, selected = max(
+            candidates,
+            key=lambda item: (
+                len(item[1]),
+                min(int(row["maps"] or 0) for row in item[1]),
+                sum(int(row["maps"] or 0) for row in item[1]),
+            ),
+        )
+    if not selected:
+        selected = [_pick_player_snapshot(player_rows, match_dt) for player_rows in by_player.values()]
+        selected = [row for row in selected if row is not None and int(row["maps"] or 0) > 0]
     roster_size = max(len(by_player), 5)
     out: dict[str, Any] = {
         "coverage": len(selected) / roster_size if roster_size else 0.0,
         "players": len(selected),
         "maps_total": sum(int(row["maps"] or 0) for row in selected),
+        "maps_per_player_min": min((int(row["maps"] or 0) for row in selected), default=0),
+        "time_filter": selected_window,
         "age_days_max": 0.0,
         "metrics": {},
     }
@@ -474,10 +627,16 @@ def _team_player_snapshot_summary(
         if not values:
             continue
         avg = sum(values) / len(values)
+        ordered = sorted(values)
+        top_two = ordered[-min(2, len(ordered)) :]
+        bottom_two = ordered[: min(2, len(ordered))]
         out["metrics"][metric] = {
             "avg": avg,
             "max": max(values),
             "min": min(values),
+            "top2_avg": sum(top_two) / len(top_two),
+            "bottom2_avg": sum(bottom_two) / len(bottom_two),
+            "median": statistics.median(ordered),
             "std": math.sqrt(sum((value - avg) ** 2 for value in values) / len(values)) if len(values) > 1 else 0.0,
             "spread": max(values) - min(values),
         }
@@ -504,13 +663,28 @@ def _player_snapshot_features(
     rating2_max = _metric(t2, "rating", "max", rating2)
     rating1_min = _metric(t1, "rating", "min", rating1)
     rating2_min = _metric(t2, "rating", "min", rating2)
+    rating1_top2 = _metric(t1, "rating", "top2_avg", rating1_max)
+    rating2_top2 = _metric(t2, "rating", "top2_avg", rating2_max)
+    rating1_bottom2 = _metric(t1, "rating", "bottom2_avg", rating1_min)
+    rating2_bottom2 = _metric(t2, "rating", "bottom2_avg", rating2_min)
+    rating1_median = _metric(t1, "rating", "median", rating1)
+    rating2_median = _metric(t2, "rating", "median", rating2)
+    maps_per_player_min = min(
+        float(t1.get("maps_per_player_min") or 0.0),
+        float(t2.get("maps_per_player_min") or 0.0),
+    )
+    snapshot_available = coverage_min >= 0.8 and maps_per_player_min >= PLAYER_MIN_MAPS_PER_PLAYER
     return {
-        "player_snapshot_available": 1.0 if coverage_min >= 0.8 else 0.0,
+        "player_snapshot_available": 1.0 if snapshot_available else 0.0,
         "player_coverage_min": coverage_min,
         "player_maps_min": float(min(t1.get("maps_total") or 0, t2.get("maps_total") or 0)),
+        "player_maps_per_player_min": maps_per_player_min,
         "player_rating_diff": rating1 - rating2,
         "player_rating_max_diff": rating1_max - rating2_max,
         "player_rating_min_diff": rating1_min - rating2_min,
+        "player_rating_top2_avg_diff": rating1_top2 - rating2_top2,
+        "player_rating_bottom2_avg_diff": rating1_bottom2 - rating2_bottom2,
+        "player_rating_median_diff": rating1_median - rating2_median,
         "player_rating_std_diff": _metric(t1, "rating", "std", 0.0) - _metric(t2, "rating", "std", 0.0),
         "player_rating_spread_diff": _metric(t1, "rating", "spread", 0.0) - _metric(t2, "rating", "spread", 0.0),
         "player_star_gap_diff": (rating1_max - rating1) - (rating2_max - rating2),
@@ -520,7 +694,9 @@ def _player_snapshot_features(
         "player_adr_diff": _metric(t1, "adr", "avg", 75.0) - _metric(t2, "adr", "avg", 75.0),
         "player_impact_diff": _metric(t1, "impact", "avg", 1.0) - _metric(t2, "impact", "avg", 1.0),
         "player_round_swing_diff": _metric(t1, "round_swing", "avg", 0.0) - _metric(t2, "round_swing", "avg", 0.0),
+        "player_round_swing_top2_avg_diff": _metric(t1, "round_swing", "top2_avg", 0.0) - _metric(t2, "round_swing", "top2_avg", 0.0),
         "player_opening_kpr_diff": _metric(t1, "opening_kpr", "avg", 0.0) - _metric(t2, "opening_kpr", "avg", 0.0),
+        "player_opening_kpr_top2_avg_diff": _metric(t1, "opening_kpr", "top2_avg", 0.0) - _metric(t2, "opening_kpr", "top2_avg", 0.0),
     }
 
 
@@ -720,7 +896,6 @@ def load_training_rows_from_db(
     try:
         odds_by_match = _opening_odds_by_match(conn)
         assets_by_hltv = _latest_snapshot_by_match(conn, "match_assets")
-        analytics_by_hltv = _latest_snapshot_by_match(conn, "match_analytics")
         rows = conn.execute(
             """
             SELECT
@@ -741,6 +916,8 @@ def load_training_rows_from_db(
             ORDER BY m.datetime_utc, COALESCE(m.hltv_match_id, m.match_id)
             """
         ).fetchall()
+        analytics_by_match = _latest_analytics_by_match_asof(conn)
+        prematch_lineups_by_match = _prematch_lineups_by_match_asof(conn, rows)
         player_features_by_match = {
             int(row["match_id"]): _player_snapshot_features(
                 conn,
@@ -769,7 +946,8 @@ def load_training_rows_from_db(
         date_text = str(row["datetime_utc"] or "")[:10]
         if floor and date_text and date_text < floor:
             continue
-        hltv_match_id = str(row["hltv_match_id"] or row["match_id"])
+        match_id = int(row["match_id"])
+        hltv_match_id = str(row["hltv_match_id"] or match_id)
         bo = int(row["best_of"])
         fmt = f"bo{bo}" if bo in (1, 3, 5) else "other"
         if fmt == "other":
@@ -786,13 +964,16 @@ def load_training_rows_from_db(
             "bracket": row["bracket"],
         }
         opening_avg = odds_by_match.get(int(row["match_id"]), {})
-        analytics_payload = analytics_by_hltv.get(hltv_match_id)
-        if not _analytics_is_point_in_time(analytics_payload, {"date": date_text}):
+        analytics_payload = analytics_by_match.get(match_id)
+        if not _analytics_is_point_in_time(
+            analytics_payload,
+            {"date": date_text, "datetime_utc": row["datetime_utc"]},
+        ):
             analytics_payload = None
         out.append(
             {
                 "id": hltv_match_id,
-                "db_match_id": int(row["match_id"]),
+                "db_match_id": match_id,
                 "date": date_text,
                 "date_obj": parse_date(str(row["datetime_utc"])),
                 "event": row["event_name"] or "",
@@ -815,9 +996,11 @@ def load_training_rows_from_db(
                 "opening_bookmaker_count": opening_avg.get("bookmaker_count"),
                 "asset": assets_by_hltv.get(hltv_match_id),
                 "analytics": analytics_payload,
+                "event_metadata": (analytics_payload or {}).get("event_metadata") or {},
                 "match_context": context_payload,
-                "player_snapshot_features": player_features_by_match.get(int(row["match_id"]), {}),
-                **external_features_by_match.get(int(row["match_id"]), {}),
+                "prematch_lineups": prematch_lineups_by_match.get(match_id, {}),
+                "player_snapshot_features": player_features_by_match.get(match_id, {}),
+                **external_features_by_match.get(match_id, {}),
             }
         )
     out.sort(key=lambda r: (r["date_obj"] or datetime.min, r["id"]))
