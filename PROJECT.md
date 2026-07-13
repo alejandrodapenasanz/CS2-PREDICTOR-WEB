@@ -827,7 +827,9 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 ### C. Código / ingeniería (rigor, no accuracy)
 - ⬜ **C12. Detección de drift** (log loss/CLV rodante; ADWIN/Page-Hinkley) + features de régimen (parche, map pool).
 - ⬜ **C13. Config centralizada** (umbrales/hiperparámetros a `config.yaml`/dataclass versionada).
-- ⬜ **C14. CI + `ruff` + `mypy` + smoke de pipeline** en cada commit.
+- 🟡 **C14. CI + `ruff`** — `.github/workflows/ci.yml` corre `pytest tests/` + ruff
+  (no bloqueante) en push/PR a main/dev/pre-dev; `ruff.toml` lenient. `mypy` y smoke
+  de pipeline completo, pendientes.
 - 🟡 **C15. Reproducibilidad determinista** (semillas + versionado de datos/config por experimento). Parcial.
 - ✅ **C16. Auditoría de fuga exhaustiva** — `tests/test_leakage_audit.py`: verifica que
   las features rolling de cada partido son idénticas al reconstruir el estado solo con

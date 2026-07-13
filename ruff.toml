@@ -1,0 +1,14 @@
+# Config de ruff (lint) para el lado modelo/BBDD/pipeline. Lenient: el objetivo
+# es cazar errores reales (imports rotos, variables sin usar) sin ruido de estilo.
+line-length = 120
+target-version = "py310"
+
+[lint]
+select = ["F", "E9"]   # Pyflakes (errores reales) + syntax; sin reglas de estilo agresivas
+ignore = ["F401"]      # imports "sin usar" (muchos son re-exports intencionados)
+
+[lint.per-file-ignores]
+"tests/*" = ["F811", "E402"]
+
+# Excluye el clon vendored de Scrapling y venvs.
+exclude = ["SCRAPPER/Scrapling", "**/.venv", "**/site-packages"]
