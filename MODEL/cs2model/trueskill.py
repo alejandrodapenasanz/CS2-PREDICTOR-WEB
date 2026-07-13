@@ -9,9 +9,9 @@ partido pasado).
 Modelo 1-contra-1 (equipo vs equipo, sin empates: las series CS2 no empatan).
 Referencia: https://www.microsoft.com/en-us/research/publication/trueskilltm-a-bayesian-skill-rating-system/
 
-Prototipo detrás de un flag (`--extra-rating trueskill` en train.py); OFF por
-defecto → no cambia el modelo de producción. Sirve para que se mida por
-walk-forward si aporta sobre Glicko-2 antes de promocionarlo.
+Se integra como familia AUTO-GATED (`team_trueskill` en train.py): se calcula
+siempre y entra al modelo cuando la muestra supera el umbral, sin flags. Sirve
+para que el walk-forward mida si aporta sobre Glicko-2.
 """
 
 from __future__ import annotations
