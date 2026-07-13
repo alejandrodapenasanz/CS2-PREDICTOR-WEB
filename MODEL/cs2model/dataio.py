@@ -353,11 +353,17 @@ def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]
     try:
         rows = conn.execute(
             """
-            SELECT match_id, bookmaker, captured_at_utc, odds_t1, odds_t2, prob_t1, prob_t2
+            SELECT odds.match_id, odds.bookmaker, odds.captured_at_utc,
+                   odds.odds_t1, odds.odds_t2, odds.prob_t1, odds.prob_t2
             FROM odds
-            WHERE market_type = 'opening'
-              AND (prob_t1 IS NOT NULL OR odds_t1 IS NOT NULL)
-            ORDER BY match_id, captured_at_utc, bookmaker
+            LEFT JOIN matches m ON m.match_id = odds.match_id
+            WHERE odds.market_type = 'opening'
+              AND (odds.prob_t1 IS NOT NULL OR odds.odds_t1 IS NOT NULL)
+              -- Guard anti-fuga: descarta odds "opening" capturadas DESPUES del
+              -- inicio del partido (no deberian existir, pero lo blinda).
+              AND (odds.captured_at_utc IS NULL OR m.datetime_utc IS NULL
+                   OR odds.captured_at_utc <= m.datetime_utc)
+            ORDER BY odds.match_id, odds.captured_at_utc, odds.bookmaker
             """
         ).fetchall()
     except sqlite3.Error:

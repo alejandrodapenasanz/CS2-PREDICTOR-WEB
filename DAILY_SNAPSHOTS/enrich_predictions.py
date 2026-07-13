@@ -108,7 +108,6 @@ MAP_ALIASES = {
     "mrg": "Mirage",
     "mirage": "Mirage",
     "nuke": "Nuke",
-    "nuke": "Nuke",
     "ovp": "Overpass",
     "overpass": "Overpass",
     "trn": "Train",
