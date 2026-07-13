@@ -62,6 +62,28 @@ class ModelArtifact:
             acc += c.weight * c.predict(X)
         return np.clip(acc / total_w, 1e-4, 1 - 1e-4)
 
+    def predict_proba_team1_with_uncertainty(
+        self, feature_rows: list[dict[str, float]]
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """A2: devuelve (prob_media, std_epistemica).
+
+        La std es la dispersion PONDERADA entre los miembros del ensemble, i.e.
+        cuanto discrepan entre si (incertidumbre epistemica). Sirve para apostar
+        menos cuando el modelo "no lo tiene claro". Con un solo componente, std=0.
+        """
+        X = self._matrix(feature_rows)
+        if len(X) == 0:
+            return np.array([]), np.array([])
+        weights = np.array([c.weight for c in self.components], dtype=float)
+        total = weights.sum() or 1.0
+        weights = weights / total
+        preds = np.column_stack([c.predict(X) for c in self.components])  # (n, k)
+        mean = np.clip(preds @ weights, 1e-4, 1 - 1e-4)
+        if preds.shape[1] < 2:
+            return mean, np.zeros(len(X))
+        var = ((preds - mean[:, None]) ** 2) @ weights
+        return mean, np.sqrt(np.maximum(var, 0.0))
+
     def save(self, path: str | Path = ARTIFACT_PATH) -> Path:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)

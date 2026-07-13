@@ -800,8 +800,9 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 ### A. Estadística / metodología
 - ✅ **A1. Ponderación por recencia en el learner** (`sample_weight` con decaimiento
   exponencial por fecha, Dixon-Coles). `--recency-half-life` (default 365d, activo).
-- ⬜ **A2. Incertidumbre epistémica de la probabilidad** (varianza entre miembros del
-  ensemble / bootstrap) expuesta por el artefacto → **encoge el stake** cuando duda.
+- ✅ **A2. Incertidumbre epistémica** — `artifact.predict_proba_team1_with_uncertainty`
+  (std ponderada entre miembros del ensemble); `enrich` la expone (`model_epistemic_std`)
+  y **reduce el stake** vía `uncertainty_factor` cuando el ensemble discrepa.
 - ⬜ **A3. Calibración/auditoría por segmento** (tier, formato, LAN/online, banda de
   confianza), no solo global. Recalibración por segmento cuando supere N muestras.
 - ✅ **A4. Purga/embargo (`--wf-gap`) + tests de significancia** (bootstrap+Wilcoxon

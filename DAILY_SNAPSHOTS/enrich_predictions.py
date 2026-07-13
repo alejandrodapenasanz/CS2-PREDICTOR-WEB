@@ -644,6 +644,30 @@ def model_probability_team1(
     invariancia al orden de los equipos (predicción simétrica).
     """
     artifact = engine["artifact"]
+    f1, f2 = _match_feature_pair(
+        engine, team1_key, team2_key, match_dt, event, fmt,
+        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+    )
+    p1 = float(artifact.predict_proba_team1([f1])[0])
+    p2 = float(artifact.predict_proba_team1([f2])[0])
+    return clamp(0.5 * (p1 + (1.0 - p2)), 1e-4, 1 - 1e-4)
+
+
+def _match_feature_pair(
+    engine: dict[str, Any],
+    team1_key: str,
+    team2_key: str,
+    match_dt: datetime | None,
+    event: str,
+    fmt: str,
+    analytics_match: dict[str, Any] | None = None,
+    match_context: dict[str, Any] | None = None,
+    extra_features: dict[str, float] | None = None,
+    announced_lineups: dict[str, Any] | None = None,
+    event_metadata: dict[str, Any] | None = None,
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Par de features simetrico (A vs B, B vs A). Compartido por el scoring y la
+    estimacion de incertidumbre (A2) para no duplicar logica."""
     state = engine["state"]
     fmt = fmt if fmt in {"bo1", "bo3", "bo5"} else "bo3"
     f1 = state.emit_features(team1_key, team2_key, match_dt, event or "", fmt)
@@ -684,9 +708,37 @@ def model_probability_team1(
     if extra_features:
         f1.update(model_external_features_for_order(extra_features, reverse=False))
         f2.update(model_external_features_for_order(extra_features, reverse=True))
-    p1 = float(artifact.predict_proba_team1([f1])[0])
-    p2 = float(artifact.predict_proba_team1([f2])[0])
-    return clamp(0.5 * (p1 + (1.0 - p2)), 1e-4, 1 - 1e-4)
+    return f1, f2
+
+
+def model_probability_and_uncertainty(
+    engine: dict[str, Any],
+    team1_key: str,
+    team2_key: str,
+    match_dt: datetime | None,
+    event: str,
+    fmt: str,
+    analytics_match: dict[str, Any] | None = None,
+    match_context: dict[str, Any] | None = None,
+    extra_features: dict[str, float] | None = None,
+    announced_lineups: dict[str, Any] | None = None,
+    event_metadata: dict[str, Any] | None = None,
+) -> tuple[float, float]:
+    """A2: (prob_team1 calibrada simetrica, std_epistemica del ensemble).
+
+    std = cuanto discrepan los miembros del ensemble => incertidumbre del modelo,
+    usada para reducir el stake cuando no lo tiene claro.
+    """
+    artifact = engine["artifact"]
+    f1, f2 = _match_feature_pair(
+        engine, team1_key, team2_key, match_dt, event, fmt,
+        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+    )
+    m1, s1 = artifact.predict_proba_team1_with_uncertainty([f1])
+    m2, s2 = artifact.predict_proba_team1_with_uncertainty([f2])
+    prob = clamp(0.5 * (float(m1[0]) + (1.0 - float(m2[0]))), 1e-4, 1 - 1e-4)
+    std = 0.5 * (float(s1[0]) + float(s2[0]))
+    return prob, std
 
 
 def logistic_probability(features: dict[str, float]) -> float:
@@ -1176,6 +1228,9 @@ def staking_recommendation(
     reliability = reliability_score(entry, features)
     cal_factor, ece, eval_n = model_calibration_factor(model_metadata)
     consensus_factor = market_consensus_factor(market)
+    # A2: penaliza el stake por incertidumbre epistemica (discrepancia del ensemble).
+    epistemic_std = safe_float(prediction.get("model_epistemic_std")) or 0.0
+    uncertainty_factor = 1.0 / (1.0 + 8.0 * epistemic_std) if epistemic_std > 0 else 1.0
     fractional_kelly = 0.25
     max_single_match = 0.025
 
@@ -1192,7 +1247,7 @@ def staking_recommendation(
             continue
         ev = p_model * decimal - 1.0
         raw_kelly = max(0.0, ev / (decimal - 1.0))
-        adjusted = raw_kelly * fractional_kelly * reliability * consensus_factor * cal_factor
+        adjusted = raw_kelly * fractional_kelly * reliability * consensus_factor * cal_factor * uncertainty_factor
         capped = min(adjusted, max_single_match)
         candidates.append(
             {
@@ -1247,6 +1302,8 @@ def staking_recommendation(
         "reliability_factor": reliability,
         "consensus_factor": consensus_factor,
         "calibration_factor": cal_factor,
+        "uncertainty_factor": round(uncertainty_factor, 4),
+        "model_epistemic_std": round(epistemic_std, 5) if epistemic_std else None,
         "walk_forward_ece": ece,
         "walk_forward_n": eval_n,
         "max_single_match_fraction": max_single_match,
@@ -2322,9 +2379,10 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             if roster_features.get("roster_available"):
                 features.update(roster_features)
 
+        model_epistemic_std = None
         if engine is not None:
             try:
-                model_p = model_probability_team1(
+                model_p, model_epistemic_std = model_probability_and_uncertainty(
                     engine,
                     t1,
                     t2,
@@ -2376,6 +2434,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         favorite_side = "team1" if model_p >= 0.5 else "team2"
         prediction = {
             "model_prob_team1": model_p,
+            "model_epistemic_std": round(model_epistemic_std, 5) if model_epistemic_std is not None else None,
             "odds_prob_team1": odds_p,
             "blended_prob_team1": blended,
             "risk_adjusted_prob_team1": decision["risk_adjusted_prob_team1"],
