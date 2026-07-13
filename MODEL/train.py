@@ -1200,6 +1200,50 @@ def model_b_eval(
     }
 
 
+def paired_significance(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]],
+                        n_boot: int = 2000, seed: int = 42) -> dict[str, Any]:
+    """A4: ¿es real la diferencia de log loss entre dos modelos, o es ruido?
+
+    Empareja por match_id, calcula la diferencia de log loss POR PARTIDO (a-b),
+    y devuelve CI95 bootstrap + Wilcoxon + MDE. `significant`=True si el intervalo
+    excluye 0 (a mejor que b => diferencia media negativa y ci_high<0).
+    """
+    a = {r["match_id"]: r for r in rows_a}
+    b = {r["match_id"]: r for r in rows_b}
+    ids = [i for i in a if i in b]
+    if len(ids) < 30:
+        return {"n": len(ids), "note": "muestra insuficiente (<30) para significancia"}
+
+    def _ll(r: dict[str, Any]) -> float:
+        p = min(max(float(r["prob_team1"]), 1e-9), 1 - 1e-9)
+        y = int(r["actual"])
+        return -(y * math.log(p) + (1 - y) * math.log(1 - p))
+
+    d = np.array([_ll(a[i]) - _ll(b[i]) for i in ids], dtype=float)
+    mean_d = float(d.mean())
+    sd = float(d.std(ddof=1)) if len(d) > 1 else 0.0
+    rng = np.random.RandomState(seed)
+    boots = np.array([d[rng.randint(0, len(d), len(d))].mean() for _ in range(n_boot)])
+    lo, hi = (float(x) for x in np.percentile(boots, [2.5, 97.5]))
+    try:
+        from scipy.stats import wilcoxon
+        wp = float(wilcoxon(d).pvalue) if np.any(d != 0) else 1.0
+    except Exception:
+        wp = None
+    mde = 2.80 * sd / math.sqrt(len(d)) if len(d) else None
+    return {
+        "n": len(ids),
+        "mean_logloss_diff": round(mean_d, 5),
+        "ci95_low": round(lo, 5),
+        "ci95_high": round(hi, 5),
+        "wilcoxon_p": (round(wp, 5) if wp is not None else None),
+        "sigma_d": round(sd, 5),
+        "mde_95_80": (round(mde, 5) if mde is not None else None),
+        "significant": bool(hi < 0),
+        "note": "a-b<0 y ci_high<0 => 'a' baja el log loss de forma significativa vs 'b'.",
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Entrena el modelo CS2 (Glicko-2 + LightGBM + calibración).")
     parser.add_argument("--raw", default="",
@@ -1321,6 +1365,26 @@ def main() -> int:
     best_name = min(candidates, key=lambda k: candidates[k]["log_loss"])
     print(f"      -> modelo de producción elegido por log loss: {best_name}")
 
+    # A4: significancia estadistica del modelo de produccion (bootstrap+Wilcoxon
+    # pareado sobre log loss por-partido) vs baseline Glicko y vs el 2o mejor.
+    ranked = sorted(candidates, key=lambda k: candidates[k]["log_loss"])
+    second_best = ranked[1] if len(ranked) > 1 else None
+    significance = {
+        "production_model": best_name,
+        "walk_forward_gap": args.wf_gap,
+        "vs_glicko_baseline": paired_significance(preds.get(best_name, []), preds.get("glicko", [])),
+    }
+    if second_best:
+        significance["vs_second_best"] = {
+            "model": second_best,
+            **paired_significance(preds.get(best_name, []), preds.get(second_best, [])),
+        }
+    _sg = significance["vs_glicko_baseline"]
+    if _sg.get("n"):
+        print(f"      significancia vs glicko: Δlogloss={_sg.get('mean_logloss_diff')} "
+              f"ci95=[{_sg.get('ci95_low')},{_sg.get('ci95_high')}] p={_sg.get('wilcoxon_p')} "
+              f"-> {'SIGNIFICATIVO' if _sg.get('significant') else 'no concluyente'}")
+
     # Evaluación segmentada por competitividad + benchmark de mercado.
     segments = segmented_eval(preds.get(best_name, []))
     favorite_accuracy = favorite_accuracy_bands(preds.get(best_name, []))
@@ -1410,6 +1474,7 @@ def main() -> int:
             "roster_features": feature_policies["roster"],
             "feature_policies": feature_policies,
             "walk_forward_metrics": metrics,
+            "significance": significance,
             "segmented_eval": segments,
             "market_benchmark": market,
             "model_b": model_b,
@@ -1461,6 +1526,7 @@ def main() -> int:
             cal_rows.append({"model": model, **b})
 
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (out / "significance.json").write_text(json.dumps(significance, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "favorite_accuracy_bands.json").write_text(
         json.dumps(favorite_accuracy, indent=2, ensure_ascii=False),
         encoding="utf-8",

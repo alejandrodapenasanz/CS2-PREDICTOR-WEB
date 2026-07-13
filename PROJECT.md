@@ -804,8 +804,9 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
   ensemble / bootstrap) expuesta por el artefacto → **encoge el stake** cuando duda.
 - ⬜ **A3. Calibración/auditoría por segmento** (tier, formato, LAN/online, banda de
   confianza), no solo global. Recalibración por segmento cuando supere N muestras.
-- ⬜ **A4. Purga + embargo en walk-forward + tests de significancia** (bootstrap/
-  Wilcoxon pareado sobre log loss por-partido; MDE ~0.002-0.005 nats).
+- ✅ **A4. Purga/embargo (`--wf-gap`) + tests de significancia** (bootstrap+Wilcoxon
+  pareado sobre log loss por-partido, CI95 + MDE) vs Glicko y vs 2º mejor →
+  `significance.json` y metadatos del artefacto.
 - ⬜ **A5. Poda de features / multicolinealidad** (VIF, permutation importance vs SHAP, RFE).
 - ⬜ **A6. Target más rico**: map-level (≈3× datos), ordinal 2-0/2-1/1-2/0-2, o multi-task
   con diferencia de rondas como target auxiliar. Habilita props.
