@@ -34,6 +34,7 @@ from datetime import datetime
 from typing import Any
 
 from .glicko2 import Glicko2, Rating, _Match
+from .trueskill import TeamTrueSkill, TSRating
 
 PERIOD_DAYS = 7           # periodo de rating semanal (alineado con ranking HLTV)
 FORM_HALF_LIFE = 120.0    # días: vida media del decaimiento de la forma
@@ -118,6 +119,12 @@ BASE_FEATURE_COLUMNS = [
     if column not in STRENGTH_INTERACTION_COLUMNS
 ]
 FEATURE_COLUMNS = DIFF_COLUMNS + SYM_COLUMNS
+
+# Rating alternativo TrueSkill (equipo, online). Prototipo detras de flag; NO
+# entra en FEATURE_COLUMNS ni en produccion salvo `--extra-rating trueskill`.
+# Ambas columnas son antisimetricas (DIFF): se niegan al intercambiar A<->B.
+TRUESKILL_DIFF_COLUMNS = ["trueskill_diff", "trueskill_prob_centered"]
+TRUESKILL_FEATURE_COLUMNS = TRUESKILL_DIFF_COLUMNS
 
 MAP_ASSET_DIFF_COLUMNS = [
     "asset_map_winrate_diff",
@@ -720,6 +727,11 @@ class ChronologicalState:
         # Elo baseline
         self.elos: dict[str, float] = defaultdict(lambda: 1500.0)
 
+        # TrueSkill de equipo (online, point-in-time). Se computa siempre (barato)
+        # pero solo entra al modelo si el flag lo incluye en las columnas.
+        self.trueskill = TeamTrueSkill()
+        self.ts_ratings: dict[str, TSRating] = {}
+
         # rolling de resultados (cada entrada lleva la fecha para decay)
         self.win_hist: dict[str, list[tuple[int, datetime | None]]] = defaultdict(list)
         self.diff_hist: dict[str, list[int]] = defaultdict(list)
@@ -894,6 +906,10 @@ class ChronologicalState:
         elo_a, elo_b = self.elos[a_key], self.elos[b_key]
         elo_prob = 1.0 / (1.0 + 10.0 ** (-(elo_a - elo_b) / 400.0))
 
+        ts_a = self.ts_ratings.get(a_key) or self.trueskill.default()
+        ts_b = self.ts_ratings.get(b_key) or self.trueskill.default()
+        ts_prob = self.trueskill.win_probability(ts_a, ts_b)
+
         pair = tuple(sorted((a_key, b_key)))
         pstats = self.h2h[pair]
         pn = pstats.get("n", 0)
@@ -950,6 +966,8 @@ class ChronologicalState:
             "glicko_rd_sum": ra.rd + rb.rd,
             "elo_diff": elo_a - elo_b,
             "elo_prob_centered": elo_prob - 0.5,
+            "trueskill_diff": ts_a.mu - ts_b.mu,
+            "trueskill_prob_centered": ts_prob - 0.5,
             "matches_log_diff": math.log1p(self.n_matches[a_key]) - math.log1p(self.n_matches[b_key]),
             "experience_min": float(min(self.n_matches[a_key], self.n_matches[b_key])),
             "experience_total": float(self.n_matches[a_key] + self.n_matches[b_key]),
@@ -1049,6 +1067,14 @@ class ChronologicalState:
         k = 32.0
         self.elos[a] = elo_a + k * (actual_a - exp_a)
         self.elos[b] = elo_b + k * ((1.0 - actual_a) - (1.0 - exp_a))
+
+        # TrueSkill: actualización online inmediata (ganador vs perdedor).
+        ts_a = self.ts_ratings.get(a) or self.trueskill.default()
+        ts_b = self.ts_ratings.get(b) or self.trueskill.default()
+        if a_won:
+            self.ts_ratings[a], self.ts_ratings[b] = self.trueskill.update(ts_a, ts_b)
+        else:
+            self.ts_ratings[b], self.ts_ratings[a] = self.trueskill.update(ts_b, ts_a)
 
         # rolling
         self.n_matches[a] += 1

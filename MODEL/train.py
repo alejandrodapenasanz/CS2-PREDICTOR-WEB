@@ -51,6 +51,8 @@ from cs2model.features import (
     EVENT_HISTORY_FEATURE_COLUMNS,
     RANKING_FEATURE_COLUMNS,
     ROSTER_FEATURE_COLUMNS,
+    TRUESKILL_FEATURE_COLUMNS,
+    TRUESKILL_DIFF_COLUMNS,
     EXTENDED_DIFF_COLUMNS,
     _period_index,
 )
@@ -71,7 +73,7 @@ ODDS_FEATURE_COLUMNS = [
     "opening_odds_confidence",
     "opening_bookmaker_count_log",
 ]
-EXTRA_DIFF_COLUMNS = {"opening_odds_prob_centered"}
+EXTRA_DIFF_COLUMNS = {"opening_odds_prob_centered", *TRUESKILL_DIFF_COLUMNS}
 ANALYTICS_MIN_TRAIN_ROWS = 120
 ANALYTICS_EXTENDED_MIN_TRAIN_ROWS = 200
 # Una alineacion anunciada completa tiene varias variables correlacionadas; se
@@ -230,6 +232,7 @@ MONOTONE_INCREASING = {
     "ranking_hltv_position_advantage", "ranking_hltv_points_diff",
     "ranking_valve_position_advantage", "ranking_valve_points_diff",
     "roster_days_log_diff", "roster_standin_risk_advantage",
+    "trueskill_diff", "trueskill_prob_centered",
 }
 CALIBRATION_METHODS = ("sigmoid", "isotonic", "beta")
 
@@ -1154,6 +1157,13 @@ def main() -> int:
         default="core",
         help="core para la ablacion; error-aware añade consenso, margen y desacuerdo point-in-time.",
     )
+    parser.add_argument(
+        "--extra-rating",
+        choices=("none", "trueskill"),
+        default="none",
+        help="Prototipo A/B: 'trueskill' añade rating TrueSkill de equipo (online, "
+             "point-in-time) como features. OFF por defecto (no cambia produccion).",
+    )
     parser.add_argument("--verbose", action="store_true",
                         help="Mostrar progreso detallado por fold y logs internos de LightGBM/CatBoost.")
     parser.add_argument("--no-promote", action="store_true",
@@ -1198,6 +1208,16 @@ def main() -> int:
     t0 = time.time()
     X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
     model_columns, feature_policies = select_feature_columns(X_dicts, args.feature_profile)
+    if args.extra_rating == "trueskill":
+        model_columns = list(model_columns) + list(TRUESKILL_FEATURE_COLUMNS)
+        feature_policies["extra_rating_trueskill"] = {
+            "available_rows": len(X_dicts),
+            "min_rows": 0,
+            "enabled": True,
+            "columns": list(TRUESKILL_FEATURE_COLUMNS),
+            "activation": "flag_extra_rating",
+            "note": "TrueSkill de equipo (online, point-in-time) activado por --extra-rating.",
+        }
     analytics_policy = feature_policies["analytics"]
     context_policy = feature_policies["context"]
     player_policy = feature_policies["player_snapshots"]
@@ -1355,6 +1375,7 @@ def main() -> int:
             "algorithm_request": list(args.algorithms),
             "algorithms_enabled": list(enabled_kinds),
             "feature_profile": args.feature_profile,
+            "extra_rating": args.extra_rating,
             "inner_split": "chronological_holdout",
             "form_half_life_days": args.form_half_life,
             "walk_forward_gap": args.wf_gap,
