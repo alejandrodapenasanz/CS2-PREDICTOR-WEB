@@ -43,6 +43,9 @@ MODEL/results/*.json
 MODEL/results/*.csv
 MODEL/results/professional_train_*/
 MODEL/results/full_train_catboost_*/
+MODEL/results/empirical_*/
+MODEL/results/WALKFORWARD_FAILURE_AUDIT.md
+MODEL/results/walkforward_failure_*.png
 context_calibration.json
 professional_training_output*.md
 WEB/data.js

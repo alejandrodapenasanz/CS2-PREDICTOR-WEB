@@ -6,11 +6,13 @@ import random
 import re
 import sys
 import time
+from calendar import monthrange
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import requests
 from parsel import Selector
@@ -66,6 +68,26 @@ KNOWN_STATS = [
     "Maps",
     "Rounds",
 ]
+
+# The compare page deliberately exposes a compact comparison table.  HLTV's
+# individual player page is the source for the remaining core pre-match stats.
+STAT_ALIASES = {
+    "assists per round": "APR",
+    "deaths per round": "DPR",
+    "kills per round": "KPR",
+    "kills / round": "KPR",
+    "assists / round": "APR",
+    "deaths / round": "DPR",
+    "damage / round": "ADR",
+    "average damage per round": "ADR",
+    "impact rating": "Impact",
+    "headshot %": "HS %",
+    "opening kills per round": "Opening KPR",
+    "opening deaths per round": "Opening DPR",
+    "flash assists per round": "Flash assists",
+    "maps played": "Maps",
+}
+PLAYER_DETAIL_REQUIRED_STATS = ("Rating 3.0", "KPR", "DPR", "APR", "KAST", "Impact", "ADR")
 
 
 @dataclass(frozen=True)
@@ -150,6 +172,31 @@ def compare_url(
     )
 
 
+def _shift_months(value: date, months: int) -> date:
+    target_month = value.month - months
+    target_year = value.year
+    while target_month <= 0:
+        target_month += 12
+        target_year -= 1
+    return date(target_year, target_month, min(value.day, monthrange(target_year, target_month)[1]))
+
+
+def player_stats_url(player: PlayerRef, time_filter: str, as_of: date | None = None) -> str:
+    """Build an individual HLTV stats URL matching the chosen adaptive window."""
+    as_of = as_of or date.today()
+    params: dict[str, str] = {}
+    match = re.fullmatch(r"past(\d+)months", time_filter)
+    if match:
+        params = {
+            "startDate": _shift_months(as_of, int(match.group(1))).isoformat(),
+            "endDate": as_of.isoformat(),
+        }
+    elif time_filter.isdigit() and len(time_filter) == 4:
+        params = {"startDate": f"{time_filter}-01-01", "endDate": as_of.isoformat()}
+    suffix = f"?{urlencode(params)}" if params else ""
+    return f"https://www.hltv.org/stats/players/{player.id}/{player.slug}{suffix}"
+
+
 def clean_texts(selector: Selector) -> list[str]:
     texts = []
     for text in selector.css("body ::text").getall():
@@ -178,11 +225,11 @@ def nearest_numeric_after(texts: list[str], index: int, window: int = 5) -> str 
 
 
 def canonical_stat(text: str) -> str | None:
-    lowered = text.lower()
+    lowered = " ".join(text.lower().split())
     for stat in KNOWN_STATS:
         if lowered == stat.lower():
             return stat
-    return None
+    return STAT_ALIASES.get(lowered)
 
 
 def parse_stats_rows(selector: Selector) -> list[dict[str, Any]]:
@@ -270,6 +317,85 @@ def parse_compare_page(html: str, p1: PlayerRef, p2: PlayerRef, url: str, time_f
     }
 
 
+def _first_clean(values: list[str]) -> str | None:
+    for value in values:
+        cleaned = " ".join(value.split())
+        if cleaned:
+            return cleaned
+    return None
+
+
+def parse_player_profile_page(html: str, player: PlayerRef, url: str, time_filter: str) -> dict[str, Any]:
+    """Extract the individual fields omitted by HLTV's player comparison table."""
+    selector = Selector(text=html)
+    stats: dict[str, str] = {}
+
+    for wrapper in selector.css(".player-summary-stat-box-rating-wrapper"):
+        label = _first_clean(wrapper.css(".player-summary-stat-box-data-description-text::text").getall())
+        value = _first_clean(wrapper.css(".player-summary-stat-box-rating-data-text::text").getall())
+        canonical = canonical_stat(label or "")
+        if canonical and value is not None:
+            stats.setdefault(canonical, value)
+
+    for wrapper in selector.css(".player-summary-stat-box-data-wrapper"):
+        label = _first_clean(wrapper.css(".player-summary-stat-box-data-text.traditionalData::text").getall())
+        value = _first_clean(wrapper.css(".player-summary-stat-box-data.traditionalData::text").getall())
+        canonical = canonical_stat(label or "")
+        if canonical and value is not None:
+            stats.setdefault(canonical, value)
+
+    for row in selector.css("div.stats-row"):
+        values = [" ".join(value.split()) for value in row.xpath("./span/text()").getall()]
+        values = [value for value in values if value]
+        if len(values) < 2:
+            continue
+        canonical = canonical_stat(values[0])
+        if canonical:
+            stats.setdefault(canonical, values[1])
+
+    maps = stats.pop("Maps", None)
+    map_match = re.search(r"\d+", str(maps or ""))
+    return {
+        "url": url,
+        "time_filter": time_filter,
+        "maps": int(map_match.group()) if map_match else None,
+        "stats": stats,
+    }
+
+
+def has_stat_value(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "-", "--", "n/a", "na"}
+
+
+def player_stats_complete(stats: dict[str, Any] | None) -> bool:
+    stats = stats or {}
+    return all(has_stat_value(stats.get(key)) for key in PLAYER_DETAIL_REQUIRED_STATS)
+
+
+def comparison_details_complete(comparison: dict[str, Any]) -> bool:
+    players = comparison.get("players") or []
+    return bool(players) and all(player_stats_complete(player.get("stats")) for player in players)
+
+
+def merge_player_profile_stats(player: dict[str, Any], detail: dict[str, Any]) -> None:
+    compare_stats = dict(player.get("stats") or {})
+    profile_stats = dict(detail.get("stats") or {})
+    merged = dict(compare_stats)
+    # HLTV renders unavailable profile values as "-".  They are not a value
+    # and must neither replace a compare-page metric nor satisfy completeness.
+    merged.update({key: value for key, value in profile_stats.items() if has_stat_value(value)})
+    player["compare_stats"] = compare_stats
+    player["profile_stats"] = profile_stats
+    player["stats"] = merged
+    player["profile_url"] = detail.get("url")
+    player["profile_time_filter"] = detail.get("time_filter")
+    if detail.get("maps") is not None:
+        player["maps"] = detail["maps"]
+    player["detail_status"] = "ok" if player_stats_complete(merged) else "partial"
+
+
 def is_cloudflare_challenge(html: str) -> bool:
     head = html[:8000]
     return any(marker.lower() in head.lower() for marker in CHALLENGE_MARKERS)
@@ -314,7 +440,7 @@ def register_compare_success(verbose: bool) -> None:
     _COMPARE_BLOCK_STREAK = 0
 
 
-def register_compare_block(reason: str, verbose: bool) -> float:
+def register_compare_block(reason: str, verbose: bool, request_label: str = "request") -> float:
     global _COMPARE_BLOCK_STREAK, _COMPARE_COOLDOWN_UNTIL
     _COMPARE_BLOCK_STREAK += 1
     adaptive = min(
@@ -325,7 +451,7 @@ def register_compare_block(reason: str, verbose: bool) -> float:
         adaptive = max(adaptive, COMPARE_CIRCUIT_BREAKER_SLEEP + random.uniform(10.0, 45.0))
     _COMPARE_COOLDOWN_UNTIL = max(_COMPARE_COOLDOWN_UNTIL, time.monotonic() + adaptive)
     if verbose:
-        safe_print(f"  BLOCK compare {reason}; streak={_COMPARE_BLOCK_STREAK}; cooldown {adaptive:.1f}s")
+        safe_print(f"  BLOCK {request_label} {reason}; streak={_COMPARE_BLOCK_STREAK}; cooldown {adaptive:.1f}s")
     return adaptive
 
 
@@ -340,6 +466,7 @@ def fetch_compare_page_resilient(
     max_delay: float = 180.0,
     verbose: bool = False,
     max_cloudflare_streak: int = 3,
+    request_label: str = "compare",
 ) -> str:
     headers = {
         "User-Agent": session["user_agent"],
@@ -355,7 +482,7 @@ def fetch_compare_page_resilient(
     for attempt in range(attempts):
         try:
             if verbose:
-                safe_print(f"  GET compare attempt {attempt + 1}/{attempts}: {url}")
+                safe_print(f"  GET {request_label} attempt {attempt + 1}/{attempts}: {url}")
             wait_compare_cooldown(verbose)
             started = time.monotonic()
             response = http.get(url, headers=headers, cookies=cookies, timeout=timeout)
@@ -365,15 +492,15 @@ def fetch_compare_page_resilient(
             if response.status_code == 200 and not challenge:
                 register_compare_success(verbose)
                 if verbose:
-                    safe_print(f"  OK compare HTTP 200 {len(text)} bytes {elapsed:.1f}s")
+                    safe_print(f"  OK {request_label} HTTP 200 {len(text)} bytes {elapsed:.1f}s")
                 return text
             if response.status_code in BLOCK_HTTP_CODES or challenge:
                 last_error = RuntimeError(f"HLTV bloqueo/challenge HTTP {response.status_code}")
                 reason = "cloudflare_challenge" if challenge else f"HTTP {response.status_code}"
-                delay = register_compare_block(reason, verbose)
+                delay = register_compare_block(reason, verbose, request_label)
                 if challenge and max_cloudflare_streak > 0 and _COMPARE_BLOCK_STREAK >= max_cloudflare_streak:
                     raise CloudflareChallengeStop(
-                        f"Cloudflare challenge persistente en /stats/players/compare "
+                        f"Cloudflare challenge persistente en /stats/players/{request_label} "
                         f"(streak={_COMPARE_BLOCK_STREAK}). Refresca cf_session.json o reintenta mas tarde."
                     )
                 if attempt < attempts - 1:
@@ -382,13 +509,13 @@ def fetch_compare_page_resilient(
                         backoff_delay(attempt, response.headers.get("Retry-After"), base_delay, max_delay),
                     )
                     if verbose:
-                        safe_print(f"  BLOCK compare {reason}; wait {delay:.1f}s")
+                        safe_print(f"  BLOCK {request_label} {reason}; wait {delay:.1f}s")
                     time.sleep(delay)
                 continue
             response.raise_for_status()
             register_compare_success(verbose)
             if verbose:
-                safe_print(f"  OK compare HTTP {response.status_code} {len(text)} bytes {elapsed:.1f}s")
+                safe_print(f"  OK {request_label} HTTP {response.status_code} {len(text)} bytes {elapsed:.1f}s")
             return text
         except CloudflareChallengeStop:
             raise
@@ -556,6 +683,71 @@ def output_payload(
     return payload
 
 
+def enrich_comparison_with_player_profiles(
+    comparison: dict[str, Any],
+    *,
+    session: dict[str, str],
+    http: requests.Session,
+    args: argparse.Namespace,
+    requests_used: list[int],
+) -> str | None:
+    """Fill core stats from player pages, retaining compare-page-only metrics.
+
+    Returns a stop reason after checkpointable partial work.  A later invocation
+    resumes only the missing player profiles instead of re-fetching comparisons.
+    """
+    for player in comparison.get("players") or []:
+        if player_stats_complete(player.get("stats")):
+            player.setdefault("detail_status", "ok")
+            continue
+        if args.max_requests > 0 and requests_used[0] >= args.max_requests:
+            player["detail_status"] = "request_budget_reached"
+            return "request_budget_reached"
+        player_ref = PlayerRef(
+            id=str(player.get("id") or ""),
+            name=str(player.get("name") or ""),
+            slug=str(player.get("slug") or ""),
+            link=str(player.get("link") or ""),
+        )
+        if not player_ref.id or not player_ref.slug:
+            player["detail_status"] = "missing_player_identity"
+            continue
+        time_filter = str(player.get("selected_from_time_filter") or player.get("time_filter") or "past3months")
+        url = player_stats_url(player_ref, time_filter)
+        safe_print(f"  PROFILE {player_ref.name} [{time_filter}]")
+        try:
+            requests_used[0] += 1
+            html = fetch_compare_page_resilient(
+                url,
+                session,
+                http=http,
+                max_retries=args.max_retries,
+                base_delay=args.retry_base_delay,
+                max_delay=args.retry_max_delay,
+                verbose=args.verbose,
+                max_cloudflare_streak=args.max_cloudflare_streak,
+                request_label="player_profile",
+            )
+            detail = parse_player_profile_page(html, player_ref, url, time_filter)
+            merge_player_profile_stats(player, detail)
+            safe_print(
+                f"  PROFILE {'OK' if player['detail_status'] == 'ok' else 'PARTIAL'} "
+                f"{player_ref.name}: fields={len(detail.get('stats') or {})} maps={player.get('maps')}"
+            )
+        except CloudflareChallengeStop as exc:
+            player["detail_status"] = "blocked"
+            player["detail_error"] = str(exc)
+            return "cloudflare_challenge"
+        except Exception as exc:
+            player["detail_status"] = "error"
+            player["detail_error"] = f"{type(exc).__name__}: {exc}"
+            safe_print(f"  PROFILE FAIL {player_ref.name}: {player['detail_error']}", file=sys.stderr)
+        finally:
+            if args.delay:
+                time.sleep(args.delay)
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Scrapea /stats/players/compare de HLTV para jugadores de team_profiles.json."
@@ -590,6 +782,13 @@ def main() -> int:
         default=3,
         help="Corta y guarda parcial tras N challenges Cloudflare consecutivos; 0 = no cortar.",
     )
+    parser.add_argument(
+        "--no-player-profile-details",
+        dest="player_profile_details",
+        action="store_false",
+        help="No completa ADR/DPR/Impact desde el perfil individual de cada jugador.",
+    )
+    parser.set_defaults(player_profile_details=True)
     args = parser.parse_args()
 
     team_profiles_file = Path(args.team_profiles_file)
@@ -607,9 +806,10 @@ def main() -> int:
     results = list(existing.get("results") or [])
     failures = list(existing.get("failures") or [])
     completed = {comparison_key(item, str(args.year)) for item in results}
+    result_by_key = {comparison_key(item, str(args.year)): item for item in results}
     http = requests.Session()
     pairs = pairwise(players)
-    total_requests = len(pairs) * len(time_filters)
+    total_requests = len(pairs) * len(time_filters) + (len(players) if args.player_profile_details else 0)
     current = 0
     new_requests = 0
     safe_print(
@@ -627,7 +827,37 @@ def main() -> int:
         for pair_index, (p1, p2) in enumerate(pairs, start=1):
             key = (p1.id, p2.id, "adaptive")
             if key in completed:
-                safe_print(f"[{pair_index}/{total_pairs}] SKIP {p1.name} vs {p2.name} [adaptive]")
+                existing_result = result_by_key.get(key)
+                if args.player_profile_details and existing_result and not comparison_details_complete(existing_result):
+                    safe_print(f"[{pair_index}/{total_pairs}] RESUME PROFILE DETAILS {p1.name} vs {p2.name} [adaptive]")
+                    request_counter = [new_requests]
+                    detail_stop = enrich_comparison_with_player_profiles(
+                        existing_result,
+                        session=session,
+                        http=http,
+                        args=args,
+                        requests_used=request_counter,
+                    )
+                    new_requests = request_counter[0]
+                    write_json(
+                        output_file,
+                        output_payload(
+                            year=args.year,
+                            time_filters=time_filters,
+                            players_requested=len(players),
+                            results=results,
+                            failures=failures,
+                            stopped_reason=detail_stop,
+                            requests_attempted=new_requests,
+                            selection_mode="adaptive_recent_min_maps",
+                            min_maps=args.min_maps,
+                        ),
+                    )
+                    if detail_stop:
+                        safe_print(f"STOP player profile enrichment: {detail_stop}; partial output saved")
+                        return 0
+                else:
+                    safe_print(f"[{pair_index}/{total_pairs}] SKIP {p1.name} vs {p2.name} [adaptive]")
                 continue
             attempts_for_pair: list[dict[str, Any]] = []
             for time_filter in time_filters:
@@ -719,10 +949,54 @@ def main() -> int:
                 selected = adaptive_result(attempts_for_pair, p1=p1, p2=p2, min_maps=args.min_maps)
                 results.append(selected)
                 completed.add(key)
+                result_by_key[key] = selected
                 failures = [failure for failure in failures if failure_key(failure) != key]
                 chosen = [player.get("time_filter") for player in selected.get("players") or []]
                 maps = [player.get("maps") for player in selected.get("players") or []]
                 safe_print(f"[{pair_index}/{total_pairs}] SELECT {p1.name} vs {p2.name} windows={chosen} maps={maps}")
+
+                # Save the comparison before profile enrichment so Ctrl+C, a request
+                # budget, or Cloudflare can resume without repeating it.
+                write_json(
+                    output_file,
+                    output_payload(
+                        year=args.year,
+                        time_filters=time_filters,
+                        players_requested=len(players),
+                        results=results,
+                        failures=failures,
+                        requests_attempted=new_requests,
+                        selection_mode="adaptive_recent_min_maps",
+                        min_maps=args.min_maps,
+                    ),
+                )
+                if args.player_profile_details:
+                    request_counter = [new_requests]
+                    detail_stop = enrich_comparison_with_player_profiles(
+                        selected,
+                        session=session,
+                        http=http,
+                        args=args,
+                        requests_used=request_counter,
+                    )
+                    new_requests = request_counter[0]
+                    if detail_stop:
+                        write_json(
+                            output_file,
+                            output_payload(
+                                year=args.year,
+                                time_filters=time_filters,
+                                players_requested=len(players),
+                                results=results,
+                                failures=failures,
+                                stopped_reason=detail_stop,
+                                requests_attempted=new_requests,
+                                selection_mode="adaptive_recent_min_maps",
+                                min_maps=args.min_maps,
+                            ),
+                        )
+                        safe_print(f"STOP player profile enrichment: {detail_stop}; partial output saved")
+                        return 0
 
             write_json(
                 output_file,

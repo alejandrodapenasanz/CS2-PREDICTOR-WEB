@@ -231,6 +231,9 @@ python BBDD\ingest.py --run-dir <DAILY_SNAPSHOTS\runs\RUN_ID>  # upsert incremen
 python BBDD\export_master_json.py              # export compat desde SQLite
 python WEB\build_web.py                        # genera WEB\data.js
 python tests\tests_wallet_simulator.py --initial-wallet 100  # cartera + accuracy por franjas
+python MODEL\analyze_walkforward_errors.py       # auditoria OOS de fallos, CSV y graficos
+python MODEL\train.py --verbose                  # entrenamiento productivo: core + todos los algoritmos disponibles
+python MODEL\run_professional_training.py --algorithms all --feature-profile core --half-lives 45,60,90,120,180 --wf-gaps 0,1
 ```
 
 El simulador apuesta siempre al favorito puro del modelo. Las cuotas solo

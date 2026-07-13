@@ -42,6 +42,7 @@ TTL_DAYS = {
     "ranking_hltv": int(os.environ.get("BBDD_RANKING_TTL_DAYS", "7")),
     "ranking_valve": int(os.environ.get("BBDD_RANKING_TTL_DAYS", "7")),
 }
+PLAYER_CORE_STATS = ("Rating 3.0", "KPR", "DPR", "APR", "KAST", "Impact", "ADR")
 
 
 def utcnow() -> str:
@@ -55,6 +56,30 @@ def read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return default
+
+
+def player_stat_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "-", "--", "n/a", "na"}
+
+
+def player_snapshot_is_complete(player: dict[str, Any]) -> bool:
+    stats = player.get("stats") or {}
+    return all(player_stat_value_present(stats.get(key)) for key in PLAYER_CORE_STATS)
+
+
+def player_snapshot_fetch_status(player: dict[str, Any]) -> str:
+    if player_snapshot_is_complete(player):
+        return "ok"
+    try:
+        if int(player.get("maps")) <= 0:
+            # Schema-compatible: HLTV returned the player page but no usable
+            # sample exists for the selected window.
+            return "not_found"
+    except (TypeError, ValueError):
+        pass
+    return "partial"
 
 
 def parse_datetime(date_text: str | None, hour_text: str | None = None) -> str | None:
@@ -121,7 +146,7 @@ def entity_is_fresh(conn: sqlite3.Connection, entity_type: str, entity_key: str,
     ).fetchone()
     if not row or not row[0]:
         return False
-    return str(row[1]) in {"ok", "partial", "blocked", "error"} and str(row[0]) > now
+    return str(row[1]) in {"ok", "partial", "blocked", "not_found", "error"} and str(row[0]) > now
 
 
 def team_from_record(record: dict[str, Any], side: str) -> dict[str, Any] | None:
@@ -371,10 +396,12 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
         touched += upsert_fetch_state(conn, "team_profile", team_id, status, fetched_at=captured_at)
     for path in sorted(run_dir.glob("player_compare_stats_*.json")):
         payload = read_json(path, {})
-        status = "ok" if payload.get("comparisons_collected") else "partial"
         for comparison in payload.get("results") or []:
             for player in comparison.get("players") or []:
                 player_id = str(player.get("id") or "")
+                if not player_id:
+                    continue
+                status = player_snapshot_fetch_status(player)
                 touched += upsert_fetch_state(conn, "player_stats", player_id, status, fetched_at=captured_at)
     rankings = read_json(run_dir / "rankings_index.json", {})
     for key, entity_type in {"hltv": "ranking_hltv", "valve": "ranking_valve"}.items():
@@ -392,6 +419,46 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
     for path in sorted((run_dir / "match_snapshots").glob("*.json")):
         payload = read_json(path, {})
         touched += upsert_fetch_state(conn, "match_detail", str(payload.get("id") or path.stem), "ok", fetched_at=payload.get("captured_at") or captured_at)
+    return touched
+
+
+def reconcile_known_missing_player_stats(conn: sqlite3.Connection) -> int:
+    """Repair legacy `ok` states whose latest snapshot has no usable sample."""
+    rows = conn.execute(
+        """
+        WITH latest AS (
+            SELECT hltv_player_id, maps, rating, kpr, dpr, apr, kast, impact, adr,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY hltv_player_id
+                       ORDER BY captured_at_utc DESC, player_stat_snapshot_id DESC
+                   ) AS row_num
+            FROM player_stat_snapshots
+        )
+        SELECT hltv_player_id
+        FROM latest
+        WHERE row_num = 1
+          AND maps <= 0
+          AND NOT (rating IS NOT NULL AND kpr IS NOT NULL AND dpr IS NOT NULL
+                   AND apr IS NOT NULL AND kast IS NOT NULL AND impact IS NOT NULL AND adr IS NOT NULL)
+        """
+    ).fetchall()
+    touched = 0
+    fetched_at = utcnow()
+    for (player_id,) in rows:
+        state = conn.execute(
+            "SELECT last_status FROM fetch_state WHERE entity_type='player_stats' AND entity_key=?",
+            (str(player_id),),
+        ).fetchone()
+        if state and state[0] == "not_found":
+            continue
+        touched += upsert_fetch_state(
+            conn,
+            "player_stats",
+            str(player_id),
+            "not_found",
+            fetched_at=fetched_at,
+            note="HLTV returned no usable stats sample for the selected player window",
+        )
     return touched
 
 
@@ -473,6 +540,7 @@ def ingest_run(
         counts["predictions_rows"] += insert_predictions(conn, run_dir)
         counts["player_snapshot_flags"] += update_player_snapshot_flags(conn, run_dir)
         counts["fetch_state_rows"] += update_fetch_state_from_run(conn, run_dir)
+        counts["reconciled_player_fetch_state_rows"] += reconcile_known_missing_player_stats(conn)
         conn.commit()
 
         rows = dataio.load_training_rows_from_db(db_path)

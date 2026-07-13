@@ -462,6 +462,8 @@ def aggregate_player_stats(players: list[dict[str, Any]], time_filter: str | Non
             snapshot = player.get("stats")
         if not snapshot:
             continue
+        if (parse_int(snapshot.get("maps")) or 0) <= 0:
+            continue
         stats = snapshot.get("stats") or {}
         if stats:
             out["covered_players"] += 1
@@ -512,7 +514,11 @@ def roster_summary(team_id: str | None, profiles: dict[str, Any], player_stats: 
                 "preferred_time_filter": bundle.get("preferred_time_filter") if isinstance(bundle, dict) else None,
             }
         )
-    covered = [p for p in players if p["stats"]]
+    covered = [
+        player
+        for player in players
+        if player["stats"] and (parse_int(player["stats"].get("maps")) or 0) > 0
+    ]
     summary = {
         "coverage": len(covered) / max(len(players), 1),
         "players": players,

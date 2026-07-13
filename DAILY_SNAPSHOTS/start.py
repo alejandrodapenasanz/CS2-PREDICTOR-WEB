@@ -78,6 +78,7 @@ FETCH_CIRCUIT_BREAKER_SLEEP = float(os.environ.get("HLTV_CIRCUIT_BREAKER_SLEEP",
 FETCH_WARMUP_ENABLED = os.environ.get("HLTV_FETCH_WARMUP", "1").strip().lower() not in {"0", "false", "no"}
 FETCH_URL_QUARANTINE_SECONDS = float(os.environ.get("HLTV_URL_QUARANTINE_SECONDS", "900.0"))
 FETCH_MAX_HTTP_REQUESTS_PER_RUN = int(os.environ.get("HLTV_MAX_HTTP_REQUESTS_PER_RUN", "2500"))
+PLAYER_CORE_STAT_LABELS = ("Rating 3.0", "KPR", "DPR", "APR", "KAST", "Impact", "ADR")
 
 # --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
 # Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
@@ -230,7 +231,7 @@ def db_entity_is_fresh(entity_type: str, entity_key: str, now: str | None = None
         return False
     if not row or not row[0]:
         return False
-    return str(row[1]) in {"ok", "partial", "blocked", "error"} and str(row[0]) > now
+    return str(row[1]) in {"ok", "partial", "blocked", "not_found", "error"} and str(row[0]) > now
 
 
 def db_latest_team_profile(team_id: str) -> dict[str, Any] | None:
@@ -2782,15 +2783,68 @@ def collect_team_profiles(teams: dict[str, dict[str, Any]], run_dir: Path) -> li
     return profiles
 
 
-def team_profiles_players_are_fresh(team_profiles_file: Path) -> tuple[bool, int]:
+def player_stat_value_present(value: Any) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"", "-", "--", "n/a", "na"}
+
+
+def player_snapshot_has_core_stats(rows: list[dict[str, Any]]) -> bool:
+    return any(
+        all(player_stat_value_present((player.get("stats") or {}).get(label)) for label in PLAYER_CORE_STAT_LABELS)
+        for player in rows
+    )
+
+
+def player_snapshot_is_known_unavailable(rows: list[dict[str, Any]]) -> bool:
+    for player in rows:
+        try:
+            if int(player.get("maps")) <= 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def player_snapshot_quality(snapshots: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
+    field_coverage = {
+        label: sum(
+            1
+            for rows in snapshots.values()
+            if any(player_stat_value_present((player.get("stats") or {}).get(label)) for player in rows)
+        )
+        for label in PLAYER_CORE_STAT_LABELS
+    }
+    complete_players = sum(1 for rows in snapshots.values() if player_snapshot_has_core_stats(rows))
+    unavailable_players = sum(
+        1
+        for rows in snapshots.values()
+        if not player_snapshot_has_core_stats(rows) and player_snapshot_is_known_unavailable(rows)
+    )
+    return {
+        "core_complete_players": complete_players,
+        "known_unavailable_players": unavailable_players,
+        "resolved_players": complete_players + unavailable_players,
+        "field_coverage": field_coverage,
+    }
+
+
+def team_profiles_players_are_fresh(team_profiles_file: Path) -> tuple[bool, int, int]:
     profiles = read_json(team_profiles_file, [])
     if not profiles:
-        return True, 0
+        return True, 0, 0
     player_ids = player_ids_from_team_profiles_payload(profiles)
     if not player_ids:
-        return False, 0
+        return False, 0, 0
     fresh = sum(1 for player_id in player_ids if db_entity_is_fresh("player_stats", player_id))
-    return fresh == len(player_ids), fresh
+    snapshots = db_latest_player_snapshots(player_ids)
+    resolved = sum(
+        1
+        for player_id in player_ids
+        if player_snapshot_has_core_stats(snapshots.get(player_id, []))
+        or player_snapshot_is_known_unavailable(snapshots.get(player_id, []))
+    )
+    return fresh == len(player_ids) and resolved == len(player_ids), fresh, resolved
 
 
 def player_ids_from_team_profiles_payload(profiles: list[dict[str, Any]]) -> set[str]:
@@ -2825,6 +2879,7 @@ def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year
         }
         for time_filter, players in sorted(grouped.items())
     ]
+    quality = player_snapshot_quality(snapshots)
     payload = {
         "ok": True,
         "source": "BBDD.player_stat_snapshots",
@@ -2834,6 +2889,9 @@ def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year
         "players_requested": len(player_ids),
         "players_loaded": len(covered_ids),
         "coverage": len(covered_ids) / max(len(player_ids), 1),
+        "core_complete_players": quality["core_complete_players"],
+        "known_unavailable_players": quality["known_unavailable_players"],
+        "field_coverage": quality["field_coverage"],
         "comparisons_collected": len(results),
         "comparisons_failed": 0,
         "results": results,
@@ -2847,14 +2905,16 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
     if not team_profiles_file.exists():
         log("player stats: missing team_profiles.json")
         return {"ok": False, "reason": "missing_team_profiles"}
-    all_fresh, fresh_count = team_profiles_players_are_fresh(team_profiles_file)
+    all_fresh, fresh_count, complete_count = team_profiles_players_are_fresh(team_profiles_file)
     if all_fresh:
         cached = materialize_cached_player_stats(team_profiles_file, output, year)
         if cached:
             note_freshness_skip(fresh_count)
             log(
                 "player stats: materialized from BBDD cache; "
-                f"players_fresh={fresh_count} players_loaded={cached.get('players_loaded')}"
+                f"players_fresh={fresh_count} players_loaded={cached.get('players_loaded')} "
+                f"core_complete={cached.get('core_complete_players')} "
+                f"known_unavailable={cached.get('known_unavailable_players')}"
             )
             return {
                 "ok": True,
@@ -2864,11 +2924,20 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
                 "players_requested": cached.get("players_requested"),
                 "players_loaded": cached.get("players_loaded"),
                 "coverage": cached.get("coverage"),
+                "core_complete_players": cached.get("core_complete_players"),
+                "known_unavailable_players": cached.get("known_unavailable_players"),
+                "field_coverage": cached.get("field_coverage"),
                 "comparisons_collected": cached.get("comparisons_collected"),
                 "comparisons_failed": 0,
                 "source": "BBDD.player_stat_snapshots",
             }
         log("player stats: freshness said ok, but BBDD cache was empty; fetching")
+    elif fresh_count == len(player_ids_from_team_profiles(team_profiles_file)) and complete_count < fresh_count:
+        log(
+            "player stats: fresh cache has unresolved core fields; forcing profile refresh "
+            f"resolved={complete_count}/{fresh_count}",
+            force=True,
+        )
 
     def refresh_cf_session(reason: str) -> tuple[bool, str]:
         helper = SCRAPY_ROOT / "hltv_scraper" / "grab_cf.py"

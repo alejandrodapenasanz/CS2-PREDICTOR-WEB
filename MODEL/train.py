@@ -38,6 +38,8 @@ from cs2model import dataio
 from cs2model.features import (
     build_training_frame,
     FEATURE_COLUMNS,
+    BASE_FEATURE_COLUMNS,
+    STRENGTH_INTERACTION_COLUMNS,
     DIFF_COLUMNS,
     ANALYTICS_FEATURE_COLUMNS,
     CONTEXT_FEATURE_COLUMNS,
@@ -75,6 +77,23 @@ MAP_ASSET_MIN_TRAIN_ROWS = 200
 EVENT_HISTORY_MIN_TRAIN_ROWS = 200
 RANKING_MIN_TRAIN_ROWS = 200
 ROSTER_MIN_TRAIN_ROWS = 200
+ALL_ALGORITHMS = ("logistic", "lightgbm", "catboost", "xgboost", "random_forest")
+DEFAULT_ALGORITHMS = ALL_ALGORITHMS
+KIND_BY_ALGORITHM = {
+    "logistic": "logistic",
+    "lightgbm": "gbm",
+    "catboost": "catboost",
+    "xgboost": "xgboost",
+    "random_forest": "random_forest",
+}
+INDIVIDUAL_CANDIDATE = {
+    "logistic": "logistic_cal",
+    "gbm": "lightgbm_cal",
+    "catboost": "catboost_cal",
+    "xgboost": "xgboost_cal",
+    "random_forest": "random_forest_cal",
+}
+SUPER_LEARNER_MIN_HISTORY = 500
 
 AUTO_FEATURE_FAMILIES = (
     ("map_box_scores", MAP_ASSET_FEATURE_COLUMNS, "asset_available", MAP_ASSET_MIN_TRAIN_ROWS),
@@ -90,7 +109,10 @@ def _matrix(rows: list[dict[str, float]], cols: list[str]) -> np.ndarray:
     return np.array([[r.get(c, np.nan) for c in cols] for r in rows], dtype=float)
 
 
-def select_feature_columns(X_dicts: list[dict[str, float]]) -> tuple[list[str], dict[str, Any]]:
+def select_feature_columns(
+    X_dicts: list[dict[str, float]],
+    feature_profile: str = "error-aware",
+) -> tuple[list[str], dict[str, Any]]:
     context_rows = sum(1 for row in X_dicts if (row.get("context_available") or 0.0) >= 0.5)
     lan_rows = sum(1 for row in X_dicts if (row.get("context_is_lan") or 0.0) >= 0.5)
     online_rows = sum(1 for row in X_dicts if (row.get("context_is_online") or 0.0) >= 0.5)
@@ -100,8 +122,23 @@ def select_feature_columns(X_dicts: list[dict[str, float]]) -> tuple[list[str], 
         and lan_rows >= CONTEXT_MIN_ENV_ROWS
         and online_rows >= CONTEXT_MIN_ENV_ROWS
     )
-    columns = list(FEATURE_COLUMNS)
-    policies: dict[str, Any] = {}
+    use_strength_interactions = feature_profile == "error-aware"
+    columns = list(FEATURE_COLUMNS if use_strength_interactions else BASE_FEATURE_COLUMNS)
+    policies: dict[str, Any] = {
+        "strength_interactions": {
+            "available_rows": len(X_dicts),
+            "min_rows": 0,
+            "availability_column": "point_in_time_derived",
+            "enabled": use_strength_interactions,
+            "columns": list(STRENGTH_INTERACTION_COLUMNS) if use_strength_interactions else [],
+            "activation": "feature_profile_ablation",
+            "note": (
+                "Point-in-time consensus/disagreement features enabled."
+                if use_strength_interactions else
+                "Core ablation: consensus/disagreement features disabled."
+            ),
+        }
+    }
     for name, family_columns, availability_column, min_rows in AUTO_FEATURE_FAMILIES:
         available_rows = sum(
             1 for row in X_dicts
@@ -191,6 +228,56 @@ def _catboost_available() -> bool:
         return False
 
 
+def _xgboost_available() -> bool:
+    try:
+        import xgboost  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def parse_algorithms(raw: str) -> tuple[str, ...]:
+    requested = [item.strip().lower().replace("-", "_") for item in raw.split(",") if item.strip()]
+    if requested == ["all"]:
+        requested = list(ALL_ALGORITHMS)
+    unknown = sorted(set(requested) - set(ALL_ALGORITHMS))
+    if unknown:
+        raise argparse.ArgumentTypeError(f"Algoritmos desconocidos: {', '.join(unknown)}")
+    if not requested:
+        raise argparse.ArgumentTypeError("Debes indicar al menos un algoritmo.")
+    return tuple(dict.fromkeys(requested))
+
+
+def enabled_algorithm_kinds(algorithms: tuple[str, ...], no_catboost: bool = False) -> tuple[str, ...]:
+    enabled: list[str] = []
+    for algorithm in algorithms:
+        if algorithm == "catboost" and (no_catboost or not _catboost_available()):
+            continue
+        if algorithm == "xgboost" and not _xgboost_available():
+            continue
+        enabled.append(KIND_BY_ALGORITHM[algorithm])
+    return tuple(enabled)
+
+
+def chronological_holdout_indices(y: np.ndarray, fraction: float) -> tuple[np.ndarray, np.ndarray]:
+    """Último bloque como holdout, buscando un corte con ambas clases."""
+    n_rows = len(y)
+    if n_rows < 20:
+        raise ValueError("Se necesitan al menos 20 filas para un holdout temporal.")
+    target = max(1, min(n_rows - 1, int(round(n_rows * (1.0 - fraction)))))
+    radius = max(10, int(round(n_rows * 0.1)))
+    candidates = sorted(
+        range(max(1, target - radius), min(n_rows, target + radius + 1)),
+        key=lambda split: abs(split - target),
+    )
+    for split in candidates:
+        train_idx = np.arange(split)
+        holdout_idx = np.arange(split, n_rows)
+        if len(train_idx) and len(holdout_idx) and len(np.unique(y[train_idx])) == 2 and len(np.unique(y[holdout_idx])) == 2:
+            return train_idx, holdout_idx
+    raise ValueError("No existe un corte temporal con ambas clases en train y holdout.")
+
+
 def make_lgbm(monotone: list[int] | None = None, verbose: bool = False):
     try:
         from lightgbm import LGBMClassifier
@@ -256,6 +343,54 @@ def make_catboost(monotone: list[int] | None = None, verbose: bool = False):
     return CatBoostClassifier(**params)
 
 
+def make_xgboost(monotone: list[int] | None = None, verbose: bool = False):
+    try:
+        from xgboost import XGBClassifier
+    except Exception:
+        return None
+    params = dict(
+        n_estimators=700,
+        learning_rate=0.02,
+        max_depth=4,
+        min_child_weight=20.0,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_lambda=5.0,
+        reg_alpha=0.0,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=-1,
+        random_state=42,
+        verbosity=1 if verbose else 0,
+    )
+    if monotone is not None and any(monotone):
+        params["monotone_constraints"] = tuple(monotone)
+    return XGBClassifier(**params)
+
+
+def make_random_forest():
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.impute import SimpleImputer
+    from sklearn.pipeline import Pipeline
+
+    return Pipeline(
+        [
+            ("imputer", SimpleImputer(strategy="median")),
+            (
+                "model",
+                RandomForestClassifier(
+                    n_estimators=600,
+                    max_features="sqrt",
+                    min_samples_leaf=12,
+                    n_jobs=-1,
+                    random_state=42,
+                ),
+            ),
+        ]
+    )
+
+
 def make_logistic():
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
@@ -276,7 +411,13 @@ def _new_estimator(kind: str, cols: list[str], verbose: bool = False):
         return make_lgbm(_monotone_vector(cols), verbose=verbose)
     if kind == "catboost":
         return make_catboost(_monotone_vector(cols), verbose=verbose)
-    return make_logistic()
+    if kind == "xgboost":
+        return make_xgboost(_monotone_vector(cols), verbose=verbose)
+    if kind == "random_forest":
+        return make_random_forest()
+    if kind == "logistic":
+        return make_logistic()
+    raise ValueError(f"Tipo de estimador desconocido: {kind}")
 
 
 def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
@@ -284,12 +425,9 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
     """Ajusta el base con augmentacion por simetria y, en GBDT, early stopping
     sobre un holdout interno por log loss (evita fijar n_estimators a mano)."""
     est = _new_estimator(kind, cols, verbose=verbose)
-    if kind in ("gbm", "catboost"):
-        from sklearn.model_selection import train_test_split
-
+    if kind in ("gbm", "catboost", "xgboost"):
         try:
-            idx = np.arange(len(X_tr))
-            tr, va = train_test_split(idx, test_size=0.15, random_state=random_state, stratify=y_tr)
+            tr, va = chronological_holdout_indices(y_tr, 0.15)
             Xf, yf = augment(X_tr[tr], y_tr[tr], cols)
             if kind == "gbm":
                 try:
@@ -307,12 +445,19 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                     return est
                 except Exception:
                     pass  # HistGB fallback (early stopping interno) o firma distinta
-            else:  # catboost
+            elif kind == "catboost":
                 est.fit(
                     Xf, yf,
                     eval_set=(X_tr[va], y_tr[va]),
                     use_best_model=True,
                     verbose=100 if verbose else False,
+                )
+                return est
+            else:  # xgboost
+                est.fit(
+                    Xf, yf,
+                    eval_set=[(X_tr[va], y_tr[va])],
+                    verbose=50 if verbose else False,
                 )
                 return est
         except Exception:
@@ -344,10 +489,7 @@ def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: li
     El base se entrena sobre tr_idx (augmentado) y cada calibrador sobre cal_idx.
     Compartir el base hace barato comparar sigmoid/isotonica/beta por fold.
     """
-    from sklearn.model_selection import train_test_split
-
-    idx = np.arange(len(X_tr))
-    tr_idx, cal_idx = train_test_split(idx, test_size=cal_frac, random_state=random_state, stratify=y_tr)
+    tr_idx, cal_idx = chronological_holdout_indices(y_tr, cal_frac)
     base = _fit_base(kind, X_tr[tr_idx], y_tr[tr_idx], cols,
                      random_state=random_state, verbose=verbose)
     cals: dict[str, Any] = {}
@@ -369,21 +511,85 @@ def fit_calibrated(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str
     return base, (cals.get(method) or cals.get("sigmoid"))
 
 
-def candidate_specs(has_catboost: bool) -> dict[str, tuple[list[str], str]]:
-    """name -> (kinds, metodo_calibracion). Cada candidato es una media de
-    estimadores calibrados, reproducible como Components del artefacto. La
-    seleccion por log loss decide cual va a produccion (seguro por construccion)."""
+def candidate_specs(kinds: tuple[str, ...]) -> dict[str, tuple[list[str], str]]:
+    """name -> (kinds, método de calibración).
+
+    Además de los candidatos históricos, `super_learner_cal` combina sus
+    probabilidades con pesos convexos aprendidos sobre predicciones OOS previas.
+    Esto evita tanto el voto uniforme arbitrario como pesos negativos inestables.
+    """
     specs: dict[str, tuple[list[str], str]] = {
-        "logistic_cal": (["logistic"], "sigmoid"),
-        "lightgbm_cal": (["gbm"], "sigmoid"),
-        "ensemble_cal": (["logistic", "gbm"], "sigmoid"),
-        "ensemble_iso": (["logistic", "gbm"], "isotonic"),
-        "ensemble_beta": (["logistic", "gbm"], "beta"),
+        INDIVIDUAL_CANDIDATE[kind]: ([kind], "sigmoid")
+        for kind in kinds
     }
-    if has_catboost:
-        specs["catboost_cal"] = (["catboost"], "sigmoid")
+    if {"logistic", "gbm"}.issubset(kinds):
+        specs.update(
+            {
+                "ensemble_cal": (["logistic", "gbm"], "sigmoid"),
+                "ensemble_iso": (["logistic", "gbm"], "isotonic"),
+                "ensemble_beta": (["logistic", "gbm"], "beta"),
+            }
+        )
+    if {"logistic", "gbm", "catboost"}.issubset(kinds):
         specs["ensemble3_cal"] = (["logistic", "gbm", "catboost"], "sigmoid")
+    if len(kinds) >= 2:
+        specs["super_learner_cal"] = (list(kinds), "sigmoid")
     return specs
+
+
+def optimize_convex_weights(probabilities: np.ndarray, y: np.ndarray, l2: float = 0.002) -> np.ndarray:
+    """Pesos no negativos que suman uno y minimizan log loss regularizado."""
+    n_models = probabilities.shape[1]
+    equal = np.full(n_models, 1.0 / n_models)
+    if n_models == 1 or len(y) == 0:
+        return equal
+    try:
+        from scipy.optimize import minimize
+
+        clipped = np.clip(probabilities, 1e-4, 1 - 1e-4)
+
+        def objective(weights: np.ndarray) -> float:
+            blended = np.clip(clipped @ weights, 1e-4, 1 - 1e-4)
+            logloss = -np.mean(y * np.log(blended) + (1.0 - y) * np.log(1.0 - blended))
+            return float(logloss + l2 * np.sum((weights - equal) ** 2))
+
+        result = minimize(
+            objective,
+            equal,
+            method="SLSQP",
+            bounds=[(0.0, 1.0)] * n_models,
+            constraints={"type": "eq", "fun": lambda weights: float(np.sum(weights) - 1.0)},
+            options={"maxiter": 200, "ftol": 1e-10},
+        )
+        weights = np.asarray(result.x, dtype=float)
+        if result.success and np.isfinite(weights).all() and np.all(weights >= -1e-9):
+            weights = np.clip(weights, 0.0, 1.0)
+            total = weights.sum()
+            if total > 0:
+                return weights / total
+    except Exception:
+        pass
+    return equal
+
+
+def super_learner_weights(
+    preds: dict[str, list[dict[str, Any]]],
+    kinds: list[str] | tuple[str, ...],
+    min_history: int = SUPER_LEARNER_MIN_HISTORY,
+) -> np.ndarray:
+    component_names = [INDIVIDUAL_CANDIDATE[kind] for kind in kinds]
+    rows = [preds.get(name, []) for name in component_names]
+    equal = np.full(len(component_names), 1.0 / len(component_names))
+    if not rows or any(len(row) != len(rows[0]) for row in rows) or len(rows[0]) < min_history:
+        return equal
+    match_ids = [row["match_id"] for row in rows[0]]
+    if any([row["match_id"] for row in series] != match_ids for series in rows[1:]):
+        return equal
+    probabilities = np.column_stack(
+        [[float(row["prob_team1"]) for row in series] for series in rows]
+    )
+    y = np.asarray([int(row["actual"]) for row in rows[0]], dtype=float)
+    return optimize_convex_weights(probabilities, y)
 
 
 def _proba(est, X: np.ndarray) -> np.ndarray:
@@ -399,7 +605,7 @@ def walk_forward(
     warmup_weeks: int,
     min_train: int,
     gap: int = 0,
-    has_catboost: bool = False,
+    algorithm_kinds: tuple[str, ...] = ("logistic", "gbm"),
     verbose: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
     """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
@@ -415,8 +621,8 @@ def walk_forward(
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
 
-    specs = candidate_specs(has_catboost)
-    kinds = sorted({k for spec in specs.values() for k in spec[0]})
+    kinds = tuple(dict.fromkeys(algorithm_kinds))
+    specs = candidate_specs(kinds)
 
     for wi, period in enumerate(test_periods):
         train_mask = periods < (period - gap)
@@ -458,7 +664,7 @@ def walk_forward(
                 if verbose:
                     print(f"        fitting {kind}: FAILED", flush=True)
 
-        def _cand_pred(spec: tuple[list[str], str]) -> np.ndarray | None:
+        def _cand_pred(name: str, spec: tuple[list[str], str]) -> np.ndarray | None:
             est_kinds, method = spec
             arrs = []
             for k in est_kinds:
@@ -471,11 +677,19 @@ def walk_forward(
                 arrs.append(_proba(est, X_te))
             if not arrs:
                 return None
+            if name == "super_learner_cal":
+                weights = super_learner_weights(preds, est_kinds)
+                if verbose:
+                    text_weights = ", ".join(
+                        f"{kind}={weight:.3f}" for kind, weight in zip(est_kinds, weights)
+                    )
+                    print(f"        super learner weights: {text_weights}", flush=True)
+                return np.clip(np.average(np.vstack(arrs), axis=0, weights=weights), 1e-4, 1 - 1e-4)
             return np.clip(np.mean(arrs, axis=0), 1e-4, 1 - 1e-4)
 
         cand: dict[str, np.ndarray] = {}
         for name, spec in specs.items():
-            arr = _cand_pred(spec)
+            arr = _cand_pred(name, spec)
             if arr is not None:
                 cand[name] = arr
 
@@ -910,13 +1124,29 @@ def main() -> int:
                         help="Periodos de separacion train->test en walk-forward (anti-fuga).")
     parser.add_argument("--no-catboost", action="store_true",
                         help="No usar CatBoost como candidato aunque este instalado.")
+    parser.add_argument(
+        "--algorithms",
+        type=parse_algorithms,
+        default=DEFAULT_ALGORITHMS,
+        help="Lista separada por comas: logistic,lightgbm,catboost,xgboost,random_forest o all.",
+    )
+    parser.add_argument(
+        "--feature-profile",
+        choices=("core", "error-aware"),
+        default="core",
+        help="core para la ablacion; error-aware añade consenso, margen y desacuerdo point-in-time.",
+    )
     parser.add_argument("--verbose", action="store_true",
                         help="Mostrar progreso detallado por fold y logs internos de LightGBM/CatBoost.")
     parser.add_argument("--no-promote", action="store_true",
                         help="Guarda el artefacto en --output-dir, sin sobrescribir MODEL/artifacts/model.pkl ni registry.")
     args = parser.parse_args()
 
-    has_catboost = (not args.no_catboost) and _catboost_available()
+    enabled_kinds = enabled_algorithm_kinds(args.algorithms, no_catboost=args.no_catboost)
+    if not enabled_kinds:
+        raise SystemExit("No hay algoritmos disponibles. Instala dependencias o cambia --algorithms.")
+    has_catboost = "catboost" in enabled_kinds
+    has_xgboost = "xgboost" in enabled_kinds
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -949,7 +1179,7 @@ def main() -> int:
     print("[2/6] Construyendo features point-in-time…", flush=True)
     t0 = time.time()
     X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
-    model_columns, feature_policies = select_feature_columns(X_dicts)
+    model_columns, feature_policies = select_feature_columns(X_dicts, args.feature_profile)
     analytics_policy = feature_policies["analytics"]
     context_policy = feature_policies["context"]
     player_policy = feature_policies["player_snapshots"]
@@ -973,12 +1203,15 @@ def main() -> int:
     print("[3/6] Walk-forward semanal…", flush=True)
     print(f"      candidatos: {'con' if has_catboost else 'sin'} CatBoost · half_life={args.form_half_life:.0f}d · wf_gap={args.wf_gap}")
     t0 = time.time()
-    preds = walk_forward(X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
-                         args.min_train, gap=args.wf_gap, has_catboost=has_catboost,
-                         verbose=args.verbose)
+    preds = walk_forward(
+        X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
+        args.min_train, gap=args.wf_gap, algorithm_kinds=enabled_kinds,
+        verbose=args.verbose,
+    )
     metrics = summarize(preds)
-    print(f"      hecho en {time.time()-t0:.1f}s; n_test={metrics.get('ensemble_cal',{}).get('n',0)}")
-    specs = candidate_specs(has_catboost)
+    n_test = max((int(item.get("n", 0)) for item in metrics.values()), default=0)
+    print(f"      hecho en {time.time()-t0:.1f}s; n_test={n_test}")
+    specs = candidate_specs(enabled_kinds)
     model_order = ["base_rate", "elo", "glicko"] + list(specs.keys())
     for model in model_order:
         m = metrics.get(model)
@@ -1036,12 +1269,26 @@ def main() -> int:
         fitted_full[kind] = fit_calibrated_multi(kind, X_all, y_all, model_columns,
                                                  cal_frac=0.18, random_state=7,
                                                  verbose=args.verbose)
-    _component_kind = {"logistic": "logistic", "gbm": "lightgbm", "catboost": "catboost"}
-    weight = 1.0 / len(best_kinds)
+    _component_kind = {
+        "logistic": "logistic",
+        "gbm": "lightgbm",
+        "catboost": "catboost",
+        "xgboost": "xgboost",
+        "random_forest": "random_forest",
+    }
+    if best_name == "super_learner_cal":
+        component_weights = super_learner_weights(preds, best_kinds, min_history=1)
+    else:
+        component_weights = np.full(len(best_kinds), 1.0 / len(best_kinds))
+    print(
+        "      pesos finales: " + ", ".join(
+            f"{kind}={weight:.3f}" for kind, weight in zip(best_kinds, component_weights)
+        )
+    )
     components = []
-    for kind in best_kinds:
+    for kind, weight in zip(best_kinds, component_weights):
         est = fitted_full[kind][1].get(best_method) or fitted_full[kind][1].get("sigmoid")
-        components.append(Component(_component_kind.get(kind, kind), est, None, weight))
+        components.append(Component(_component_kind.get(kind, kind), est, None, float(weight)))
 
     print("[5/6] Importancia SHAP…", flush=True)
     gbm_base = fitted_full["gbm"][0]
@@ -1080,12 +1327,21 @@ def main() -> int:
                 "logistic_cal": "Logística (Platt)",
                 "lightgbm_cal": "LightGBM (Platt)",
                 "catboost_cal": "CatBoost (Platt)",
+                "xgboost_cal": "XGBoost (Platt)",
+                "random_forest_cal": "Random Forest (Platt)",
+                "super_learner_cal": "Super Learner temporal (pesos convexos, Platt)",
             }.get(best_name, best_name),
             "production_calibration": best_method,
             "production_components": [c.name for c in components],
+            "production_component_weights": {c.name: float(c.weight) for c in components},
+            "algorithm_request": list(args.algorithms),
+            "algorithms_enabled": list(enabled_kinds),
+            "feature_profile": args.feature_profile,
+            "inner_split": "chronological_holdout",
             "form_half_life_days": args.form_half_life,
             "walk_forward_gap": args.wf_gap,
             "catboost_enabled": has_catboost,
+            "xgboost_enabled": has_xgboost,
             "monotone_features": sorted(MONOTONE_INCREASING),
             "period_days": 7,
         },
@@ -1191,10 +1447,13 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         row("logistic_cal", "Logística (Platt)"),
         row("lightgbm_cal", "LightGBM (Platt)"),
         row("catboost_cal", "CatBoost (Platt)"),
+        row("xgboost_cal", "XGBoost (Platt)"),
+        row("random_forest_cal", "Random Forest (Platt)"),
         row("ensemble_cal", "Ensemble LGBM⊕Log (Platt)"),
         row("ensemble_iso", "Ensemble (isotónica)"),
         row("ensemble_beta", "Ensemble (beta)"),
         row("ensemble3_cal", "**Ensemble +CatBoost (Platt)**"),
+        row("super_learner_cal", "**Super Learner temporal (Platt)**"),
         f"\n> Modelo de producción elegido por menor log loss: **{artifact.metadata.get('production_model')}**.\n",
         "\n> Log loss y Brier son el objetivo (probabilidades calibradas), no solo accuracy.\n",
         "> El baseline 'elige al favorito' (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si lo supera en log loss/Brier/AUC.\n",

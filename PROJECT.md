@@ -221,7 +221,7 @@ Tablas clave y qué preservan:
 - `ingest_runs`: auditoria de cada run aplicado a SQLite: `run_id`, inicio/fin, estado, filas upserted y requests saltadas por frescura.
 - `raw_snapshots`: snapshots exactos de `run_manifest`, `upcoming_matches`, `match_snapshot`, `team_profile`, `player_compare_stats`, `predictions_enriched`, `match_assets`, `match_analytics`, `team_ranking`, `raw_html` y `data_quality_report`. Es el seguro contra que HLTV cambie o borre información después.
 - `matches.stage`, `matches.environment`, `matches.stage_detail`, `matches.incentive_label`, `matches.high_stakes`, `matches.opening_match`, `matches.winner_advances`, `matches.loser_eliminated`, `matches.bracket` y `matches.context_json`: contexto parseado del bloque `Maps` de HLTV. Guarda LAN/online, fase (group/swiss/playoff/etc.), detalle textual ("Winner advances...", "elimination match", Swiss record), flags consultables y el JSON completo para auditoría.
-- `player_stat_snapshots`: stats individuales capturadas en el run pre-partido desde `/stats/players/compare`: jugador HLTV, `time_filter` elegido de forma adaptativa (`past3months` si tiene muestra suficiente; si no `past6months`; si no `past12months`), rating, KPR, DPR, APR, KAST, Impact, ADR, Round Swing, multi-kill rating, AWP KPR, HS %, opening KPR/DPR, flash assists y `payload_json` completo. Esto conserva las stats **tal como estaban disponibles en ese momento**.
+- `player_stat_snapshots`: stats individuales capturadas en el run pre-partido desde `/stats/players/compare` y el perfil `/stats/players/{id}/{slug}`: jugador HLTV, `time_filter` elegido de forma adaptativa (`past3months` si tiene muestra suficiente; si no `past6months`; si no `past12months`), rating, KPR, DPR, APR, KAST, Impact, ADR, Round Swing, multi-kill rating, AWP KPR, HS %, opening KPR/DPR, flash assists y `payload_json` completo. Esto conserva las stats **tal como estaban disponibles en ese momento**.
 - `map_player_stats` y `map_player_side_stats`: box score real por jugador/mapa y por lado `total`/`ct`/`t` cuando el partido ya tiene assets/mapstats. Es la fuente granular para recalcular forma L5/L10/L20 sin consultar páginas históricas cambiantes.
 - `team_rosters`: pertenencia temporal real por jugador/equipo (`valid_from`, `valid_to`, `source_run_id`, `source_signature`). Un jugador no "es" de un equipo: estuvo en él durante un intervalo observado.
 - `odds`: cuotas por bookmaker y timestamp, separando `opening`, `live` y `closing`. La apertura sirve para benchmark y EV; el cierre se guarda para auditoría, no como feature pre-partido.
@@ -371,7 +371,8 @@ Features por equipo: Rating, KAST, ADR, KPR, DPR, Impact/Round Swing, opening ki
 Estado implementado:
 
 - Cada `start.ps1` captura `/stats/players/compare/{p1}/{slug1}/{p2}/{slug2}` para los jugadores detectados en rosters con **ventana adaptativa**: primero `past3months`; si algún jugador de la pareja no alcanza la muestra mínima (`10` mapas), prueba `past6months`; si sigue sin muestra, `past12months`. Se guarda por jugador la ventana más reciente suficientemente representativa; si ninguna llega al mínimo, se usa la ventana disponible con más mapas. El filtro de 9 meses no se usa porque no es un `timeFilter` estándar visible de HLTV; se prefiere no inventarlo.
-- La página **Full comparison** se usa como extractor de fichas individuales por parejas de jugadores, no como comparación todos-contra-todos. Después el proyecto agrega por equipo: media, máximo/estrella, mínimo/weak link, desviación, spread, star gap y weak-link gap. Eso mide el impacto de tener una estrella o un jugador muy por debajo sin diluirlo en una media simple.
+- La página **Full comparison** aporta Round Swing, multi-kill, AWP, opening y flashes, pero no expone de manera fiable ADR, DPR e Impact para ambos jugadores. Por eso el mismo ciclo completa el snapshot seleccionado con `/stats/players/{id}/{slug}` en la ventana equivalente. Un snapshot solo queda `ok` si contiene Rating 3.0, KPR, DPR, APR, KAST, Impact y ADR; el caché de tres días no oculta un snapshot incompleto y lo repara en el siguiente ciclo.
+- Después el proyecto agrega por equipo: media, máximo/estrella, mínimo/weak link, desviación, spread, star gap y weak-link gap. Eso mide el impacto de tener una estrella o un jugador muy por debajo sin diluirlo en una media simple.
 - Estas métricas quedan en `features`, `rosters` y `player_stat_snapshots`. El join cronologico usa solo snapshots con `captured_at_utc <= datetime_utc`; `MODEL/train.py` activa automaticamente sus columnas al llegar a 200 partidos cerrados con cobertura de ambos equipos.
 - Si HLTV no devuelve una métrica de forma inequívoca para ambos lados en el HTML parseable, se guarda el raw/payload y no se inventa el valor. Es preferible una cobertura parcial honesta a contaminar el modelo con números mal asignados.
 
@@ -573,13 +574,35 @@ Reglas de evaluación:
 
 ### 8.4. Análisis de fallos
 
-Tras cada tanda de resultados cerrados se genera un informe reproducible (`MODEL/results/FAILURE_ANALYSIS.md`) con:
+Hay dos auditorias separadas para no mezclar muestras:
 
-- métricas de `model`, `risk_adjusted` y `decision`;
-- segmentación por formato, banda de confianza, fiabilidad, disponibilidad de odds y flags;
-- comparación contra mercado en el subset con odds;
-- lista de fallos de alta confianza;
-- hipótesis de fallo separadas de la evidencia observada.
+- `MODEL/analyze_failures.py` genera `MODEL/results/FAILURE_ANALYSIS.md` sobre snapshots live cerrados: model/risk-adjusted/decision, odds, fiabilidad y flags operativos.
+- `MODEL/analyze_walkforward_errors.py` genera `MODEL/results/WALKFORWARD_FAILURE_AUDIT.md` sobre todas las predicciones historicas fuera de muestra. Une cada pronostico con sus features point-in-time, orienta las diferencias hacia el favorito y exporta todos los fallos localizados.
+
+La auditoria walk-forward aplica:
+
+- tasa de error, lift, risk ratio e intervalo Wilson por segmento;
+- Fisher/Mann-Whitney con correccion Benjamini-Hochberg FDR;
+- correlacion point-biserial, Cohen d, mutual information y matriz Spearman;
+- detector auxiliar de error con cinco splits cronologicos (ridge y gradient boosting) comparado contra `1 - confianza`;
+- CSV completo de fallos y lista enlazada de los errores de mayor confianza.
+
+Resultado medido el 2026-07-10 (`n=7.056`): 2.511 fallos; el 50,9% esta por debajo de 60% de confianza y solo el 2,0% por encima de 80%. El mejor detector auxiliar no mejora usar solo la confianza (delta AUC `-0,006`), por lo que no hay evidencia de una regla oculta estable con las features actuales. Glicko/Elo/winrate/score estan fuertemente correlacionados y representan sobre todo el mismo eje de distancia de fuerza.
+
+### 8.5. Intervenciones tras la auditoria de errores
+
+Los fallos no se reponderan manualmente ni reciben pesos negativos: log loss ya penaliza con mayor severidad las derrotas predichas con mucha seguridad y pesos por clase/error alterarian la interpretacion de probabilidad. La literatura sobre class weighting advierte precisamente esa incompatibilidad con calibracion; focal loss tampoco es estrictamente proper para estimar probabilidades. Referencias: Caplin et al. (2022), Charoenphakdee et al. (2021), Gneiting y Raftery (2007).
+
+Se implementan dos perfiles de features reproducibles:
+
+- `core` (produccion): features originales point-in-time.
+- `error-aware` (ablacion): consenso de Glicko/Elo/forma/formato, magnitud del margen, desacuerdo y acuerdo entre senales. Son simetricas al intercambiar equipos y no usan resultados futuros.
+
+En el A/B temporal con 9.499 series y 7.063 predicciones OOS, `core` obtuvo Super Learner log loss `0,632053`, Brier `0,221023`, ECE `0,011748`; `error-aware` obtuvo `0,632335`, `0,221136`, `0,011945`. Por tanto el perfil enriquecido queda disponible para futuras re-evaluaciones, pero no se activa por defecto: la diferencia no supera el umbral practico de promocion y empeora levemente las metricas probabilisticas.
+
+El entrenamiento ahora usa holdouts internos cronologicos para early stopping y calibracion. Compara logistica, LightGBM, CatBoost, XGBoost y Random Forest; ademas construye `super_learner_cal`, un ensemble con pesos no negativos que suman 1 y se aprenden solo de predicciones OOS anteriores. En el barrido completo del mismo protocolo, el Super Learner obtuvo log loss `0,6308`, Brier `0,2204`, ECE `0,0136`, accuracy `64,11%`; los pesos finales fueron logistica `0,401`, CatBoost `0,173`, Random Forest `0,426`, LightGBM `0`, XGBoost `0`.
+
+Referencias metodologicas: [Super Learner](https://doi.org/10.2202/1544-6115.1309), [Cross-validation temporal](https://www.sciencedirect.com/science/article/pii/S0020025511006773), [proper scoring rules](https://doi.org/10.1198/016214506000001437), [Counter-Strike ML](https://dspace.cvut.cz/handle/10467/99181), [XGBoost](https://arxiv.org/abs/1603.02754), [LightGBM](https://papers.nips.cc/paper/2017/hash/6449f44a102fde848669bdd9eb6b76fa-Abstract.html), [CatBoost](https://proceedings.neurips.cc/paper/2018/hash/14491b756b3a51daac41c24863285549-Abstract.html) y [Random Forests](https://doi.org/10.1023/A:1010933404324).
 
 Principio metodológico: que un flag aparezca en un fallo **no prueba causalidad**. Solo identifica un mecanismo plausible a testear con más muestra: map/veto incierto, roster reciente, baja cobertura de jugadores, BO1, schedule/fatiga, desacuerdo con mercado, etc.
 

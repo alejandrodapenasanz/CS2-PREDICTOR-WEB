@@ -452,7 +452,7 @@ def _team_player_snapshot_summary(
     for row in rows:
         by_player.setdefault(str(row["hltv_player_id"]), []).append(row)
     selected = [_pick_player_snapshot(player_rows, match_dt) for player_rows in by_player.values()]
-    selected = [row for row in selected if row is not None]
+    selected = [row for row in selected if row is not None and int(row["maps"] or 0) > 0]
     roster_size = max(len(by_player), 5)
     out: dict[str, Any] = {
         "coverage": len(selected) / roster_size if roster_size else 0.0,

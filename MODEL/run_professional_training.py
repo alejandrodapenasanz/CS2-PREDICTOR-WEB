@@ -143,6 +143,10 @@ def train_command(args: argparse.Namespace, half_life: float, wf_gap: int) -> li
         str(half_life),
         "--wf-gap",
         str(wf_gap),
+        "--algorithms",
+        args.algorithms,
+        "--feature-profile",
+        args.feature_profile,
     ]
     if args.raw:
         cmd += ["--raw", str(Path(args.raw).resolve())]
@@ -216,6 +220,17 @@ def main() -> int:
                         help="Do not retrain the final artifact with the best config.")
     parser.add_argument("--no-catboost", action="store_true",
                         help="Disable CatBoost candidates.")
+    parser.add_argument(
+        "--algorithms",
+        default="all",
+        help="Same list accepted by MODEL/train.py; use all for every implemented algorithm.",
+    )
+    parser.add_argument(
+        "--feature-profile",
+        choices=("core", "error-aware"),
+        default="core",
+        help="Feature ablation profile passed to MODEL/train.py.",
+    )
     parser.add_argument("--quiet-train", action="store_true",
                         help="Do not pass --verbose to MODEL/train.py.")
     parser.add_argument("--install-deps", action="store_true",
@@ -248,6 +263,8 @@ def main() -> int:
         report_fh.write(f"Git branch: `{git_value('branch', '--show-current')}`  \n")
         report_fh.write(f"Git commit: `{git_value('rev-parse', '--short', 'HEAD')}`  \n")
         report_fh.write(f"CatBoost requested: `{not args.no_catboost}`  \n")
+        report_fh.write(f"Algorithms: `{args.algorithms}`  \n")
+        report_fh.write(f"Feature profile: `{args.feature_profile}`  \n")
         report_fh.write(f"Half-lives: `{', '.join(map(str, args.half_lives))}`  \n")
         report_fh.write(f"WF gaps: `{', '.join(map(str, args.wf_gaps))}`  \n")
 

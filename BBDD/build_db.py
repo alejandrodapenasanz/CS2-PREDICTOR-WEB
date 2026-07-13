@@ -188,6 +188,14 @@ def stat_float(value) -> float | None:
         return None
 
 
+def first_stat_value(stats: dict, *keys: str):
+    for key in keys:
+        value = stats.get(key)
+        if value is not None and str(value).strip().lower() not in {"", "-", "--", "n/a", "na"}:
+            return value
+    return None
+
+
 def parse_int(value) -> int | None:
     if value is None:
         return None
@@ -961,13 +969,13 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                             match_filter,
                             map_filter,
                             parse_int(player.get("maps")),
-                            stat_float(stats.get("Rating 3.0")),
+                            stat_float(first_stat_value(stats, "Rating 3.0", "Rating 2.1", "Rating 2.0", "Rating 1.0")),
                             stat_float(stats.get("KPR")),
                             stat_float(stats.get("DPR")),
                             stat_float(stats.get("APR")),
                             stat_float(stats.get("KAST")),
                             stat_float(stats.get("Impact")),
-                            stat_float(stats.get("ADR") or stats.get("Average Damage per Round")),
+                            stat_float(first_stat_value(stats, "ADR", "Average Damage per Round", "Damage / Round")),
                             stat_float(stats.get("Round Swing")),
                             stat_float(stats.get("Multi-kill rating")),
                             stat_float(stats.get("AWP KPR")),

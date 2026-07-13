@@ -81,6 +81,11 @@ DIFF_COLUMNS = [
     "h2h_winrate_centered",
     "format_h2h_winrate_centered",
 ]
+STRENGTH_INTERACTION_DIFF_COLUMNS = [
+    "strength_consensus_prob_centered",
+    "strength_consensus_x_agreement",
+]
+DIFF_COLUMNS += STRENGTH_INTERACTION_DIFF_COLUMNS
 # SYM: simétricas (iguales al intercambiar A<->B).
 SYM_COLUMNS = [
     "glicko_rd_sum",
@@ -97,6 +102,20 @@ SYM_COLUMNS = [
     "format_bo1",
     "format_bo3",
     "format_bo5",
+]
+STRENGTH_INTERACTION_SYM_COLUMNS = [
+    "strength_margin_abs",
+    "strength_signal_disagreement",
+    "strength_signal_agreement",
+]
+SYM_COLUMNS += STRENGTH_INTERACTION_SYM_COLUMNS
+STRENGTH_INTERACTION_COLUMNS = (
+    STRENGTH_INTERACTION_DIFF_COLUMNS + STRENGTH_INTERACTION_SYM_COLUMNS
+)
+BASE_FEATURE_COLUMNS = [
+    column
+    for column in DIFF_COLUMNS + SYM_COLUMNS
+    if column not in STRENGTH_INTERACTION_COLUMNS
 ]
 FEATURE_COLUMNS = DIFF_COLUMNS + SYM_COLUMNS
 
@@ -678,6 +697,26 @@ class ChronologicalState:
         activity_2_b = self._activity(b_key, date_obj, 2)
         activity_7_a = self._activity(a_key, date_obj, 7)
         activity_7_b = self._activity(b_key, date_obj, 7)
+        winrate_decay_diff = self._winrate_decay(a_key, date_obj) - self._winrate_decay(b_key, date_obj)
+        format_winrate_diff = self._format_winrate(a_key, fmt) - self._format_winrate(b_key, fmt)
+
+        # Las señales están en una escala de probabilidad centrada comparable.
+        # Su consenso representa separación de fuerza; dispersión y acuerdo
+        # representan incertidumbre sin usar el resultado del partido.
+        strength_signals = [
+            glicko_prob - 0.5,
+            elo_prob - 0.5,
+            0.5 * winrate_decay_diff,
+            0.5 * (a_last20_wr - b_last20_wr),
+            0.5 * format_winrate_diff,
+        ]
+        strength_consensus = sum(strength_signals) / len(strength_signals)
+        strength_disagreement = math.sqrt(
+            sum((value - strength_consensus) ** 2 for value in strength_signals)
+            / len(strength_signals)
+        )
+        signs = [1.0 if value > 0 else -1.0 if value < 0 else 0.0 for value in strength_signals]
+        strength_agreement = abs(sum(signs)) / len(signs)
 
         feats = {
             "glicko_diff": ra.rating - rb.rating,
@@ -690,7 +729,7 @@ class ChronologicalState:
             "experience_min": float(min(self.n_matches[a_key], self.n_matches[b_key])),
             "experience_total": float(self.n_matches[a_key] + self.n_matches[b_key]),
             "winrate_diff": self._winrate(a_key) - self._winrate(b_key),
-            "winrate_decay_diff": self._winrate_decay(a_key, date_obj) - self._winrate_decay(b_key, date_obj),
+            "winrate_decay_diff": winrate_decay_diff,
             "last5_winrate_diff": a_last5_wr - b_last5_wr,
             "last10_winrate_diff": self._winrate(a_key, 10) - self._winrate(b_key, 10),
             "last20_winrate_diff": a_last20_wr - b_last20_wr,
@@ -716,7 +755,7 @@ class ChronologicalState:
             "format_matches_log_diff": math.log1p(self.format_n_matches[fa]) - math.log1p(self.format_n_matches[fb]),
             "format_experience_min": float(min(self.format_n_matches[fa], self.format_n_matches[fb])),
             "format_experience_total": float(self.format_n_matches[fa] + self.format_n_matches[fb]),
-            "format_winrate_diff": self._format_winrate(a_key, fmt) - self._format_winrate(b_key, fmt),
+            "format_winrate_diff": format_winrate_diff,
             "format_last5_winrate_diff": a_fmt_last5_wr - b_fmt_last5_wr,
             "format_last10_winrate_diff": self._format_winrate(a_key, fmt, 10) - self._format_winrate(b_key, fmt, 10),
             "format_winrate_trend_5v20_diff": (a_fmt_last5_wr - a_fmt_last20_wr) - (b_fmt_last5_wr - b_fmt_last20_wr),
@@ -749,6 +788,11 @@ class ChronologicalState:
             "format_bo1": float(fmt == "bo1"),
             "format_bo3": float(fmt == "bo3"),
             "format_bo5": float(fmt == "bo5"),
+            "strength_consensus_prob_centered": strength_consensus,
+            "strength_consensus_x_agreement": strength_consensus * strength_agreement,
+            "strength_margin_abs": abs(strength_consensus),
+            "strength_signal_disagreement": strength_disagreement,
+            "strength_signal_agreement": strength_agreement,
         }
         return feats
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 
 
@@ -11,7 +13,71 @@ sys.path.insert(0, str(ROOT))
 from DAILY_SNAPSHOTS import start
 
 
+PLAYER_SCRAPER = ROOT / "SCRAPPER" / "hltv-scraper-api" / "scripts" / "collect_player_compare_stats.py"
+PLAYER_SPEC = importlib.util.spec_from_file_location("player_compare_stats_test", PLAYER_SCRAPER)
+assert PLAYER_SPEC and PLAYER_SPEC.loader
+player_compare_stats = importlib.util.module_from_spec(PLAYER_SPEC)
+sys.modules[PLAYER_SPEC.name] = player_compare_stats
+PLAYER_SPEC.loader.exec_module(player_compare_stats)
+
+
 class HltvParserTests(unittest.TestCase):
+    def test_player_profile_parser_completes_core_snapshot(self) -> None:
+        html = """
+        <div class="player-summary-stat-box-rating-wrapper">
+          <div class="player-summary-stat-box-rating-data-text">1.12</div>
+          <div class="player-summary-stat-box-data-description-text">Rating 3.0</div>
+        </div>
+        <div class="player-summary-stat-box-data-wrapper">
+          <div class="player-summary-stat-box-data traditionalData">73.5%</div>
+          <div class="player-summary-stat-box-data-text traditionalData">KAST</div>
+        </div>
+        <div class="stats-row"><span>Kills / round</span><span>0.71</span></div>
+        <div class="stats-row"><span>Assists / round</span><span>0.16</span></div>
+        <div class="stats-row"><span>Deaths / round</span><span>0.62</span></div>
+        <div class="stats-row"><span>Damage / Round</span><span>79.4</span></div>
+        <div class="stats-row"><span>Impact rating</span><span>1.14</span></div>
+        <div class="stats-row"><span>Maps played</span><span>24</span></div>
+        """
+        player = player_compare_stats.PlayerRef("1", "Alpha", "alpha", "/stats/players/1/alpha")
+        parsed = player_compare_stats.parse_player_profile_page(
+            html,
+            player,
+            "https://www.hltv.org/stats/players/1/alpha",
+            "past3months",
+        )
+        self.assertEqual(parsed["maps"], 24)
+        self.assertEqual(parsed["stats"]["Rating 3.0"], "1.12")
+        self.assertEqual(parsed["stats"]["KPR"], "0.71")
+        self.assertEqual(parsed["stats"]["DPR"], "0.62")
+        self.assertEqual(parsed["stats"]["ADR"], "79.4")
+        self.assertTrue(player_compare_stats.player_stats_complete(parsed["stats"]))
+
+    def test_player_profile_url_uses_same_calendar_window(self) -> None:
+        player = player_compare_stats.PlayerRef("1", "Alpha", "alpha", "/stats/players/1/alpha")
+        url = player_compare_stats.player_stats_url(player, "past3months", date(2026, 7, 12))
+        self.assertIn("startDate=2026-04-12", url)
+        self.assertIn("endDate=2026-07-12", url)
+
+    def test_player_profile_missing_marker_is_not_a_statistic(self) -> None:
+        player = {
+            "stats": {
+                "Rating 3.0": "1.01",
+                "KPR": "0.68",
+                "APR": "0.17",
+                "KAST": "72.0%",
+                "Impact": "1.02",
+            }
+        }
+        player_compare_stats.merge_player_profile_stats(
+            player,
+            {"url": "https://example.test", "time_filter": "past3months", "maps": 0,
+             "stats": {"KPR": "-", "DPR": "-", "ADR": "-"}},
+        )
+        self.assertEqual(player["stats"]["KPR"], "0.68")
+        self.assertNotIn("ADR", player["stats"])
+        self.assertFalse(player_compare_stats.player_stats_complete(player["stats"]))
+
     def test_parse_veto_html(self) -> None:
         html = """
         <div class="standard-box veto-box"><div class="padding preformatted-text">Best of 3</div></div>
