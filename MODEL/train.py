@@ -789,6 +789,7 @@ def walk_forward(
             common = {
                 "match_id": m["id"], "date": m["date"], "event": m.get("event"),
                 "team1": m["team1"], "team2": m["team2"], "actual": int(y_te[i]),
+                "format": m.get("format"),
             }
             preds["base_rate"].append({**common, "prob_team1": base_rate})
             preds["elo"].append({**common, "prob_team1": float(elo_p[i])})
@@ -839,6 +840,27 @@ def segmented_eval(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "accuracy": round(float(np.mean((pp >= 0.5) == yy)), 4),
             "log_loss": round(float(np.mean(-(yy * np.log(pp) + (1 - yy) * np.log(1 - pp)))), 4),
         })
+    return out
+
+
+def segment_calibration(rows: list[dict[str, Any]], key: str = "format", min_n: int = 30) -> dict[str, Any]:
+    """A3: metricas + ECE por SEGMENTO (default: formato BO1/3/5).
+
+    Un ECE global bueno puede ocultar descalibracion por subgrupo. Segmentos con
+    <min_n se marcan como no concluyentes. (tier/LAN-online se añaden cuando esas
+    columnas de contexto esten activas.)
+    """
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        groups[str(r.get(key) or "unknown")].append(r)
+    out: dict[str, Any] = {}
+    for g, rs in groups.items():
+        if len(rs) < min_n:
+            out[g] = {"n": len(rs), "note": f"muestra <{min_n}; no concluyente"}
+            continue
+        y = np.array([x["actual"] for x in rs])
+        p = np.array([x["prob_team1"] for x in rs])
+        out[g] = metric_dict(y, p)
     return out
 
 
@@ -1388,6 +1410,11 @@ def main() -> int:
     # Evaluación segmentada por competitividad + benchmark de mercado.
     segments = segmented_eval(preds.get(best_name, []))
     favorite_accuracy = favorite_accuracy_bands(preds.get(best_name, []))
+    segment_cal = {"by_format": segment_calibration(preds.get(best_name, []), "format")}
+    print("      calibracion por formato:")
+    for g, mm in segment_cal["by_format"].items():
+        if mm.get("log_loss") is not None:
+            print(f"        {g:6s} n={mm['n']:5d} logloss={mm['log_loss']:.3f} ece={mm['ece_10']:.3f}")
     print("      por competitividad:")
     for s in segments:
         print(f"        {s['band']:18s} n={s['n']:5d} ({s['share']*100:4.1f}%) acc={s['accuracy']:.3f} logloss={s['log_loss']:.3f}")
@@ -1475,6 +1502,7 @@ def main() -> int:
             "feature_policies": feature_policies,
             "walk_forward_metrics": metrics,
             "significance": significance,
+            "segment_calibration": segment_cal,
             "segmented_eval": segments,
             "market_benchmark": market,
             "model_b": model_b,
@@ -1527,6 +1555,7 @@ def main() -> int:
 
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
     (out / "significance.json").write_text(json.dumps(significance, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out / "segment_calibration.json").write_text(json.dumps(segment_cal, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "favorite_accuracy_bands.json").write_text(
         json.dumps(favorite_accuracy, indent=2, ensure_ascii=False),
         encoding="utf-8",

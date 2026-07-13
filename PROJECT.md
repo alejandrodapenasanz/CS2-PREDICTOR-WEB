@@ -803,8 +803,9 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 - ✅ **A2. Incertidumbre epistémica** — `artifact.predict_proba_team1_with_uncertainty`
   (std ponderada entre miembros del ensemble); `enrich` la expone (`model_epistemic_std`)
   y **reduce el stake** vía `uncertainty_factor` cuando el ensemble discrepa.
-- ⬜ **A3. Calibración/auditoría por segmento** (tier, formato, LAN/online, banda de
-  confianza), no solo global. Recalibración por segmento cuando supere N muestras.
+- 🟡 **A3. Calibración/auditoría por segmento** — `segment_calibration` por **formato**
+  (ECE/log loss/Brier por BO1/3/5) → `segment_calibration.json` + metadatos. Tier/
+  LAN-online se añaden cuando esas columnas de contexto estén activas.
 - ✅ **A4. Purga/embargo (`--wf-gap`) + tests de significancia** (bootstrap+Wilcoxon
   pareado sobre log loss por-partido, CI95 + MDE) vs Glicko y vs 2º mejor →
   `significance.json` y metadatos del artefacto.
@@ -828,7 +829,9 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 - ⬜ **C13. Config centralizada** (umbrales/hiperparámetros a `config.yaml`/dataclass versionada).
 - ⬜ **C14. CI + `ruff` + `mypy` + smoke de pipeline** en cada commit.
 - 🟡 **C15. Reproducibilidad determinista** (semillas + versionado de datos/config por experimento). Parcial.
-- ⬜ **C16. Auditoría de fuga exhaustiva** (test que verifique `data_up_to_utc < match_date` en TODA feature).
+- ✅ **C16. Auditoría de fuga exhaustiva** — `tests/test_leakage_audit.py`: verifica que
+  las features rolling de cada partido son idénticas al reconstruir el estado solo con
+  partidos anteriores (garantía point-in-time).
 - ⬜ **C17. Backtest económico realista** (vig, límites de casa, cierre al momento, **CLV**).
 
 ### Prioridad (impacto/coste)
