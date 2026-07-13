@@ -737,6 +737,9 @@ class ChronologicalState:
         self.format_h2h: dict[tuple[str, str, str], dict[str, int]] = defaultdict(lambda: {"n": 0})
         self.event_stats: dict[tuple[str, str], dict[str, int]] = defaultdict(lambda: {"n": 0, "w": 0})
         self.asset_map_hist: dict[tuple[str, str], list[int]] = defaultdict(list)
+        # Indice por equipo (todos los mapas concatenados) para evitar escanear
+        # TODAS las claves (equipo,mapa) en cada llamada a _asset_map_winrate.
+        self.asset_map_results_by_team: dict[str, list[int]] = defaultdict(list)
         self.asset_team_maps: dict[str, int] = defaultdict(int)
         self.asset_ct_rounds: dict[str, list[tuple[int, int]]] = defaultdict(list)
         self.asset_t_rounds: dict[str, list[tuple[int, int]]] = defaultdict(list)
@@ -816,7 +819,18 @@ class ChronologicalState:
     def _activity(self, key: str, as_of: datetime | None, days: int) -> float:
         if as_of is None:
             return 0.0
-        return float(sum(0 < (as_of - d).days <= days for d in self.match_dates[key]))
+        # match_dates esta ordenado ascendente (append cronologico), asi que al
+        # recorrer del mas reciente al mas antiguo el delta crece de forma
+        # monotona: en cuanto supera la ventana, se corta. Resultado identico al
+        # sum() original, pero O(partidos en ventana) en vez de O(historial).
+        count = 0
+        for d in reversed(self.match_dates[key]):
+            delta = (as_of - d).days
+            if delta > days:
+                break
+            if delta > 0:
+                count += 1
+        return float(count)
 
     def _avg_opp_elo(self, key: str, last: int = 10) -> float:
         hist = self.opp_elo_hist[key][-last:]
@@ -842,10 +856,10 @@ class ChronologicalState:
         return sum(hist) / len(hist) if hist else 1500.0
 
     def _asset_map_winrate(self, key: str, last: int | None = None) -> float:
-        hist: list[int] = []
-        for team_key, _map_name in list(self.asset_map_hist.keys()):
-            if team_key == key:
-                hist.extend(self.asset_map_hist[(team_key, _map_name)])
+        # O(mapas del equipo) usando el indice por equipo, en vez de O(todas las
+        # claves (equipo,mapa)). Con last=None (uso real) el resultado es identico
+        # al de concatenar todas las listas por mapa de ese equipo.
+        hist = self.asset_map_results_by_team.get(key, [])
         hist = hist if last is None else hist[-last:]
         return _laplace_winrate(sum(hist), len(hist))
 
@@ -1114,6 +1128,8 @@ class ChronologicalState:
             if left_score is not None and right_score is not None and left_score != right_score:
                 self.asset_map_hist[(left_key, map_name)].append(int(left_score > right_score))
                 self.asset_map_hist[(right_key, map_name)].append(int(right_score > left_score))
+                self.asset_map_results_by_team[left_key].append(int(left_score > right_score))
+                self.asset_map_results_by_team[right_key].append(int(right_score > left_score))
                 self.asset_team_maps[left_key] += 1
                 self.asset_team_maps[right_key] += 1
 
