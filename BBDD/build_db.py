@@ -223,25 +223,6 @@ def table_count(conn: sqlite3.Connection, table: str) -> int:
         return 0
 
 
-def latest_enriched() -> Path | None:
-    runs = ROOT / "DAILY_SNAPSHOTS" / "runs"
-    if not runs.exists():
-        return None
-    manifest_path = ROOT / "DAILY_SNAPSHOTS" / "master" / "manifest.json"
-    if manifest_path.exists():
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            run_id = manifest.get("last_run_id")
-            if run_id:
-                preferred = runs / run_id / "predictions_enriched.json"
-                if preferred.exists():
-                    return preferred
-        except json.JSONDecodeError:
-            pass
-    files = sorted(runs.glob("*/predictions_enriched.json"))
-    return files[-1] if files else None
-
-
 def safe_float(value) -> float | None:
     try:
         return float(value)
@@ -1586,29 +1567,16 @@ def seed_database_once(
     return stats
 
 
-def ingest(
-    raw_path: Path,
-    db_path: Path,
-    enriched_path: Path | None,
-    master_path: Path | None = DEFAULT_MASTER,
-    backup_dir: Path | None = DEFAULT_BACKUP_DIR,
-    mirror_backup_dir: Path | None = DEFAULT_MIRROR_BACKUP_DIR,
-) -> dict:
-    return seed_database_once(raw_path, db_path, master_path, backup_dir, mirror_backup_dir)
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(description="Inicializa/siembra la BBDD viva SQLite del predictor CS2.")
     parser.add_argument("--raw", default=str(DEFAULT_RAW))
     parser.add_argument("--db", default=str(DEFAULT_DB))
-    parser.add_argument("--enriched", default="")
     parser.add_argument("--master", default=str(DEFAULT_MASTER))
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR))
     parser.add_argument("--mirror-backup-dir", default=str(DEFAULT_MIRROR_BACKUP_DIR))
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--no-mirror-backup", action="store_true")
     args = parser.parse_args()
-    enriched = Path(args.enriched) if args.enriched else latest_enriched()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
     mirror_dir = None if args.no_backup or args.no_mirror_backup else Path(args.mirror_backup_dir)
     stats = seed_database_once(
