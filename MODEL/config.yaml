@@ -1,0 +1,89 @@
+version: 1
+random_seed: 42
+
+training:
+  warmup_weeks: 10
+  min_train_rows: 800
+  form_half_life_days: 120.0
+  recency_half_life_days: 365.0
+  walk_forward_gap_periods: 0
+  feature_profile: core
+  optuna_trials: 8
+  optuna_retune_weeks: 26
+  final_calibration_fraction: 0.18
+
+feature_thresholds:
+  map_box_scores: 200
+  event_history: 200
+  analytics: 120
+  analytics_extended: 200
+  announced_lineups: 200
+  event_metadata: 300
+  player_snapshots: 200
+  rankings: 200
+  roster: 200
+  mov_rating: 800
+  team_trueskill: 800
+  player_rating: 200
+  strength_of_schedule: 800
+  bayesian_bradley_terry: 800
+  kalman_state_space: 800
+  bo3_map_compositional: 500
+  regime: 200
+  context_total: 200
+  context_per_environment: 50
+  rich_target_total: 2000
+  rich_target_per_class: 300
+
+estimators:
+  logistic:
+    max_iter: 2000
+    c_default: 0.5
+  lightgbm:
+    n_estimators: 2000
+    learning_rate: 0.02
+    num_leaves: 31
+    min_child_samples: 80
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_lambda: 5.0
+  catboost:
+    iterations: 2000
+    learning_rate: 0.02
+    depth: 5
+    l2_leaf_reg: 6.0
+  xgboost:
+    n_estimators: 700
+    learning_rate: 0.02
+    max_depth: 4
+    min_child_weight: 20.0
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_lambda: 5.0
+  random_forest:
+    n_estimators: 600
+    min_samples_leaf: 12
+
+drift:
+  rolling_window: 200
+  reference_window: 500
+  min_samples: 50
+  page_hinkley_delta: 0.005
+  page_hinkley_threshold: 5.0
+  warning_log_loss_ratio: 1.10
+  warning_mean_clv: -0.02
+  regime_map_window_days: 120
+  regime_previous_window_days: 120
+  regime_min_observed_maps: 20
+
+economic_backtest:
+  initial_bankroll: 1000.0
+  kelly_multiplier: 0.25
+  max_stake_fraction: 0.025
+  min_stake_amount: 1.0
+  max_stake_amount: 100.0
+  max_profit_amount: 5000.0
+  min_expected_roi: 0.0
+  execution_odds_haircut: 0.0
+  require_closing_odds: false
+

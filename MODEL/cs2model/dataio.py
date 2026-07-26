@@ -139,7 +139,7 @@ def _match_context_payload(rec: dict[str, Any], asset_payload: dict[str, Any] | 
         raw_meta = context.get("raw_meta")
         if raw_meta and parse_match_context_meta:
             try:
-                return parse_match_context_meta(raw_meta)
+                return {**context, **parse_match_context_meta(raw_meta)}
             except Exception:
                 return context
         return context
@@ -151,7 +151,8 @@ def _match_context_payload(rec: dict[str, Any], asset_payload: dict[str, Any] | 
         meta = veto.get("meta")
         if meta and parse_match_context_meta:
             try:
-                return parse_match_context_meta(meta)
+                base_context = context if isinstance(context, dict) else {}
+                return {**base_context, **parse_match_context_meta(meta)}
             except Exception:
                 return None
     return None
@@ -282,6 +283,11 @@ def load_daily_completed(master_path: str | Path) -> list[dict[str, Any]]:
                 first_avg = _odds_average(oh[0])
                 if first_avg.get("team1_implied_prob_norm") is not None:
                     opening_avg = first_avg
+        closing_avg = _odds_average(rec.get("closing_odds"))
+        if closing_avg.get("team1_decimal") is None:
+            history = rec.get("odds_history") or []
+            if history:
+                closing_avg = _odds_average(history[-1])
         row = {
             "id": str(mid),
             "date": rec.get("date"),
@@ -304,10 +310,18 @@ def load_daily_completed(master_path: str | Path) -> list[dict[str, Any]]:
             "opening_odds_decimal_t2": opening_avg.get("team2_decimal"),
             "opening_odds_captured_at": opening_avg.get("captured_at"),
             "opening_bookmaker_count": opening_avg.get("bookmaker_count"),
+            "closing_odds_t1": closing_avg.get("team1_implied_prob_norm"),
+            "closing_odds_t2": closing_avg.get("team2_implied_prob_norm"),
+            "closing_odds_decimal_t1": closing_avg.get("team1_decimal"),
+            "closing_odds_decimal_t2": closing_avg.get("team2_decimal"),
+            "closing_odds_captured_at": closing_avg.get("captured_at"),
+            "closing_bookmaker_count": closing_avg.get("bookmaker_count"),
             "asset": asset_payload,
             "analytics": analytics_payload,
             "event_metadata": (analytics_payload or {}).get("event_metadata") or {},
             "match_context": context_payload,
+            "patch_version": (context_payload or {}).get("patch_version"),
+            "patch_released_at": (context_payload or {}).get("patch_released_at"),
         }
         rows.append(row)
     return rows
@@ -349,7 +363,9 @@ def _latest_snapshot_by_match(conn: sqlite3.Connection, kind: str) -> dict[str, 
     return out
 
 
-def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict[str, Any]]:
+    if market_type not in {"opening", "closing"}:
+        raise ValueError("market_type must be opening or closing")
     try:
         rows = conn.execute(
             """
@@ -357,14 +373,15 @@ def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]
                    odds.odds_t1, odds.odds_t2, odds.prob_t1, odds.prob_t2
             FROM odds
             LEFT JOIN matches m ON m.match_id = odds.match_id
-            WHERE odds.market_type = 'opening'
+            WHERE odds.market_type = ?
               AND (odds.prob_t1 IS NOT NULL OR odds.odds_t1 IS NOT NULL)
               -- Guard anti-fuga: descarta odds "opening" capturadas DESPUES del
               -- inicio del partido (no deberian existir, pero lo blinda).
               AND (odds.captured_at_utc IS NULL OR m.datetime_utc IS NULL
                    OR odds.captured_at_utc <= m.datetime_utc)
             ORDER BY odds.match_id, odds.captured_at_utc, odds.bookmaker
-            """
+            """,
+            (market_type,),
         ).fetchall()
     except sqlite3.Error:
         return {}
@@ -378,10 +395,13 @@ def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]
         odds1: list[float] = []
         odds2: list[float] = []
         bookmakers: set[str] = set()
-        captured_at = items[0]["captured_at_utc"]
+        captured_at = (
+            items[0]["captured_at_utc"]
+            if market_type == "opening" else items[-1]["captured_at_utc"]
+        )
         for item in items:
             if item["captured_at_utc"] != captured_at:
-                break
+                continue
             if item["bookmaker"]:
                 bookmakers.add(str(item["bookmaker"]))
             if item["prob_t1"] is not None:
@@ -401,6 +421,14 @@ def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]
             "bookmaker_count": len(bookmakers) or len(items),
         }
     return out
+
+
+def _opening_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    return _odds_by_match(conn, "opening")
+
+
+def _closing_odds_by_match(conn: sqlite3.Connection) -> dict[int, dict[str, Any]]:
+    return _odds_by_match(conn, "closing")
 
 
 PLAYER_TIME_FILTER_PRIORITY = ("past3months", "past6months", "past12months")
@@ -901,6 +929,7 @@ def load_training_rows_from_db(
     conn.row_factory = sqlite3.Row
     try:
         odds_by_match = _opening_odds_by_match(conn)
+        closing_odds_by_match = _closing_odds_by_match(conn)
         assets_by_hltv = _latest_snapshot_by_match(conn, "match_assets")
         rows = conn.execute(
             """
@@ -909,7 +938,8 @@ def load_training_rows_from_db(
                 m.environment, m.stage_detail, m.incentive_label, m.high_stakes,
                 m.opening_match, m.winner_advances, m.loser_eliminated, m.bracket,
                 m.context_json, m.score_t1, m.score_t2, m.winner_team_id,
-                e.name AS event_name, t1.name AS team1_name, t2.name AS team2_name,
+                e.name AS event_name, e.tier AS event_tier,
+                t1.name AS team1_name, t2.name AS team2_name,
                 t1.hltv_id AS team1_hltv_id, t2.hltv_id AS team2_hltv_id
             FROM matches m
             JOIN teams t1 ON t1.team_id = m.team1_id
@@ -970,6 +1000,7 @@ def load_training_rows_from_db(
             "bracket": row["bracket"],
         }
         opening_avg = odds_by_match.get(int(row["match_id"]), {})
+        closing_avg = closing_odds_by_match.get(int(row["match_id"]), {})
         analytics_payload = analytics_by_match.get(match_id)
         if not _analytics_is_point_in_time(
             analytics_payload,
@@ -983,6 +1014,7 @@ def load_training_rows_from_db(
                 "date": date_text,
                 "date_obj": parse_date(str(row["datetime_utc"])),
                 "event": row["event_name"] or "",
+                "event_tier": row["event_tier"],
                 "link": f"https://www.hltv.org/matches/{hltv_match_id}/",
                 "format": fmt,
                 "team1": row["team1_name"],
@@ -1000,10 +1032,18 @@ def load_training_rows_from_db(
                 "opening_odds_decimal_t2": opening_avg.get("team2_decimal"),
                 "opening_odds_captured_at": opening_avg.get("captured_at"),
                 "opening_bookmaker_count": opening_avg.get("bookmaker_count"),
+                "closing_odds_t1": closing_avg.get("team1_implied_prob_norm"),
+                "closing_odds_t2": closing_avg.get("team2_implied_prob_norm"),
+                "closing_odds_decimal_t1": closing_avg.get("team1_decimal"),
+                "closing_odds_decimal_t2": closing_avg.get("team2_decimal"),
+                "closing_odds_captured_at": closing_avg.get("captured_at"),
+                "closing_bookmaker_count": closing_avg.get("bookmaker_count"),
                 "asset": assets_by_hltv.get(hltv_match_id),
                 "analytics": analytics_payload,
                 "event_metadata": (analytics_payload or {}).get("event_metadata") or {},
                 "match_context": context_payload,
+                "patch_version": context_payload.get("patch_version"),
+                "patch_released_at": context_payload.get("patch_released_at"),
                 "prematch_lineups": prematch_lineups_by_match.get(match_id, {}),
                 "player_snapshot_features": player_features_by_match.get(match_id, {}),
                 **external_features_by_match.get(match_id, {}),

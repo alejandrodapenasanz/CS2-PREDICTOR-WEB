@@ -242,6 +242,31 @@ def db_entity_is_fresh(entity_type: str, entity_key: str, now: str | None = None
     return str(row[1]) in {"ok", "partial", "blocked", "not_found", "error"} and str(row[0]) > now
 
 
+def db_fresh_entity_keys(entity_type: str, entity_keys: set[str], now: str | None = None) -> set[str]:
+    if not BBDD_DB.exists() or not entity_keys:
+        return set()
+    now = now or now_utc()
+    placeholders = ",".join("?" for _ in entity_keys)
+    try:
+        conn = db_connect()
+        rows = conn.execute(
+            f"""
+            SELECT entity_key
+            FROM fetch_state
+            WHERE entity_type=?
+              AND entity_key IN ({placeholders})
+              AND last_status IN ('ok','partial','blocked','not_found','error')
+              AND next_eligible_at_utc IS NOT NULL
+              AND next_eligible_at_utc > ?
+            """,
+            (entity_type, *sorted(entity_keys), now),
+        ).fetchall()
+        conn.close()
+    except sqlite3.DatabaseError:
+        return set()
+    return {str(row[0]) for row in rows}
+
+
 def db_latest_team_profile(team_id: str) -> dict[str, Any] | None:
     if not BBDD_DB.exists() or not team_id:
         return None
@@ -278,10 +303,18 @@ def db_latest_player_snapshots(player_ids: set[str]) -> dict[str, list[dict[str,
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
             f"""
-            SELECT *
-            FROM player_stat_snapshots
-            WHERE hltv_player_id IN ({placeholders})
-            ORDER BY hltv_player_id, captured_at_utc DESC, player_stat_snapshot_id DESC
+            WITH latest_capture AS (
+                SELECT hltv_player_id, MAX(captured_at_utc) AS captured_at_utc
+                FROM player_stat_snapshots
+                WHERE hltv_player_id IN ({placeholders})
+                GROUP BY hltv_player_id
+            )
+            SELECT p.*
+            FROM player_stat_snapshots p
+            JOIN latest_capture l
+              ON l.hltv_player_id=p.hltv_player_id
+             AND l.captured_at_utc=p.captured_at_utc
+            ORDER BY p.hltv_player_id, p.player_stat_snapshot_id DESC
             """,
             tuple(sorted(player_ids)),
         ).fetchall()
@@ -3068,6 +3101,46 @@ def player_snapshot_is_known_unavailable(rows: list[dict[str, Any]]) -> bool:
     return False
 
 
+def choose_cached_player_snapshot(rows: list[dict[str, Any]], min_maps: int = 10) -> dict[str, Any] | None:
+    complete = [dict(player) for player in rows if player_snapshot_has_core_stats([player])]
+    priorities = {"past3months": 0, "past6months": 1, "past12months": 2}
+
+    def sort_key(player: dict[str, Any]) -> tuple[int, int]:
+        time_filter = str(player.get("time_filter") or "")
+        try:
+            maps = int(player.get("maps") or 0)
+        except (TypeError, ValueError):
+            maps = 0
+        return priorities.get(time_filter, 10), -maps
+
+    representative = sorted(
+        (
+            player
+            for player in complete
+            if isinstance(player.get("maps"), (int, float)) and int(player["maps"]) >= min_maps
+        ),
+        key=sort_key,
+    )
+    if representative:
+        selected = representative[0]
+        selected["selection_reason"] = f"cached_recent_window_with_at_least_{min_maps}_maps"
+        selected["fetch_origin"] = "cache"
+        return selected
+    if complete:
+        selected = max(complete, key=lambda player: int(player.get("maps") or 0))
+        selected["selection_reason"] = f"cached_max_maps_below_{min_maps}"
+        selected["fetch_origin"] = "cache"
+        return selected
+    unavailable = [dict(player) for player in rows if player_snapshot_is_known_unavailable([player])]
+    if unavailable:
+        selected = sorted(unavailable, key=sort_key)[0]
+        selected["stats"] = {}
+        selected["selection_reason"] = "cached_known_unavailable"
+        selected["fetch_origin"] = "cache"
+        return selected
+    return None
+
+
 def player_snapshot_quality(snapshots: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     field_coverage = {
         label: sum(
@@ -3098,7 +3171,8 @@ def team_profiles_players_are_fresh(team_profiles_file: Path) -> tuple[bool, int
     player_ids = player_ids_from_team_profiles_payload(profiles)
     if not player_ids:
         return False, 0, 0
-    fresh = sum(1 for player_id in player_ids if db_entity_is_fresh("player_stats", player_id))
+    fresh_ids = db_fresh_entity_keys("player_stats", player_ids)
+    fresh = len(fresh_ids)
     snapshots = db_latest_player_snapshots(player_ids)
     resolved = sum(
         1
@@ -3126,22 +3200,24 @@ def player_ids_from_team_profiles(team_profiles_file: Path) -> set[str]:
 def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year: int) -> dict[str, Any] | None:
     player_ids = player_ids_from_team_profiles(team_profiles_file)
     snapshots = db_latest_player_snapshots(player_ids)
-    covered_ids = {player_id for player_id, rows in snapshots.items() if rows}
+    selected = {
+        player_id: player
+        for player_id, rows in snapshots.items()
+        if (player := choose_cached_player_snapshot(rows)) is not None
+    }
+    covered_ids = set(selected)
     if not covered_ids:
         return None
-    grouped: dict[str, list[dict[str, Any]]] = {}
-    for player_rows in snapshots.values():
-        for player in player_rows:
-            grouped.setdefault(str(player.get("time_filter") or "unknown"), []).append(player)
-    results = [
-        {
-            "time_filter": time_filter,
-            "players": sorted(players, key=lambda item: str(item.get("id") or "")),
-            "source": "BBDD.player_stat_snapshots",
-        }
-        for time_filter, players in sorted(grouped.items())
-    ]
-    quality = player_snapshot_quality(snapshots)
+    results = [{
+        "time_filter": "adaptive",
+        "selection_mode": "adaptive_recent_min_maps",
+        "players": sorted(selected.values(), key=lambda item: str(item.get("id") or "")),
+        "source": "BBDD.player_stat_snapshots",
+    }]
+    quality = player_snapshot_quality({
+        player_id: [player]
+        for player_id, player in selected.items()
+    })
     payload = {
         "ok": True,
         "source": "BBDD.player_stat_snapshots",
@@ -3162,13 +3238,99 @@ def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year
     return payload
 
 
+def filter_team_profiles_players(
+    profiles: list[dict[str, Any]],
+    player_ids: set[str],
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for item in profiles:
+        profile = dict(item.get("profile") or {})
+        squad = [
+            player
+            for player in profile.get("squad") or []
+            if str(player.get("id") or "") in player_ids
+        ]
+        if not squad:
+            continue
+        copied = dict(item)
+        profile["squad"] = squad
+        copied["profile"] = profile
+        filtered.append(copied)
+    return filtered
+
+
+def flatten_player_results(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    players: dict[str, dict[str, Any]] = {}
+    for comparison in payload.get("results") or []:
+        for raw_player in comparison.get("players") or []:
+            player_id = str(raw_player.get("id") or "")
+            if player_id:
+                players[player_id] = dict(raw_player)
+    return players
+
+
+def merge_player_stats_payload(
+    *,
+    year: int,
+    requested_ids: set[str],
+    cached_players: dict[str, dict[str, Any]],
+    fetched_payload: dict[str, Any],
+    refresh_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    fetched_players = flatten_player_results(fetched_payload)
+    captured_at = now_utc()
+    for player in fetched_players.values():
+        player["fetch_origin"] = "online"
+        player["captured_at"] = captured_at
+    merged = dict(cached_players)
+    merged.update(fetched_players)
+    refresh_ids = requested_ids if refresh_ids is None else refresh_ids
+    stale_fallback = sorted((refresh_ids - set(fetched_players)) & set(cached_players))
+    return {
+        "source": "https://www.hltv.org/stats/players/compare",
+        "year": year,
+        "time_filters": fetched_payload.get("time_filters") or ["past3months", "past6months", "past12months"],
+        "selection_mode": "adaptive_recent_min_maps",
+        "min_maps": int(fetched_payload.get("min_maps") or 10),
+        "players_requested": len(requested_ids),
+        "players_loaded": len(merged),
+        "players_fetched_online": len(fetched_players),
+        "players_loaded_from_cache": len(set(merged) - set(fetched_players)),
+        "players_stale_fallback": len(stale_fallback),
+        "stale_fallback_ids": stale_fallback,
+        "comparisons_collected": int(fetched_payload.get("comparisons_collected") or 0),
+        "comparisons_failed": int(fetched_payload.get("comparisons_failed") or 0),
+        "requests_attempted": int(fetched_payload.get("requests_attempted") or 0),
+        "stopped_reason": fetched_payload.get("stopped_reason"),
+        "failures": fetched_payload.get("failures") or [],
+        "results": [{
+            "time_filter": "adaptive",
+            "selection_mode": "adaptive_recent_min_maps",
+            "min_maps": int(fetched_payload.get("min_maps") or 10),
+            "players": sorted(merged.values(), key=lambda item: str(item.get("id") or "")),
+        }],
+    }
+
+
 def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, delay: float) -> dict[str, Any]:
     output = run_dir / f"player_compare_stats_{year}.json"
     if not team_profiles_file.exists():
         log("player stats: missing team_profiles.json")
         return {"ok": False, "reason": "missing_team_profiles"}
-    all_fresh, fresh_count, complete_count = team_profiles_players_are_fresh(team_profiles_file)
-    if all_fresh:
+    profiles = read_json(team_profiles_file, [])
+    requested_ids = player_ids_from_team_profiles_payload(profiles)
+    snapshots = db_latest_player_snapshots(requested_ids)
+    fresh_ids = db_fresh_entity_keys("player_stats", requested_ids)
+    resolved_ids = {
+        player_id
+        for player_id, rows in snapshots.items()
+        if player_snapshot_has_core_stats(rows) or player_snapshot_is_known_unavailable(rows)
+    }
+    reusable_ids = fresh_ids & resolved_ids
+    fetch_ids = requested_ids - reusable_ids
+    fresh_count = len(fresh_ids)
+    complete_count = len(resolved_ids)
+    if not fetch_ids:
         cached = materialize_cached_player_stats(team_profiles_file, output, year)
         if cached:
             note_freshness_skip(fresh_count)
@@ -3194,12 +3356,25 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
                 "source": "BBDD.player_stat_snapshots",
             }
         log("player stats: freshness said ok, but BBDD cache was empty; fetching")
-    elif fresh_count == len(player_ids_from_team_profiles(team_profiles_file)) and complete_count < fresh_count:
+    elif fresh_count == len(requested_ids) and complete_count < fresh_count:
         log(
             "player stats: fresh cache has unresolved core fields; forcing profile refresh "
             f"resolved={complete_count}/{fresh_count}",
             force=True,
         )
+    cached_players = {
+        player_id: player
+        for player_id, rows in snapshots.items()
+        if (player := choose_cached_player_snapshot(rows)) is not None
+    }
+    filtered_profiles_file = run_dir / "_player_stats_fetch_profiles.json"
+    scraper_output = run_dir / f"_player_stats_fetch_{year}.json"
+    write_json(filtered_profiles_file, filter_team_profiles_players(profiles, fetch_ids))
+    log(
+        "player stats: selective refresh "
+        f"requested={len(requested_ids)} reusable_cache={len(reusable_ids)} "
+        f"fetch_online={len(fetch_ids)} stale_cache_fallback={len(fetch_ids & set(cached_players))}"
+    )
 
     def refresh_cf_session(reason: str) -> tuple[bool, str]:
         helper = SCRAPY_ROOT / "hltv_scraper" / "grab_cf.py"
@@ -3235,9 +3410,9 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
         str(PYTHON_EXE),
         str(COMPARE_SCRIPT),
         "--team-profiles-file",
-        str(team_profiles_file),
+        str(filtered_profiles_file),
         "--output-file",
-        str(output),
+        str(scraper_output),
         "--year",
         str(year),
         "--time-filters",
@@ -3258,59 +3433,79 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
         "--max-requests",
         "1000",
         "--max-cloudflare-streak",
-        "3",
+        "1",
     ]
     if VERBOSE:
         cmd.append("--verbose")
     log(f"player stats: starting compare scrape year={year} delay={delay}s")
     ok, logs = run_cmd(cmd, SCRAPER_PROJECT, timeout=1800, stream=VERBOSE)
-    payload = read_json(output, {}) if output.exists() else {}
+    fetched_payload = read_json(scraper_output, {}) if scraper_output.exists() else {}
     cf_session_refresh_attempted = False
     cf_session_refresh_ok = None
-    first_stopped_reason = payload.get("stopped_reason")
-    if should_refresh_cf(payload, logs, ok):
+    first_stopped_reason = fetched_payload.get("stopped_reason")
+    if should_refresh_cf(fetched_payload, logs, ok):
         cf_session_refresh_attempted = True
-        refresh_ok, refresh_logs = refresh_cf_session(str(payload.get("stopped_reason") or "compare_problem"))
+        refresh_ok, refresh_logs = refresh_cf_session(str(fetched_payload.get("stopped_reason") or "compare_problem"))
         cf_session_refresh_ok = refresh_ok
         logs = (logs or "") + "\n[cf_refresh]\n" + (refresh_logs or "")
         if refresh_ok:
             log("player stats: retrying compare scrape after cf_session refresh", force=True)
             ok, retry_logs = run_cmd(cmd, SCRAPER_PROJECT, timeout=1800, stream=VERBOSE)
             logs = (logs or "") + "\n[retry_after_cf_refresh]\n" + (retry_logs or "")
-            payload = read_json(output, {}) if output.exists() else payload
-    collected = int(payload.get("comparisons_collected") or 0)
-    failed = int(payload.get("comparisons_failed") or 0)
-    log(f"player stats: collected={collected} failed={failed} ok={ok}")
+            fetched_payload = read_json(scraper_output, {}) if scraper_output.exists() else fetched_payload
+    payload = merge_player_stats_payload(
+        year=year,
+        requested_ids=requested_ids,
+        cached_players=cached_players,
+        fetched_payload=fetched_payload,
+        refresh_ids=fetch_ids,
+    )
+    write_json(output, payload)
+    collected = int(fetched_payload.get("comparisons_collected") or 0)
+    failed = int(fetched_payload.get("comparisons_failed") or 0)
+    stopped_reason = fetched_payload.get("stopped_reason")
+    loaded = int(payload.get("players_loaded") or 0)
+    complete_coverage = loaded == len(requested_ids)
+    semantic_ok = not stopped_reason and failed == 0 and complete_coverage
+    log(
+        f"player stats: collected={collected} failed={failed} loaded={loaded}/{len(requested_ids)} "
+        f"online={payload.get('players_fetched_online')} cache={payload.get('players_loaded_from_cache')} "
+        f"stopped={stopped_reason or 'no'} ok={semantic_ok}"
+    )
     problem_text = " ".join(
         [
-            str(payload.get("stopped_reason") or ""),
-            str(payload.get("reason") or ""),
+            str(fetched_payload.get("stopped_reason") or ""),
+            str(fetched_payload.get("reason") or ""),
             logs or "",
         ]
     ).lower()
-    if not ok and collected == 0:
+    if stopped_reason and collected == 0:
         status = "blocked" if any(marker in problem_text for marker in ("cloudflare", "challenge", "403", "cf_session")) else "error"
-        note = str(payload.get("stopped_reason") or payload.get("reason") or "player compare scrape failed")
-        for player_id in player_ids_from_team_profiles(team_profiles_file):
+        note = str(stopped_reason or fetched_payload.get("reason") or "player compare scrape failed")
+        for player_id in fetch_ids:
             db_mark_fetch_state("player_stats", player_id, status, note[:500])
     return {
-        "ok": ok or collected > 0,
-        "partial": (not ok and collected > 0) or failed > 0,
+        "ok": semantic_ok,
+        "partial": not semantic_ok and loaded > 0,
         "file": str(output),
-        "players_requested": payload.get("players_requested"),
+        "players_requested": len(requested_ids),
+        "players_loaded": loaded,
+        "players_fetched_online": payload.get("players_fetched_online"),
+        "players_loaded_from_cache": payload.get("players_loaded_from_cache"),
+        "players_stale_fallback": payload.get("players_stale_fallback"),
         "comparisons_collected": collected,
         "comparisons_failed": failed,
-        "stopped_reason": payload.get("stopped_reason"),
+        "stopped_reason": stopped_reason,
         "first_stopped_reason": first_stopped_reason,
-        "selection_mode": payload.get("selection_mode"),
-        "min_maps": payload.get("min_maps"),
-        "requests_attempted": payload.get("requests_attempted"),
+        "selection_mode": fetched_payload.get("selection_mode"),
+        "min_maps": fetched_payload.get("min_maps"),
+        "requests_attempted": fetched_payload.get("requests_attempted"),
         "cf_session_refresh_attempted": cf_session_refresh_attempted,
         "cf_session_refresh_ok": cf_session_refresh_ok,
         "cf_session_refresh_hint": (
             ".\\SCRAPPER\\hltv-scraper-api\\.venv\\Scripts\\python.exe "
             ".\\SCRAPPER\\hltv-scraper-api\\hltv_scraper\\hltv_scraper\\grab_cf.py"
-            if "Cloudflare" in str(payload.get("stopped_reason") or logs)
+            if "Cloudflare" in str(stopped_reason or logs)
             else None
         ),
         "logs_tail": logs[-1000:],

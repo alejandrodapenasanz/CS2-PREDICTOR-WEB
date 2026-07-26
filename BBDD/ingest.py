@@ -129,7 +129,13 @@ def upsert_fetch_state(
         ON CONFLICT(entity_type, entity_key) DO UPDATE SET
             last_fetched_at_utc=excluded.last_fetched_at_utc,
             last_status=excluded.last_status,
-            fetch_count=fetch_state.fetch_count + 1,
+            fetch_count=CASE
+                WHEN fetch_state.last_fetched_at_utc=excluded.last_fetched_at_utc
+                 AND COALESCE(fetch_state.last_status,'')=COALESCE(excluded.last_status,'')
+                 AND COALESCE(fetch_state.note,'')=COALESCE(excluded.note,'')
+                THEN fetch_state.fetch_count
+                ELSE fetch_state.fetch_count + 1
+            END,
             next_eligible_at_utc=excluded.next_eligible_at_utc,
             note=excluded.note
         """,
@@ -420,13 +426,28 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
         touched += upsert_fetch_state(conn, "team_profile", team_id, status, fetched_at=captured_at)
     for path in sorted(run_dir.glob("player_compare_stats_*.json")):
         payload = read_json(path, {})
+        player_states: dict[str, list[tuple[str, str | None]]] = defaultdict(list)
         for comparison in payload.get("results") or []:
             for player in comparison.get("players") or []:
                 player_id = str(player.get("id") or "")
-                if not player_id:
+                if not player_id or player.get("fetch_origin") == "cache":
                     continue
                 status = player_snapshot_fetch_status(player)
-                touched += upsert_fetch_state(conn, "player_stats", player_id, status, fetched_at=captured_at)
+                player_states[player_id].append((status, player.get("captured_at")))
+        for player_id, states in player_states.items():
+            statuses = {status for status, _ in states}
+            status = "ok" if "ok" in statuses else "partial" if "partial" in statuses else "not_found"
+            player_captured_at = max(
+                (value for _, value in states if value),
+                default=captured_at,
+            )
+            touched += upsert_fetch_state(
+                conn,
+                "player_stats",
+                player_id,
+                status,
+                fetched_at=player_captured_at,
+            )
     rankings = read_json(run_dir / "rankings_index.json", {})
     for key, entity_type in {"hltv": "ranking_hltv", "valve": "ranking_valve"}.items():
         state = rankings.get(key) or {}
@@ -447,41 +468,59 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
 
 
 def reconcile_known_missing_player_stats(conn: sqlite3.Connection) -> int:
-    """Repair legacy `ok` states whose latest snapshot has no usable sample."""
+    """Reconcile one player state from all windows in its latest capture."""
     rows = conn.execute(
         """
-        WITH latest AS (
-            SELECT hltv_player_id, maps, rating, kpr, dpr, apr, kast, impact, adr,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY hltv_player_id
-                       ORDER BY captured_at_utc DESC, player_stat_snapshot_id DESC
-                   ) AS row_num
+        WITH latest_capture AS (
+            SELECT hltv_player_id, MAX(captured_at_utc) AS captured_at_utc
             FROM player_stat_snapshots
+            GROUP BY hltv_player_id
+        ),
+        latest AS (
+            SELECT p.*
+            FROM player_stat_snapshots
+            p JOIN latest_capture l
+              ON l.hltv_player_id=p.hltv_player_id
+             AND l.captured_at_utc=p.captured_at_utc
         )
-        SELECT hltv_player_id
+        SELECT hltv_player_id, MAX(captured_at_utc) AS captured_at_utc,
+               MAX(CASE WHEN maps > 0
+                         AND rating IS NOT NULL AND kpr IS NOT NULL AND dpr IS NOT NULL
+                         AND apr IS NOT NULL AND kast IS NOT NULL
+                         AND impact IS NOT NULL AND adr IS NOT NULL
+                        THEN 1 ELSE 0 END) AS has_complete,
+               MAX(COALESCE(maps, 0)) AS max_maps
         FROM latest
-        WHERE row_num = 1
-          AND maps <= 0
-          AND NOT (rating IS NOT NULL AND kpr IS NOT NULL AND dpr IS NOT NULL
-                   AND apr IS NOT NULL AND kast IS NOT NULL AND impact IS NOT NULL AND adr IS NOT NULL)
+        GROUP BY hltv_player_id
         """
     ).fetchall()
     touched = 0
-    fetched_at = utcnow()
-    for (player_id,) in rows:
+    for player_id, captured_at, has_complete, max_maps in rows:
         state = conn.execute(
             "SELECT last_status FROM fetch_state WHERE entity_type='player_stats' AND entity_key=?",
             (str(player_id),),
         ).fetchone()
-        if state and state[0] == "not_found":
+        if not state:
+            continue
+        current = str(state[0]) if state else None
+        derived = "ok" if has_complete else "not_found" if max_maps <= 0 else "partial"
+        # Promote false legacy partial/not_found states when another window from
+        # the same capture is complete. Never downgrade historical OK rows here.
+        if current == derived or (current == "ok" and derived != "ok"):
             continue
         touched += upsert_fetch_state(
             conn,
             "player_stats",
             str(player_id),
-            "not_found",
-            fetched_at=fetched_at,
-            note="HLTV returned no usable stats sample for the selected player window",
+            derived,
+            fetched_at=captured_at or utcnow(),
+            note=(
+                "Reconciled from all player windows in the latest capture"
+                if derived == "ok"
+                else "HLTV returned no usable stats sample for the selected player window"
+                if derived == "not_found"
+                else "Latest player capture is incomplete"
+            ),
         )
     return touched
 

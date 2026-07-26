@@ -80,6 +80,11 @@ actividad/recencia, fuerza de rivales recientes, head-to-head y señales de
 score. Las fuentes de cobertura parcial no se mezclan silenciosamente con ese
 núcleo.
 
+La dureza del calendario no se reduce al último rival: `strength_of_schedule`
+resume el Elo de los oponentes recientes con decay, la variabilidad de esa
+oposición y el rendimiento real menos el esperado por Elo. Se calcula antes de
+cada partido y entra automáticamente al llegar a 800 filas válidas.
+
 Hay bloques opcionales preparados pero protegidos por muestra mínima:
 
 - **HLTV Analytics:** map pool, pick/ban y señales de la pestaña Analytics. Se
@@ -106,9 +111,38 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
   efecto se aprende y se valida en walk-forward cuando haya 200 partidos con
   snapshots pre-partido completos (minimo cuatro jugadores y cinco mapas por
   jugador en ambos equipos).
+- **Cambio de alineacion 90d:** para cada partido futuro se compara la
+  alineacion anunciada 5v5 con la alineacion real 5v5 del ultimo partido previo
+  del equipo dentro de 90 dias. Un cambio confirmado aparece como
+  `ROSTER_CHANGE_90D` rojo con altas, bajas y partido de referencia. Si falta
+  cualquiera de las dos alineaciones completas, el estado se muestra como no
+  verificable y no se genera una red flag.
 - **Box score/mapas, historial de evento, rankings y roster:** cada familia tiene
   su columna de disponibilidad y umbral propio. `MODEL/train.py` decide `ON/OFF`
   en cada reentrenamiento; no hay switches manuales.
+
+- **Ratings alternativos:** MOV y TrueSkill de equipo se activan con 800 casos;
+  TrueSkill por jugador, con 200. Bradley-Terry bayesiano y Kalman se calculan
+  causalmente y se evalúan como miembros independientes del super-learner. No se
+  añaden a los learners genéricos: el ensemble aprende un peso no negativo y puede
+  descartarlos asignándoles cero.
+- **BO3 composicional:** estima los picks y el decider desde Analytics capturado
+  pre-match, contrae el winrate de mapas con poca muestra y combina tres
+  probabilidades. Se activa con 500 series elegibles y al menos 10 mapas por lado;
+  el veto real obtenido después del partido nunca entra como predictor.
+
+El entrenamiento también audita la calibración por formato, LAN/online, fase y
+tier de evento. Los segmentos con menos de 30 predicciones walk-forward se
+marcan como no concluyentes. La poda automática es deliberadamente conservadora:
+solo retira columnas constantes o exactamente redundantes sin usar el resultado;
+VIF, permutation importance cronológica, RFE y SHAP quedan en un informe para no
+introducir selección supervisada fuera de una validación temporal anidada.
+
+Para BO3 se entrena un target auxiliar `0-2/1-2/2-1/2-0`. Se activa sin switch
+manual cuando hay 2.000 series, al menos 300 por clase y mejora el baseline
+empírico en walk-forward. El predictor principal de ganador permanece separado;
+el sidecar añade `series_score_distribution` y `predicted_series_score`. El
+modelo por mapa todavía espera una muestra point-in-time suficiente.
 
 ### 4.3. Modelos, calibración y selección
 
@@ -219,11 +253,24 @@ Cada ejecución de `start.ps1` crea un transcript completo en `logs/start_*.log`
 y muestra cada comando con hora, exit code y duración. Si Cloudflare bloquea el
 navegador stealth durante demasiado tiempo, el pipeline lanza automáticamente
 `grab_cf.py` para abrir una ventana visible y renovar `cf_clearance`.
+Con `-Retrain`, el trainer también recibe `--verbose` y muestra folds, estudios
+Optuna y pesos; `-Quiet` conserva la salida resumida.
 
 El scrape diario consulta primero `BBDD/cs2.db`: `/results` solo se pide para
 resolver IDs `pending_result` conocidos, y solo pagina a `offset=100/200` si los
 pendientes no aparecieron en las páginas anteriores. Si SQLite no tiene
 pendientes, esa fase se salta.
+
+Las stats de jugador tambien son incrementales por ID. El pipeline reutiliza
+snapshots completos dentro del TTL de 3 dias y genera un fichero temporal con
+solo los jugadores nuevos, vencidos o incompletos. La ventana se elige de forma
+adaptativa (`past3months` -> `past6months` -> `past12months`) hasta alcanzar 10
+mapas. El parser de `/stats/players/compare` lee cada columna por separado y el
+perfil individual confirma Rating, DPR, ADR y el numero de mapas. Si HLTV
+devuelve cero mapas se registra `not_found` (sin muestra), no como bloqueo. Ante
+el primer challenge de esta fase se guarda el progreso, se renueva
+`cf_session.json` automaticamente y se reintenta sin esperar varios backoffs
+largos.
 
 Los runs con `-MaxMatches` son solo pruebas parciales: scrapean HLTV online,
 pero no actualizan `DAILY_SNAPSHOTS/master/manifest.json` ni
@@ -246,6 +293,12 @@ python WEB\build_web.py                        # genera WEB\data.js
 python tests\tests_wallet_simulator.py --initial-wallet 100  # cartera + accuracy por franjas
 python MODEL\analyze_walkforward_errors.py       # auditoria OOS de fallos, CSV y graficos
 python MODEL\train.py --verbose                  # entrenamiento productivo: core + todos los algoritmos disponibles
+python MODEL\train.py --optuna-trials 8 --verbose # Optuna purgado; ya son los valores automaticos por defecto
+python MODEL\train.py --config MODEL\config.yaml --verbose # configuracion versionada; CLI tiene prioridad
+python MODEL\monitor_drift.py                  # log loss rodante, Page-Hinkley y CLV
+python MODEL\smoke_pipeline.py                 # smoke completo aislado, sin promover
+python -m ruff check MODEL BBDD DAILY_SNAPSHOTS tests
+python -m mypy
 python MODEL\run_professional_training.py --algorithms all --feature-profile core --half-lives 45,60,90,120,180 --wf-gaps 0,1
 ```
 
@@ -264,9 +317,34 @@ elige produccion por menor log loss, guarda el artefacto final en
 `MODEL\artifacts\model.pkl` y versiona una copia en `MODEL\artifacts\registry`.
 Analytics, contexto, stats de jugador, box score/mapas, historial de evento,
 rankings y roster se calculan y guardan siempre que exista evidencia previa al
-partido. Cada familia entra sola cuando supera el umbral de `MODEL\train.py`.
+partido. Cada familia entra sola cuando supera el umbral de `MODEL\config.yaml`.
 El estado exacto se imprime durante el entreno y queda en
 `MODEL\results\REPORT.md` y `artifact.metadata["feature_policies"]`.
+
+Además se generan `segment_calibration.json`, `feature_pruning.json`,
+`rich_target_bo3.json` y `rich_target_bo3_predictions.json`. Estos archivos
+permiten comprobar cobertura, calibración por contexto, multicolinealidad y si
+el target de marcador superó realmente su baseline temporal.
+`optuna_tuning.json` registra cada estudio interno, sus periodos purgados, el
+valor de `C` y el log loss objetivo. Optuna se ejecuta automáticamente durante
+`start.ps1 -Retrain`; `--optuna-trials 0` existe solo para smoke/debug.
+
+La configuracion operativa vive en `MODEL/config.yaml`. Sus dataclasses
+validadas centralizan semillas, defaults de entrenamiento, umbrales de
+auto-activacion, hiperparametros principales, drift y limites del backtest.
+Cada entreno conserva `config.effective.yaml` y `experiment_manifest.json`
+con SHA-256 de datos/config, commit Git, estado dirty, argumentos y versiones.
+
+`start.ps1` ejecuta `MODEL/monitor_drift.py` despues del ingest final y actualiza
+`MODEL/results/drift_live.json`. Solo evalua predicciones congeladas antes del
+inicio que ya tienen resultado. Page-Hinkley vigila aumentos de log loss y
+empeoramiento de CLV; el map pool se reconstruye con mapas anteriores y el
+parche solo se marca si una fuente pre-match lo proporciona explicitamente.
+
+El backtest de `MODEL/results/economic_backtest.json` parte de 1.000 EUR,
+desglosa vig, Kelly fraccional, limites de stake/payout, drawdown y CLV contra
+la ultima cuota valida antes del inicio. Las cuotas de cierre son auditoria:
+modificarlas no puede cambiar el lado, EV ni stake decidido en apertura.
 
 Cada entrenamiento genera tambien `MODEL\results\favorite_accuracy_bands.json`
 con el acierto walk-forward del favorito en las franjas 50-60, 60-70, 70-80,

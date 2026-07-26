@@ -226,6 +226,25 @@ class LiveDatabasePipelineTests(unittest.TestCase):
         self.assertFalse(ingest.entity_is_fresh(conn, "team_profile", "10", "2026-07-20T08:00:00Z"))
         conn.close()
 
+    def test_fetch_state_upsert_is_idempotent_for_same_evidence(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        conn = build_db.connect_live_db(db_path)
+        for _ in range(2):
+            ingest.upsert_fetch_state(
+                conn,
+                "player_stats",
+                "101",
+                "ok",
+                fetched_at="2026-07-16T08:00:00Z",
+            )
+        fetch_count = conn.execute(
+            "SELECT fetch_count FROM fetch_state WHERE entity_type='player_stats' AND entity_key='101'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(fetch_count, 1)
+
     def test_blocked_fetch_state_is_skipped_until_next_retry(self) -> None:
         tmp, db_path = self.make_db()
         self.addCleanup(tmp.cleanup)
@@ -249,6 +268,177 @@ class LiveDatabasePipelineTests(unittest.TestCase):
             self.assertFalse(daily_start.db_entity_is_fresh("match_assets", "2390001", "2026-07-07T10:00:00Z"))
         finally:
             daily_start.BBDD_DB = old_db
+
+    def test_player_fetch_state_aggregates_windows_before_setting_status(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        run_dir = Path(tmp.name) / "runs" / "player_windows"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"started_at": "2026-07-16T08:00:00Z"}),
+            encoding="utf-8",
+        )
+        complete = {
+            "id": "101",
+            "maps": 20,
+            "time_filter": "past3months",
+            "stats": {
+                "Rating 3.0": "1.10",
+                "KPR": "0.70",
+                "DPR": "0.60",
+                "APR": "0.20",
+                "KAST": "73.0",
+                "Impact": "1.12",
+                "ADR": "80.0",
+            },
+        }
+        partial = {
+            "id": "101",
+            "maps": 50,
+            "time_filter": "past6months",
+            "stats": {"KPR": "0.68"},
+        }
+        (run_dir / "player_compare_stats_2026.json").write_text(
+            json.dumps({"results": [{"players": [complete]}, {"players": [partial]}]}),
+            encoding="utf-8",
+        )
+        conn = build_db.connect_live_db(db_path)
+
+        ingest.update_fetch_state_from_run(conn, run_dir)
+        conn.commit()
+        status = conn.execute(
+            "SELECT last_status FROM fetch_state WHERE entity_type='player_stats' AND entity_key='101'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(status, "ok")
+
+    def test_cached_player_rows_do_not_advance_fetch_state(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        run_dir = Path(tmp.name) / "runs" / "cached_players"
+        run_dir.mkdir(parents=True)
+        (run_dir / "manifest.json").write_text(
+            json.dumps({"started_at": "2026-07-16T08:00:00Z"}),
+            encoding="utf-8",
+        )
+        (run_dir / "player_compare_stats_2026.json").write_text(
+            json.dumps({
+                "results": [{
+                    "players": [{
+                        "id": "101",
+                        "fetch_origin": "cache",
+                        "captured_at": "2026-07-14T08:00:00Z",
+                        "maps": 20,
+                        "stats": {},
+                    }]
+                }]
+            }),
+            encoding="utf-8",
+        )
+        conn = build_db.connect_live_db(db_path)
+
+        ingest.update_fetch_state_from_run(conn, run_dir)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM fetch_state WHERE entity_type='player_stats'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(count, 0)
+
+    def test_player_cache_does_not_mix_windows_from_older_captures(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        conn = build_db.connect_live_db(db_path)
+        conn.execute(
+            """
+            INSERT INTO player_stat_snapshots(
+                hltv_player_id, run_id, captured_at_utc, time_filter, maps,
+                rating, kpr, dpr, apr, kast, impact, adr, source_file, payload_json
+            ) VALUES ('101','old','2026-07-10T08:00:00Z','past6months',30,
+                      1.10,0.70,0.60,0.20,73.0,1.12,80.0,'old.json','{}')
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO player_stat_snapshots(
+                hltv_player_id, run_id, captured_at_utc, time_filter, maps,
+                rating, kpr, source_file, payload_json
+            ) VALUES ('101','new','2026-07-16T08:00:00Z','past3months',0,
+                      1.10,0.70,'new.json','{}')
+            """
+        )
+        conn.commit()
+        conn.close()
+        daily_start = load_daily_start_module()
+        old_db = daily_start.BBDD_DB
+        daily_start.BBDD_DB = db_path
+        try:
+            rows = daily_start.db_latest_player_snapshots({"101"})
+        finally:
+            daily_start.BBDD_DB = old_db
+
+        self.assertEqual(len(rows["101"]), 1)
+        self.assertEqual(rows["101"][0]["time_filter"], "past3months")
+        self.assertEqual(rows["101"][0]["maps"], 0)
+        self.assertEqual(rows["101"][0]["stats"]["KPR"], 0.70)
+        selected = daily_start.choose_cached_player_snapshot(rows["101"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["stats"], {})
+
+    def test_player_state_reconcile_promotes_tracked_partial_but_ignores_untracked_history(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        conn = build_db.connect_live_db(db_path)
+        captured_at = "2026-07-13T05:33:17Z"
+        complete_stats = (1.10, 0.70, 0.60, 0.20, 73.0, 1.12, 80.0)
+        conn.execute(
+            """
+            INSERT INTO player_stat_snapshots(
+                hltv_player_id, run_id, captured_at_utc, time_filter, maps,
+                rating, kpr, dpr, apr, kast, impact, adr, source_file, payload_json
+            ) VALUES ('101','run',?,'past3months',20,?,?,?,?,?,?,?,'stats.json','{}')
+            """,
+            (captured_at, *complete_stats),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_stat_snapshots(
+                hltv_player_id, run_id, captured_at_utc, time_filter, maps,
+                kpr, source_file, payload_json
+            ) VALUES ('101','run',?,'past6months',50,0.68,'stats.json','{}')
+            """,
+            (captured_at,),
+        )
+        conn.execute(
+            """
+            INSERT INTO player_stat_snapshots(
+                hltv_player_id, run_id, captured_at_utc, time_filter, maps,
+                kpr, source_file, payload_json
+            ) VALUES ('999','old',?,'past3months',5,0.60,'old.json','{}')
+            """,
+            (captured_at,),
+        )
+        ingest.upsert_fetch_state(
+            conn,
+            "player_stats",
+            "101",
+            "partial",
+            fetched_at=captured_at,
+        )
+
+        touched = ingest.reconcile_known_missing_player_stats(conn)
+        tracked = conn.execute(
+            "SELECT last_status FROM fetch_state WHERE entity_type='player_stats' AND entity_key='101'"
+        ).fetchone()[0]
+        untracked = conn.execute(
+            "SELECT COUNT(*) FROM fetch_state WHERE entity_type='player_stats' AND entity_key='999'"
+        ).fetchone()[0]
+        conn.close()
+
+        self.assertEqual(touched, 1)
+        self.assertEqual(tracked, "ok")
+        self.assertEqual(untracked, 0)
 
     def test_recent_results_skips_hltv_when_db_has_no_pending_targets(self) -> None:
         daily_start = load_daily_start_module()

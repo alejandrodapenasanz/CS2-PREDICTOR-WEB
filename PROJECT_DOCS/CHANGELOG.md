@@ -1,5 +1,57 @@
 # Changelog / registro de decisiones
 
+## 2026-07-26 - Red flag de cambio de roster point-in-time
+
+- La alineacion anunciada del partido se compara por IDs HLTV con la alineacion
+  real del ultimo partido anterior del equipo dentro de una ventana de 90 dias.
+- Solo se aceptan lineups exactas de cinco jugadores y snapshots capturados
+  antes del inicio. Se ignoran futuros, historicos de mas de 90 dias y
+  alineaciones parciales.
+- `ROSTER_CHANGE_90D` usa nivel `danger` y muestra altas, bajas, partido anterior
+  y cantidad de partidos comparados. Los stand-ins anunciados conservan ademas
+  su warning independiente.
+- La evidencia se persiste en `predictions.controls_json`; la alerta no parchea
+  la probabilidad del modelo.
+- Validacion viva del run `2026-07-26_131713Z`: 40 alineaciones sin cambio, 6
+  cambios, 17 sin historico completo y 7 sin lineup anunciada completa.
+
+## 2026-07-16 - Player stats selectivas y parser por columna
+
+- **Causa corregida**: HLTV renderiza `/stats/players/compare` como dos
+  columnas independientes. El parser anterior podia copiar valores de la
+  columna con datos a un jugador con `Based on 0 maps`.
+- **Parser estructural**: cada columna conserva sus propios mapas y metricas;
+  el perfil individual valida Rating, DPR, ADR y el resto de campos core. Cero
+  mapas elimina valores de compare no fiables y se clasifica como `not_found`.
+- **Refresco por jugador**: el TTL se evalua por ID. El scraper recibe solo
+  jugadores nuevos, vencidos o incompletos; los frescos se materializan desde
+  SQLite sin crear snapshots ni checkpoints ficticios.
+- **Cloudflare**: player stats corta y guarda parcial ante el primer challenge,
+  renueva `cf_session.json` automaticamente y reintenta sin acumular esperas
+  exponenciales largas.
+- **Estado idempotente**: las ventanas 3/6/12 meses se agregan antes de escribir
+  `fetch_state`; una ventana completa prevalece sobre otra parcial del mismo
+  run y reingerir la misma evidencia no incrementa `fetch_count`.
+- **Panel BBDD**: `not_found` aparece como "Sin muestra", separado de
+  `partial`/`blocked`/`error`. Validacion viva: 565 OK, 4 sin muestra y 0 issues.
+- **Tests**: 96 tests + 17 subtests pasan; parser validado tambien contra HTML
+  real de HLTV con un jugador de 31 mapas frente a otro de 0 mapas.
+
+## 2026-07-13 - Rigor de produccion C12-C17
+
+- **Drift causal**: `MODEL/monitor_drift.py` y `cs2model/drift.py` calculan log
+  loss/CLV rodantes y Page-Hinkley solo sobre predicciones pre-match cerradas.
+- **Regimen**: map pool reconstruido exclusivamente con mapstats anteriores;
+  parche desconocido salvo metadata pre-match explicita. Familia auto-gated.
+- **Configuracion versionada**: `MODEL/config.yaml` + dataclasses validadas para
+  defaults, umbrales, estimadores, drift y backtest.
+- **Reproducibilidad**: semilla global y manifiesto con hashes de dataset/config,
+  Git, CLI y dependencias; YAML efectivo archivado con cada experimento.
+- **Backtest realista**: vig/de-vig, Kelly fraccional, limites de stake/payout,
+  ejecucion configurable y CLV contra la ultima cuota pre-match.
+- **CI bloqueante**: ruff, mypy de infraestructura, 89 tests + 17 subtests y
+  smoke determinista end-to-end en push/PR a main/dev/pre-dev.
+
 ## 2026-07-07 - BBDD viva e ingest incremental
 
 - **SQLite como fuente de verdad viva**: `BBDD/build_db.py` pasa a crear/migrar

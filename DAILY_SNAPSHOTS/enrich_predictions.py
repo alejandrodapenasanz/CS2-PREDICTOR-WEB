@@ -5,9 +5,10 @@ import gzip
 import json
 import math
 import re
+import sqlite3
 import statistics
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -71,6 +72,8 @@ MASTER_MATCHES = DAILY_ROOT / "master" / "matches.json"
 MASTER_ROSTERS = DAILY_ROOT / "master" / "roster_history.json"
 MASTER_CALIBRATION = DAILY_ROOT / "master" / "calibration.json"
 LIVE_DB = ROOT / "BBDD" / "cs2.db"
+ROSTER_CHANGE_WINDOW_DAYS = 90
+COMPLETE_LINEUP_SIZE = 5
 
 try:
     from DAILY_SNAPSHOTS.match_context import parse_match_context_meta
@@ -672,16 +675,23 @@ def _match_feature_pair(
     fmt = fmt if fmt in {"bo1", "bo3", "bo5"} else "bo3"
     f1 = state.emit_features(team1_key, team2_key, match_dt, event or "", fmt)
     f2 = state.emit_features(team2_key, team1_key, match_dt, event or "", fmt)
+    if hasattr(state, "regime_features"):
+        regime_features = state.regime_features(
+            {"date_obj": match_dt, "match_context": match_context or {}}
+        )
+        f1.update(regime_features)
+        f2.update(regime_features)
     if match_context:
         context_features = cs2_context_match_features({"match_context": match_context})
         f1.update(context_features)
         f2.update(context_features)
     if analytics_match:
-        f1.update(cs2_analytics_match_features(analytics_match))
+        f1.update(cs2_analytics_match_features({**analytics_match, "format": fmt}))
         f2.update(
             cs2_analytics_match_features(
                 {
                     **analytics_match,
+                    "format": fmt,
                     "team1": analytics_match.get("team2"),
                     "team2": analytics_match.get("team1"),
                     "team1_key": team2_key,
@@ -739,6 +749,31 @@ def model_probability_and_uncertainty(
     prob = clamp(0.5 * (float(m1[0]) + (1.0 - float(m2[0]))), 1e-4, 1 - 1e-4)
     std = 0.5 * (float(s1[0]) + float(s2[0]))
     return prob, std
+
+
+def model_series_score_distribution(
+    engine: dict[str, Any],
+    team1_key: str,
+    team2_key: str,
+    match_dt: datetime | None,
+    event: str,
+    fmt: str,
+    analytics_match: dict[str, Any] | None = None,
+    match_context: dict[str, Any] | None = None,
+    extra_features: dict[str, float] | None = None,
+    announced_lineups: dict[str, Any] | None = None,
+    event_metadata: dict[str, Any] | None = None,
+) -> dict[str, float] | None:
+    """A6: BO3 scoreline distribution from the auto-gated rich target."""
+    if str(fmt or "").lower() != "bo3":
+        return None
+    artifact = engine["artifact"]
+    f1, _f2 = _match_feature_pair(
+        engine, team1_key, team2_key, match_dt, event, fmt,
+        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+    )
+    distributions = artifact.predict_series_score_distribution([f1])
+    return distributions[0] if distributions else None
 
 
 def logistic_probability(features: dict[str, float]) -> float:
@@ -1491,6 +1526,258 @@ def roster_stability(team_id: str | None, profile: dict[str, Any] | None, roster
     }
 
 
+def load_actual_lineup_store(
+    conn_or_path: sqlite3.Connection | str | Path = LIVE_DB,
+) -> dict[str, Any]:
+    """Load complete actual lineups once for point-in-time roster comparisons."""
+    owns_connection = not isinstance(conn_or_path, sqlite3.Connection)
+    conn = sqlite3.connect(conn_or_path) if owns_connection else conn_or_path
+    try:
+        match_datetimes = {
+            str(hltv_match_id): parsed
+            for hltv_match_id, datetime_utc in conn.execute(
+                """
+                SELECT hltv_match_id, datetime_utc
+                FROM matches
+                WHERE hltv_match_id IS NOT NULL
+                  AND datetime_utc IS NOT NULL
+                """
+            )
+            if hltv_match_id and (parsed := parse_iso(datetime_utc)) is not None
+        }
+        grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for row in conn.execute(
+            """
+            SELECT CAST(t.hltv_id AS TEXT) AS hltv_team_id,
+                   COALESCE(m.hltv_match_id, CAST(m.match_id AS TEXT)) AS hltv_match_id,
+                   m.datetime_utc,
+                   CAST(p.hltv_id AS TEXT) AS hltv_player_id,
+                   p.nick,
+                   ml.is_standin
+            FROM match_lineups ml
+            JOIN matches m ON m.match_id = ml.match_id
+            JOIN teams t ON t.team_id = ml.team_id
+            JOIN players p ON p.player_id = ml.player_id
+            WHERE m.status = 'completed'
+              AND m.datetime_utc IS NOT NULL
+              AND t.hltv_id IS NOT NULL
+              AND p.hltv_id IS NOT NULL
+            ORDER BY m.datetime_utc, m.match_id, t.team_id, p.player_id
+            """
+        ):
+            team_id, match_id, datetime_utc, player_id, nick, is_standin = row
+            key = (str(team_id), str(match_id), str(datetime_utc))
+            grouped.setdefault(
+                key,
+                {
+                    "team_id": str(team_id),
+                    "match_id": str(match_id),
+                    "datetime_utc": str(datetime_utc),
+                    "datetime": parse_iso(str(datetime_utc)),
+                    "players": {},
+                },
+            )["players"][str(player_id)] = {
+                "id": str(player_id),
+                "name": str(nick or player_id),
+                "is_standin": bool(is_standin),
+            }
+
+        teams: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in grouped.values():
+            players = record.pop("players")
+            if record["datetime"] is None or len(players) != COMPLETE_LINEUP_SIZE:
+                continue
+            record["player_ids"] = frozenset(players)
+            record["players"] = list(players.values())
+            teams[record["team_id"]].append(record)
+        for records in teams.values():
+            records.sort(key=lambda item: (item["datetime"], item["match_id"]))
+        return {"teams": dict(teams), "match_datetimes": match_datetimes}
+    except sqlite3.Error:
+        return {"teams": {}, "match_datetimes": {}}
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def _match_datetime_utc(snapshot: dict[str, Any], lineup_store: dict[str, Any]) -> datetime | None:
+    stored = (lineup_store.get("match_datetimes") or {}).get(str(snapshot.get("id") or ""))
+    if stored is not None:
+        return stored
+    local_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
+    if local_dt is None:
+        return None
+    return (
+        local_dt.replace(tzinfo=ZoneInfo("Europe/Madrid"))
+        .astimezone(timezone.utc)
+        .replace(tzinfo=None)
+    )
+
+
+def _announced_lineup(
+    snapshot: dict[str, Any],
+    side: str,
+    expected_team_id: str | int | None,
+) -> dict[str, Any]:
+    lineups = snapshot.get("prematch_lineups") or {}
+    expected = str(expected_team_id or "")
+    candidate = lineups.get(side) or {}
+    if expected and str(candidate.get("hltv_team_id") or "") != expected:
+        candidate = next(
+            (
+                lineup
+                for lineup in lineups.values()
+                if str((lineup or {}).get("hltv_team_id") or "") == expected
+            ),
+            {},
+        )
+
+    players: dict[str, dict[str, Any]] = {}
+    for player in candidate.get("players") or []:
+        player_id = str(player.get("hltv_player_id") or "")
+        if not player_id:
+            continue
+        players[player_id] = {
+            "id": player_id,
+            "name": str(player.get("nickname") or player_id),
+            "is_standin": bool(player.get("is_standin")),
+        }
+    team_matches = bool(expected) and str(candidate.get("hltv_team_id") or "") == expected
+    return {
+        "available": bool(candidate),
+        "expected_team_id_available": bool(expected),
+        "team_matches": team_matches,
+        "team_id": expected or None,
+        "players": list(players.values()),
+        "player_ids": frozenset(players),
+        "complete": team_matches and len(players) == COMPLETE_LINEUP_SIZE,
+        "standins": [player for player in players.values() if player["is_standin"]],
+    }
+
+
+def _lineup_players(
+    player_ids: set[str] | frozenset[str],
+    *sources: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    names = {
+        str(player.get("id")): str(player.get("name") or player.get("id"))
+        for source in sources
+        for player in source
+        if player.get("id")
+    }
+    return [
+        {"id": player_id, "name": names.get(player_id, player_id)}
+        for player_id in sorted(player_ids, key=lambda value: names.get(value, value).lower())
+    ]
+
+
+def roster_change_90d(
+    snapshot: dict[str, Any],
+    side: str,
+    team: dict[str, Any],
+    lineup_store: dict[str, Any],
+    window_days: int = ROSTER_CHANGE_WINDOW_DAYS,
+) -> dict[str, Any]:
+    """Compare a pre-match announced lineup with prior actual lineups only."""
+    current = _announced_lineup(snapshot, side, team.get("id"))
+    result: dict[str, Any] = {
+        "team_id": str(team.get("id") or "") or None,
+        "team_name": team.get("name"),
+        "window_days": int(window_days),
+        "source": "announced_match_lineup_vs_actual_match_lineups",
+        "status": "unknown",
+        "red_flag": False,
+        "current_lineup_size": len(current["player_ids"]),
+        "current_players": current["players"],
+        "announced_standins": current["standins"],
+        "previous_matches_compared": 0,
+        "distinct_lineups_90d": 0,
+        "changed_from_latest": None,
+        "changed_from_modal": None,
+        "players_in": [],
+        "players_out": [],
+    }
+    if not current["available"]:
+        result["status"] = "current_lineup_missing"
+        return result
+    if not current["expected_team_id_available"]:
+        result["status"] = "team_id_missing"
+        return result
+    if not current["team_matches"]:
+        result["status"] = "team_lineup_mismatch"
+        return result
+    if not current["complete"]:
+        result["status"] = "current_lineup_incomplete"
+        return result
+
+    match_dt = _match_datetime_utc(snapshot, lineup_store)
+    if match_dt is None:
+        result["status"] = "match_datetime_unknown"
+        return result
+    captured_at = parse_iso(snapshot.get("captured_at"))
+    if captured_at is not None and captured_at > match_dt:
+        result["status"] = "post_start_snapshot_rejected"
+        return result
+
+    window_start = match_dt - timedelta(days=window_days)
+    current_match_id = str(snapshot.get("id") or "")
+    history = [
+        record
+        for record in (lineup_store.get("teams") or {}).get(str(team.get("id") or ""), [])
+        if window_start <= record["datetime"] < match_dt
+        and record["match_id"] != current_match_id
+    ]
+    history.sort(key=lambda item: (item["datetime"], item["match_id"]), reverse=True)
+    result["window_start_utc"] = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
+    result["match_datetime_utc"] = match_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    result["previous_matches_compared"] = len(history)
+    if not history:
+        result["status"] = "no_recent_complete_history"
+        return result
+
+    latest = history[0]
+    signatures = Counter(record["player_ids"] for record in history)
+    max_count = max(signatures.values())
+    modal_signature = next(
+        record["player_ids"]
+        for record in history
+        if signatures[record["player_ids"]] == max_count
+    )
+    current_ids = current["player_ids"]
+    changed_latest = current_ids != latest["player_ids"]
+    historical_player_ids = set().union(*(record["player_ids"] for record in history))
+    result.update(
+        {
+            "status": "changed" if changed_latest else "unchanged",
+            "red_flag": changed_latest,
+            "changed_from_latest": changed_latest,
+            "changed_from_modal": current_ids != modal_signature,
+            "previous_matches_compared": len(history),
+            "distinct_lineups_90d": len(signatures),
+            "modal_lineup_matches": max_count,
+            "latest_previous_match_id": latest["match_id"],
+            "latest_previous_at_utc": latest["datetime"].strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "latest_previous_players": latest["players"],
+            "players_in": _lineup_players(
+                current_ids - latest["player_ids"],
+                current["players"],
+                latest["players"],
+            ),
+            "players_out": _lineup_players(
+                latest["player_ids"] - current_ids,
+                current["players"],
+                latest["players"],
+            ),
+            "new_players_in_90d": _lineup_players(
+                current_ids - historical_player_ids,
+                current["players"],
+                *(record["players"] for record in history),
+            ),
+        }
+    )
+    return result
+
+
 def build_player_match_form(master: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     forms: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in master.values():
@@ -2018,6 +2305,7 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
     market = controls.get("market") or {}
     map_pool = controls.get("map_pool") or controls.get("map_veto") or {}
     roster = controls.get("roster_stability") or {}
+    roster_changes = controls.get("roster_change_90d") or {}
     player_form = controls.get("player_form") or {}
     context = controls.get("tournament_context") or {}
     fatigue = controls.get("fatigue") or {}
@@ -2055,14 +2343,61 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
     elif abs(map_pool.get("map_pool_advantage_team1") or 0) >= 0.12:
         flags.append({"level": "info", "code": "MAP_POOL_EDGE", "message": "Hay ventaja relevante en pool de mapas."})
 
-    for side in ("team1", "team2"):
-        side_roster = roster.get(side) or {}
-        if side_roster.get("recent_change"):
-            flags.append({"level": "warning", "code": "ROSTER_RECENT_CHANGE", "message": "Roster con cambio reciente detectado."})
-            break
-        if side_roster.get("standin_risk"):
-            flags.append({"level": "warning", "code": "STANDIN_RISK", "message": "Riesgo de stand-in o roster incompleto."})
-            break
+    changed_rosters = [
+        side_roster
+        for side_roster in (
+            roster_changes.get("team1") or {},
+            roster_changes.get("team2") or {},
+        )
+        if side_roster.get("red_flag")
+    ]
+    if changed_rosters:
+        details = []
+        for side_roster in changed_rosters:
+            players_in = (
+                ", ".join(player["name"] for player in side_roster.get("players_in") or [])
+                or "sin alta identificada"
+            )
+            players_out = (
+                ", ".join(player["name"] for player in side_roster.get("players_out") or [])
+                or "sin baja identificada"
+            )
+            details.append(
+                f"{side_roster.get('team_name') or 'Equipo'}: entra {players_in}; "
+                f"sale {players_out}; comparado con "
+                f"{side_roster.get('latest_previous_match_id') or 'ultimo partido'}."
+            )
+        flags.insert(
+            0,
+            {
+                "level": "danger",
+                "code": "ROSTER_CHANGE_90D",
+                "message": " ".join(details),
+            },
+        )
+
+    if any(
+        side_roster.get("announced_standins")
+        for side_roster in roster_changes.values()
+    ):
+        flags.append(
+            {
+                "level": "warning",
+                "code": "STANDIN_RISK",
+                "message": "La alineacion anunciada identifica al menos un stand-in.",
+            }
+        )
+    elif any(
+        (roster.get(side) or {}).get("standin_risk")
+        for side in ("team1", "team2")
+    ):
+        flags.append(
+            {
+                "level": "warning",
+                "code": "ROSTER_PROFILE_INCOMPLETE",
+                "message": "El perfil de al menos un equipo no contiene exactamente cinco jugadores.",
+            }
+        )
 
     if min((player_form.get("team1") or {}).get("real_form_coverage", 0), (player_form.get("team2") or {}).get("real_form_coverage", 0)) < 0.6:
         flags.append({"level": "info", "code": "PLAYER_FORM_BACKFILL_ONLY", "message": "Forma 5/10/20 aun depende poco de matches reales."})
@@ -2151,6 +2486,11 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         cs2_dataio.load_external_feature_store(LIVE_DB)
         if _CS2_OK and LIVE_DB.exists() else {"rankings": {}, "rosters": {}}
     )
+    actual_lineup_store = (
+        load_actual_lineup_store(LIVE_DB)
+        if LIVE_DB.exists()
+        else {"teams": {}, "match_datetimes": {}}
+    )
     master = load_master()
     state = build_history_state(history)
     historical_p = historical_probability_rows(history, state)
@@ -2204,6 +2544,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         roster_control2 = roster_stability(team2.get("id"), profiles.get(str(team2.get("id") or "")), roster_history, run_dir)
         match_context = match_context_from_snapshot(snapshot)
         match_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
+        roster_change1 = roster_change_90d(
+            snapshot,
+            "team1",
+            team1,
+            actual_lineup_store,
+        )
+        roster_change2 = roster_change_90d(
+            snapshot,
+            "team2",
+            team2,
+            actual_lineup_store,
+        )
         fatigue1 = fatigue_metrics(team1.get("name") or t1, match_dt, schedule_index, snapshot["id"])
         fatigue2 = fatigue_metrics(team2.get("name") or t2, match_dt, schedule_index, snapshot["id"])
 
@@ -2341,6 +2693,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "team2": team2.get("name") or t2,
             "team1_key": t1,
             "team2_key": t2,
+            "format": snapshot.get("format") or "bo3",
             "analytics": snapshot.get("analytics"),
         }
         announced_lineups = snapshot.get("prematch_lineups") or {}
@@ -2380,9 +2733,23 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                 features.update(roster_features)
 
         model_epistemic_std = None
+        series_score_distribution = None
         if engine is not None:
             try:
                 model_p, model_epistemic_std = model_probability_and_uncertainty(
+                    engine,
+                    t1,
+                    t2,
+                    match_dt,
+                    event,
+                    snapshot.get("format") or "bo3",
+                    analytics_match,
+                    tournament,
+                    features,
+                    announced_lineups=announced_lineups,
+                    event_metadata=event_metadata,
+                )
+                series_score_distribution = model_series_score_distribution(
                     engine,
                     t1,
                     t2,
@@ -2435,6 +2802,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         prediction = {
             "model_prob_team1": model_p,
             "model_epistemic_std": round(model_epistemic_std, 5) if model_epistemic_std is not None else None,
+            "series_score_distribution": series_score_distribution,
+            "predicted_series_score": (
+                max(series_score_distribution, key=series_score_distribution.get)
+                if series_score_distribution else None
+            ),
+            "bo3_compositional_prob_team1": (
+                round(0.5 + float(features.get("bo3_compositional_prob_centered", 0.0)), 5)
+                if (
+                    features.get("bo3_compositional_available", 0.0) >= 0.5
+                    and ((model_metadata.get("feature_policies") or {}).get("bo3_map_compositional") or {}).get("enabled")
+                ) else None
+            ),
             "odds_prob_team1": odds_p,
             "blended_prob_team1": blended,
             "risk_adjusted_prob_team1": decision["risk_adjusted_prob_team1"],
@@ -2466,6 +2845,10 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "map_pool": map_pool,
             "map_veto": map_pool,
             "roster_stability": {"team1": roster_control1, "team2": roster_control2},
+            "roster_change_90d": {
+                "team1": roster_change1,
+                "team2": roster_change2,
+            },
             "player_form": {"team1": player_form1, "team2": player_form2},
             "tournament_context": tournament,
             "fatigue": {"team1": fatigue1, "team2": fatigue2},

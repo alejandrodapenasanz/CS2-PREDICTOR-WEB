@@ -387,7 +387,7 @@
         </div>
         <div class="panel">
           <div class="panel-title"><span>// Fetch state</span><span class="small">frescura y bloqueos</span></div>
-          <table><thead><tr><th>Entidad</th><th>Total</th><th>OK</th><th>Fresh</th><th>Issues</th></tr></thead><tbody id="dbFetchRows"></tbody></table>
+          <table><thead><tr><th>Entidad</th><th>Total</th><th>OK</th><th>Fresh</th><th>Sin muestra</th><th>Issues</th></tr></thead><tbody id="dbFetchRows"></tbody></table>
         </div>
         <div class="panel">
           <div class="panel-title"><span>// Ultimos ingest</span></div>
@@ -557,7 +557,7 @@
       let list = M.filter(m => {
         const t = `${tn(m,'team1')} ${tn(m,'team2')} ${m.event||""}`.toLowerCase();
         if (q && !t.includes(q)) return false;
-        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning")) return false;
+        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")) return false;
         if (ff && ff!=="__warn" && !(m.flags||[]).some(f=>f.code===ff)) return false;
         if (of==="yes" && !m.odds?.available) return false;
         if (of==="no" && m.odds?.available) return false;
@@ -591,7 +591,7 @@
     }
     function renderKpis(list){
       const odds = list.filter(m=>m.odds?.available).length;
-      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning")).length;
+      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")).length;
       const high = list.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
       const val = list.filter(m=>Math.abs(m.controls?.market?.model_edge_team1||0)>=.08).length;
       const avg = list.length ? list.reduce((s,m)=>s+decisionConfidence(m),0)/list.length : 0;
@@ -648,6 +648,27 @@
       const dp=decisionProb(m), ds=decisionSide(m), dfav=decisionFavorite(m), dconf=decisionConfidence(m);
       const avg=m.odds?.average;
       const rosterRow = s => { const r=(ctl.roster_stability||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: ${num(r.days_with_current_roster,1)}d con roster · cambios30d ${r.changes_30d??"—"} · size ${r.roster_size??"—"} ${r.standin_risk?"· ⚠ stand-in":""}</div>`; };
+      const rosterChangeRow = s => {
+        const r=(ctl.roster_change_90d||{})[s]||{};
+        if(r.status==="changed"){
+          const incoming=(r.players_in||[]).map(p=>p.name).join(", ")||"sin alta identificada";
+          const outgoing=(r.players_out||[]).map(p=>p.name).join(", ")||"sin baja identificada";
+          return `<div class="small" style="color:var(--red-soft)">${esc(sideName(m,s))}: CAMBIO 90D · entra ${esc(incoming)} · sale ${esc(outgoing)} · vs partido ${esc(r.latest_previous_match_id||"anterior")} · muestra ${r.previous_matches_compared||0}</div>`;
+        }
+        if(r.status==="unchanged"){
+          return `<div class="small" style="color:var(--green)">${esc(sideName(m,s))}: misma alineacion que el ultimo partido · ${r.previous_matches_compared||0} partidos comparados en 90d</div>`;
+        }
+        const reason={
+          current_lineup_missing:"alineacion anunciada no publicada",
+          current_lineup_incomplete:"alineacion anunciada incompleta",
+          no_recent_complete_history:"sin alineacion real completa en los ultimos 90d",
+          team_id_missing:"equipo pendiente de definir",
+          team_lineup_mismatch:"IDs de equipo inconsistentes",
+          match_datetime_unknown:"hora del partido desconocida",
+          post_start_snapshot_rejected:"snapshot posterior al inicio rechazado"
+        }[r.status]||"sin datos";
+        return `<div class="small">${esc(sideName(m,s))}: cambio 90d no verificable · ${esc(reason)}</div>`;
+      };
       const formRow = s => { const fr=(ctl.player_form||{})[s]||{}, l5=(fr.team_windows||{}).last5||{}, se=fr.season_avg||{}; return `<div class="small">${esc(sideName(m,s))}: R season ${num(se.rating)} · L5 ${num(l5.rating)} · KAST ${num(se.kast,1)} · cobertura real ${pct(fr.real_form_coverage)}</div>`; };
       const playerEdgeRow = s => {
         const r=m.rosters?.[s]||{}, d=r.distribution||{}, met=(d.metrics||{}).rating||{}, top=(d.top||{}).rating||{}, bot=(d.bottom||{}).rating||{};
@@ -702,7 +723,7 @@
           <div class="small">Confianza ${esc(mp.confidence||"n/a")} · cobertura ${pct(mp.coverage)} · ventaja T1 ${sg(mp.map_pool_advantage_team1)}</div>
           <div class="small">${esc(tn(m,"team1"))} mejor: ${mp.team1_best_map?`${esc(mp.team1_best_map.map)} (${sg(mp.team1_best_map.diff_team1)})`:"—"} · ${esc(tn(m,"team2"))} mejor: ${mp.team2_best_map?`${esc(mp.team2_best_map.map)}`:"—"}</div>
         </div>
-        <div class="box"><b>Roster · forma · fatiga</b>${rosterRow("team1")}${rosterRow("team2")}<div style="height:6px"></div>${playerEdgeRow("team1")}${playerEdgeRow("team2")}<div style="height:6px"></div>${formRow("team1")}${formRow("team2")}<div style="height:6px"></div>${fatigueRow("team1")}${fatigueRow("team2")}</div>
+        <div class="box"><b>Roster · forma · fatiga</b>${rosterChangeRow("team1")}${rosterChangeRow("team2")}<div style="height:6px"></div>${rosterRow("team1")}${rosterRow("team2")}<div style="height:6px"></div>${playerEdgeRow("team1")}${playerEdgeRow("team2")}<div style="height:6px"></div>${formRow("team1")}${formRow("team2")}<div style="height:6px"></div>${fatigueRow("team1")}${fatigueRow("team2")}</div>
         <div class="box"><b>Contexto torneo</b>
           <div class="small">Stage ${esc(ctx.stage||"?")} · ${esc(ctx.environment||"?")} · high-stakes ${ctx.high_stakes?"sí":"no"} · incentivo ${esc(ctx.incentive_label||ctx.incentive_uncertainty||"?")} · fuente ${esc(ctx.source||"n/a")}</div>
           ${ctx.stage_detail?`<div class="small">${esc(ctx.stage_detail)}</div>`:""}
@@ -874,8 +895,8 @@
       $("dbFetchRows").innerHTML = (DB.fetch_summary||[]).map(r=>{
         const issues = Number(r.blocked||0)+Number(r.error||0)+Number(r.partial||0);
         const color = issues ? "var(--amber)" : "var(--green)";
-        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${intfmt(r.total)}</td><td>${intfmt(r.ok)}</td><td>${intfmt(r.fresh)}</td><td style="color:${color}">${intfmt(issues)}</td></tr>`;
-      }).join("") || '<tr><td colspan="5" class="empty">Sin fetch_state</td></tr>';
+        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${intfmt(r.total)}</td><td>${intfmt(r.ok)}</td><td>${intfmt(r.fresh)}</td><td>${intfmt(r.not_found)}</td><td style="color:${color}">${intfmt(issues)}</td></tr>`;
+      }).join("") || '<tr><td colspan="6" class="empty">Sin fetch_state</td></tr>';
 
       const rowsSummary = (rows) => {
         const entries = Object.entries(rows || {}).sort((a,b)=>b[1]-a[1]).slice(0,4);

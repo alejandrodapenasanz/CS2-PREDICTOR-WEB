@@ -6,6 +6,8 @@ matplotlib>=3.8
 lightgbm>=4.5
 xgboost>=2.1
 shap>=0.46
+optuna>=4.5
+PyYAML>=6.0.2
 # CatBoost es OPCIONAL: si esta instalado, el trainer anade los candidatos
 # catboost_cal y ensemble3_cal (se eligen solo si mejoran el log loss). Si no
 # esta, esos candidatos se omiten sin romper nada.
@@ -25,3 +27,5 @@ flasgger==0.9.7.1
 pytest>=8.0.0
 pytest-flask>=1.3.0
 pytest-cov>=4.0.0
+ruff>=0.12.0
+mypy>=1.16.0

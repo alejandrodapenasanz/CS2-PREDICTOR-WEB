@@ -217,7 +217,7 @@ flowchart TD
 Tablas clave y qué preservan:
 
 - `matches`: separa `status` (`scheduled`, `pending_result`, `completed`) y `data_tier` (`historical_seed`, `prematch_captured`, `completed`). Los campos PRE-MATCH (`prematch_captured_at_utc`, odds, contexto, snapshots y flags de cobertura) no se pisan con consultas futuras; cuando llega el resultado solo se rellena el bloque RESULT (`winner_team_id`, `score_t1`, `score_t2`, `result_filled_at_utc`).
-- `fetch_state`: TTL compartido por entidad para evitar rescrapear lo fresco: perfiles de equipo 7 dias, stats de jugador 3 dias, rankings 7 dias y assets/Analytics casi permanentes si ya se capturaron correctamente. Estados `blocked`/`error` se reintentan pronto. `DAILY_SNAPSHOTS/start.py` consulta esta tabla antes de pedir perfiles, stats, rankings, assets o Analytics.
+- `fetch_state`: TTL compartido por entidad para evitar rescrapear lo fresco: perfiles de equipo 7 dias, stats de jugador 3 dias, rankings 7 dias y assets/Analytics casi permanentes si ya se capturaron correctamente. Para `player_stats` la decision es individual: un jugador fresco no se vuelve a pedir porque otro miembro del roster sea nuevo o este vencido. Estados `blocked`/`error` se reintentan pronto y `not_found` significa que HLTV respondio correctamente pero no habia una muestra util. `DAILY_SNAPSHOTS/start.py` consulta esta tabla antes de pedir perfiles, stats, rankings, assets o Analytics.
 - `ingest_runs`: auditoria de cada run aplicado a SQLite: `run_id`, inicio/fin, estado, filas upserted y requests saltadas por frescura.
 - `raw_snapshots`: snapshots exactos de `run_manifest`, `upcoming_matches`, `match_snapshot`, `team_profile`, `player_compare_stats`, `predictions_enriched`, `match_assets`, `match_analytics`, `team_ranking`, `raw_html` y `data_quality_report`. Es el seguro contra que HLTV cambie o borre información después.
 - `matches.stage`, `matches.environment`, `matches.stage_detail`, `matches.incentive_label`, `matches.high_stakes`, `matches.opening_match`, `matches.winner_advances`, `matches.loser_eliminated`, `matches.bracket` y `matches.context_json`: contexto parseado del bloque `Maps` de HLTV. Guarda LAN/online, fase (group/swiss/playoff/etc.), detalle textual ("Winner advances...", "elimination match", Swiss record), flags consultables y el JSON completo para auditoría.
@@ -225,6 +225,14 @@ Tablas clave y qué preservan:
 - `map_player_stats` y `map_player_side_stats`: box score real por jugador/mapa y por lado `total`/`ct`/`t` cuando el partido ya tiene assets/mapstats. Es la fuente granular para recalcular forma L5/L10/L20 sin consultar páginas históricas cambiantes.
 - `team_rosters`: pertenencia temporal real por jugador/equipo (`valid_from`, `valid_to`, `source_run_id`, `source_signature`). Un jugador no "es" de un equipo: estuvo en él durante un intervalo observado.
 - `prematch_lineup_snapshots`: announced pre-match lineup with capture time, player, team, and stand-in marker. It is intentionally separate from `match_lineups`, the actual lineup after mapstats.
+- **Red flag de cambio de roster (90 dias):** `enrich_predictions.py` exige cinco
+  IDs de jugador en la alineacion anunciada antes del inicio y los compara con
+  los cinco IDs de la alineacion real del ultimo partido anterior del mismo
+  equipo dentro de 90 dias. Si difieren, genera `ROSTER_CHANGE_90D` en nivel
+  `danger` y conserva en `controls_json.roster_change_90d` el partido usado,
+  jugadores que entran/salen, muestra comparada y alineacion modal. Historicos
+  incompletos, partidos futuros, snapshots post-inicio y equipos sin ID se
+  descartan: quedan como cobertura desconocida y nunca como cambio inventado.
 - `match_analytics_snapshots`, `match_analytics_map_stats`, and `match_analytics_map_handicap`: point-in-time Analytics Center data: map first pick/ban, win rate and sample; BO3 distribution, overtime, round margins, core/stand-in signals, and event metadata. Raw HTML and `payload_json` remain available for audit.
 - `events`: stores HLTV event ID, prize pool, teams competing, and source provenance. A scheduled match can update corrected participants, time, or stage without rewriting any historical snapshot.
 - `odds`: cuotas por bookmaker y timestamp, separando `opening`, `live` y `closing`. La apertura sirve para benchmark y EV; el cierre se guarda para auditoría, no como feature pre-partido.
@@ -233,7 +241,7 @@ Tablas clave y qué preservan:
 Flujo operativo de la BBDD viva:
 
 1. `start.ps1` inicializa/migra `BBDD/cs2.db` con `BBDD/build_db.py` antes del scrapeo.
-2. `DAILY_SNAPSHOTS/start.py` consulta `matches`/`fetch_state` y salta lo ya resuelto: `/results` se descarga solo para IDs `pending_result` conocidos por SQLite y solo pagina a offsets antiguos si esos IDs no aparecen en las páginas previas; perfiles, stats, rankings, Analytics y assets se gatean por frescura/cobertura.
+2. `DAILY_SNAPSHOTS/start.py` consulta `matches`/`fetch_state` y salta lo ya resuelto: `/results` se descarga solo para IDs `pending_result` conocidos por SQLite y solo pagina a offsets antiguos si esos IDs no aparecen en las páginas previas; perfiles, stats, rankings, Analytics y assets se gatean por frescura/cobertura. En stats de jugador se materializa la cache fresca para consumo del predictor y se crea una lista online solo con IDs nuevos, vencidos o incompletos.
 3. Si una captura falla por bloqueo, el scraper marca la entidad en `fetch_state` como `blocked`/`error` con reintento corto, conserva lo bueno ya guardado y la siguiente ejecución vuelve a intentar solo los huecos.
 4. Justo después del scrape, `BBDD/ingest.py --run-dir <run>` upserta hechos, odds, snapshots raw, rankings y assets normalizados (`maps`, `veto`, `match_lineups`, `map_player_stats`, `map_player_side_stats`). Así `.\start.ps1 -Retrain` entrena ya con lo recién capturado.
 5. Tras `enrich_predictions.py`, `BBDD/ingest.py` se ejecuta otra vez para congelar predicciones/staking y `BBDD/export_master_json.py` genera `DAILY_SNAPSHOTS/master/matches.json` desde SQLite para compatibilidad con componentes que todavía consumen JSON.
@@ -277,7 +285,7 @@ HLTV no ofrece API pública y protege la web con Cloudflare, que devuelve `403`/
 5. **Navegador headless indetectable** (`undetected-chromedriver`, Camoufox, Playwright con fingerprint TLS/JA3) cuando lo anterior no baste.
 6. **Resolución de captcha** (2Captcha y similares) solo como último recurso, sobre todo para datos en vivo.
 
-Implementación actual: `DAILY_SNAPSHOTS/start.py` usa sesión HTTP persistente, `cf_session.json`, pausa mínima entre peticiones, `Retry-After`, backoff largo, caché en memoria por URL durante el run, warm-up inicial de sesión, cuarentena temporal de URLs fallidas, presupuesto máximo de peticiones por run, circuit breaker global si aparecen bloqueos repetidos y fallback Scrapy. El navegador stealth tiene timeout acotado y, si queda bloqueado, `start.ps1` permite refrescar automáticamente la cookie con `SCRAPPER/hltv-scraper-api/hltv_scraper/hltv_scraper/grab_cf.py`, que abre una ventana visible para obtener una nueva `cf_clearance`. `start.ps1` favorece completitud sobre velocidad: delays por defecto más altos, timeouts amplios, variables `HLTV_*` conservadoras y transcript completo en `logs/start_*.log`. Al final de cada run se guarda `fetch_diagnostics.json` con intentos HTTP, cache hits, bloqueos, errores, URLs problemáticas y segundos dormidos por cooldown.
+Implementación actual: `DAILY_SNAPSHOTS/start.py` usa sesión HTTP persistente, `cf_session.json`, pausa mínima entre peticiones, `Retry-After`, backoff largo, caché en memoria por URL durante el run, warm-up inicial de sesión, cuarentena temporal de URLs fallidas, presupuesto máximo de peticiones por run, circuit breaker global si aparecen bloqueos repetidos y fallback Scrapy. El navegador stealth tiene timeout acotado y, si queda bloqueado, `start.ps1` permite refrescar automáticamente la cookie con `SCRAPPER/hltv-scraper-api/hltv_scraper/hltv_scraper/grab_cf.py`, que abre una ventana visible para obtener una nueva `cf_clearance`. La fase de stats de jugador corta ante el primer challenge, guarda su checkpoint, renueva la sesion y reintenta; no espera una cadena de backoffs antes de pedir una cookie nueva. Ademas, `/stats/players/compare` se parsea por columna de jugador y el perfil individual valida los campos core, evitando copiar valores del rival cuando HLTV renderiza una columna sin muestra. `start.ps1` favorece completitud sobre velocidad: delays por defecto más altos, timeouts amplios, variables `HLTV_*` conservadoras y transcript completo en `logs/start_*.log`. Al final de cada run se guarda `fetch_diagnostics.json` con intentos HTTP, cache hits, bloqueos, errores, URLs problemáticas y segundos dormidos por cooldown.
 
 #### 4.5.3. No abusar y cachear (obligatorio)
 
@@ -681,20 +689,18 @@ Se calculan point-in-time desde el estado actual de la base. No es reentrenar.
 - **Accuracy por franjas automatica:** cada entreno calcula sobre las predicciones walk-forward del modelo promovido las bandas 50-60/60-70/70-80/80-90/90-100, guarda aciertos, muestra, accuracy, probabilidad media y gap en `MODEL/results/favorite_accuracy_bands.json` y en el artefacto. `WEB/build_web.py` lo publica en la pestaña BBDD; `start.ps1 -Retrain` ejecuta ambas fases en orden.
 - **Que prueba el entrenamiento profesional:** Logistica calibrada, LightGBM, CatBoost, ensembles, calibracion Platt/isotonica/beta, `form_half_life` en `45,60,90,120,180` y `wf_gap` en `0,1`.
 - **Criterio de seleccion:** menor **log loss walk-forward**. La accuracy se reporta, pero no decide produccion si empeora la calidad probabilistica.
-- **Artefacto final actual (2026-07-10, BBDD fisicamente deduplicada):** `ensemble3_cal` (`logistic + lightgbm + catboost`), calibracion Platt, `--form-half-life 90 --wf-gap 0`, `n_eval=7.056`, accuracy `64,4133%`, log loss `0,628326`, Brier `0,219411`, ROC-AUC `0,691667`, ECE `0,017049`.
+- **Artefacto final actual (2026-07-13):** `super_learner_cal`, `n_eval=7.115`, accuracy `64,4413%`, log loss `0,629243`, Brier `0,219671`, ROC-AUC `0,690638` y ECE `0,013380`.
 - **Reajuste por evento (inmediato):** cambio de pool de mapas de Valve, parche gordo de jugabilidad, cambio de formula de rating de HLTV. Son cambios de distribucion.
-- **Reajuste por deriva (bajo demanda):** monitorizar log loss/Brier rodante de predicciones recientes; si se degrada mas de un umbral respecto al baseline de validacion, reentrenar aunque no sea lunes.
+- **Reajuste por deriva (bajo demanda):** `MODEL/monitor_drift.py` se ejecuta automaticamente al final de `start.ps1`. Si Page-Hinkley o las ventanas de log loss/CLV superan los umbrales de `MODEL/config.yaml`, se revisa y reentrena aunque no sea lunes.
 
 ### 10.4. Recalibración → incluida en el sweep semanal
 La calibración se desajusta antes que la capacidad de ranking. El sweep profesional semanal compara Platt, isotónica y beta dentro de la validacion walk-forward; si en el futuro se separa una capa de recalibracion ligera, debe validarse con el mismo criterio de log loss/Brier.
 
-### 10.5. Búsqueda de hiperparámetros → rara (trimestral o ante drift grande)
-Día a día: refit con hiperparámetros fijos (rápido). Optuna/grid completo: ocasional.
+### 10.5. Busqueda de hiperparametros
+Optuna purgado ajusta la regularizacion logistica de forma causal durante el walk-forward (8 trials, retune cada 26 semanas). El sweep amplio de algoritmos/half-life/gap sigue siendo trimestral o ante drift grande.
 
-### 10.6. Monitorización
-Registrar, por cada reentrenamiento: snapshot de datos, fecha, métricas. Mantener un panel de log loss/Brier rodante y de deriva de calibración.
-
-`[ABIERTO: fijar los umbrales concretos de drift y la herramienta de scheduling/monitorización.]`
+### 10.6. Monitorizacion
+Cada entrenamiento guarda `experiment_manifest.json` con SHA-256 del dataset y configuracion, semilla, commit/dirty state, argumentos y versiones. `drift_report.json` audita OOS walk-forward; `drift_live.json` usa exclusivamente predicciones pre-match congeladas que ya tienen resultado. La ventana, referencia, Page-Hinkley y alertas CLV estan versionadas en `MODEL/config.yaml`.
 
 ### 10.7. Política de mercado / odds
 
@@ -803,45 +809,106 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 - ✅ **A2. Incertidumbre epistémica** — `artifact.predict_proba_team1_with_uncertainty`
   (std ponderada entre miembros del ensemble); `enrich` la expone (`model_epistemic_std`)
   y **reduce el stake** vía `uncertainty_factor` cuando el ensemble discrepa.
-- 🟡 **A3. Calibración/auditoría por segmento** — `segment_calibration` por **formato**
-  (ECE/log loss/Brier por BO1/3/5) → `segment_calibration.json` + metadatos. Tier/
-  LAN-online se añaden cuando esas columnas de contexto estén activas.
+- ✅ **A3. Calibración/auditoría por segmento** — `segment_calibration_suite` calcula
+  accuracy, ECE, log loss y Brier por **formato, LAN/online, fase y tier de evento**.
+  Los segmentos desconocidos se excluyen de conclusiones y los grupos con menos de
+  30 casos quedan marcados como no concluyentes. Resultado en
+  `MODEL/results/segment_calibration.json`, `REPORT.md` y metadatos del artefacto.
 - ✅ **A4. Purga/embargo (`--wf-gap`) + tests de significancia** (bootstrap+Wilcoxon
   pareado sobre log loss por-partido, CI95 + MDE) vs Glicko y vs 2º mejor →
   `significance.json` y metadatos del artefacto.
-- ⬜ **A5. Poda de features / multicolinealidad** (VIF, permutation importance vs SHAP, RFE).
-- ⬜ **A6. Target más rico**: map-level (≈3× datos), ordinal 2-0/2-1/1-2/0-2, o multi-task
-  con diferencia de rondas como target auxiliar. Habilita props.
-- 🟡 **A7. Strength-of-schedule explícito** (dureza del calendario reciente). Parcial vía `opp_elo`.
+- ✅ **A5. Poda de features / multicolinealidad** — antes de entrenar se eliminan
+  automáticamente solo constantes y duplicados matemáticos (incluido signo opuesto),
+  sin mirar el target. VIF, permutation importance en holdout cronológico, RFE y SHAP
+  generan `MODEL/results/feature_pruning.json`; sus candidatos son diagnósticos y no se
+  eliminan sin demostrar mejora en validación temporal anidada.
+- ✅ **A6. Target más rico BO3** — sidecar multiclase `0-2/1-2/2-1/2-0`, simétrico
+  A↔B y con evaluación walk-forward. Se auto-activa con al menos 2.000 BO3, 300 por
+  clase y solo si mejora el baseline empírico multiclase. El detalle se guarda en
+  `rich_target_bo3*.json`, el artefacto expone la distribución y `enrich` publica
+  `series_score_distribution`/`predicted_series_score`. No sustituye al Modelo A de
+  ganador. El target por mapa sigue pendiente: solo hay 212 series con mapstats en la
+  auditoría de 2026-07-13, insuficientes para validarlo profesionalmente.
+- ✅ **A7. Strength-of-schedule explícito** — por equipo y estrictamente point-in-time:
+  Elo medio ponderado por recencia de los rivales, residual real-menos-esperado L10 y
+  ponderado, dispersión de fuerza rival y muestra mínima. Familia `strength_of_schedule`
+  auto-activada desde 800 filas válidas mediante `AUTO_FEATURE_FAMILIES`.
+
+**Validación 2026-07-13 sobre `BBDD/cs2.db`:** A5 redujo 69→68 columnas al detectar
+una única redundancia exacta (`trueskill_available == mov_available`) y ejecutó el
+diagnóstico en split cronológico 7.640/1.910. A6 quedó `ON`: 8.533 BO3 elegibles,
+6.290 predicciones walk-forward, log loss multiclase 1,2949 frente a 1,3593 del
+baseline, accuracy de marcador 41,30% y de ganador derivada 64,05%. A7 quedó `ON`
+con 7.076/800 filas. A3 está operativo, pero su contexto aún no permite conclusiones
+globales: 123 partidos con LAN/online y fase conocida (11 LAN, 112 online) y 0 con
+tier de evento; esos segmentos permanecen correctamente como no concluyentes.
 
 ### B. Algoritmos / rating
 - ✅ **B0. Ratings MOV, TrueSkill de equipo y por-jugador** — familias auto-gated
   (`mov_rating` 800, `team_trueskill` 800, `player_rating` 200).
-- ⬜ **B8. Modelo jerárquico bayesiano (Bradley-Terry / Dixon-Coles)** como miembro
-  diverso del super-learner (incertidumbre + partial pooling para equipos con poca muestra).
-- ⬜ **B9. Rating en espacio de estados (Kalman/partícula)** — alternativa suave al Glicko. Experimental.
-- ⬜ **B10. Optuna dentro de CV purgada** optimizando log loss (no accuracy).
-- ⬜ **B11. Modelo composicional Bo3 por mapa + veto** — `P(serie)=p1p2+p1(1-p2)p3+(1-p1)p2p3`.
-  Auto-activa con cobertura suficiente de veto/mapstats. Monetizable (props).
+- ✅ **B8. Bradley-Terry bayesiano jerárquico** — actualización online causal con
+  prior gaussiano compartido, aproximación Laplace diagonal, partial pooling para
+  equipos con poca muestra e incertidumbre predictiva. Es candidato calibrado propio
+  y miembro explícito del super-learner; no entra en la matriz genérica, por lo que
+  sus pesos convexos pueden quedar en cero si no aporta.
+- ✅ **B9. Rating en espacio de estados Kalman** — media/varianza por equipo,
+  ruido de proceso y observación pareada. Es candidato calibrado independiente y
+  miembro del super-learner con el mismo aislamiento que B8.
+- ✅ **B10. Optuna dentro de CV purgada** — activo por defecto: TPE determinista,
+  objetivo log loss, folds internos expansivos con embargo mínimo de una semana,
+  8 trials y reoptimización causal cada 26 semanas. El ajuste final vuelve a usar
+  solo el histórico disponible. Auditoría en `MODEL/results/optuna_tuning.json`.
+- ✅ **B11. Modelo composicional Bo3 por mapa + veto estimado** — selecciona pick de
+  cada equipo y decider exclusivamente desde Analytics pre-match, contrae winrates
+  por muestra y calcula `P(serie)=p1p2+p1(1-p2)p3+(1-p1)p2p3`. Auto-gate de 500
+  series válidas y mínimo 10 mapas por equipo/mapa; jamás usa el veto post-partido
+  como feature. La implementación está terminada, pero permanece `OFF` por cobertura.
 
-### C. Código / ingeniería (rigor, no accuracy)
-- ⬜ **C12. Detección de drift** (log loss/CLV rodante; ADWIN/Page-Hinkley) + features de régimen (parche, map pool).
-- ⬜ **C13. Config centralizada** (umbrales/hiperparámetros a `config.yaml`/dataclass versionada).
-- 🟡 **C14. CI + `ruff`** — `.github/workflows/ci.yml` corre `pytest tests/` + ruff
-  (no bloqueante) en push/PR a main/dev/pre-dev; `ruff.toml` lenient. `mypy` y smoke
-  de pipeline completo, pendientes.
-- 🟡 **C15. Reproducibilidad determinista** (semillas + versionado de datos/config por experimento). Parcial.
+**Validación B0/B8-B11 (2026-07-13):** B0: MOV y TrueSkill de equipo `ON`
+con 8.846/800 filas; player rating `OFF` con 119/200. B8 y B9 `ON` con
+7.076/800. Como candidatos aislados sobre 7.114 predicciones OOS, Bradley-Terry
+obtuvo accuracy 60,94% / log loss 0,6517 y Kalman 61,41% / 0,6473: aportan
+diversidad, pero no justifican sustituir al modelo principal y por eso el
+super-learner puede asignarles peso cero. B10 superó el smoke purgado con Optuna
+4.9 (`best_C=0,1582`, 2 trials de prueba, 3 folds). B11 tiene 0/500 casos
+completamente elegibles; queda preparado para activarse sin intervención manual.
+
+### C. Codigo / ingenieria (rigor, no accuracy)
+- ✅ **C12. Deteccion de drift** — log loss y CLV rodantes + Page-Hinkley causal en
+  `cs2model/drift.py`. `monitor_drift.py` lee predicciones congeladas ya cerradas y
+  `start.ps1` lo ejecuta tras el ingest. El regimen de map pool se reconstruye solo
+  con mapstats anteriores; el parche permanece desconocido salvo metadata pre-match
+  explicita, sin inferirlo ni inventarlo.
+- ✅ **C13. Config centralizada** — `MODEL/config.yaml` + dataclasses validadas en
+  `cs2model/config.py`: defaults de entrenamiento, umbrales auto-gate, estimadores,
+  drift y backtest. La CLI conserva prioridad y `--config` permite experimentos.
+- ✅ **C14. CI + `ruff` + `mypy` + smoke** — GitHub Actions bloquea ante lint,
+  tipos de la infraestructura, tests o smoke en push/PR a main/dev/pre-dev.
+  `MODEL/smoke_pipeline.py` recorre carga, features, walk-forward, ajuste, artefacto,
+  drift y backtest en unos segundos sin tocar produccion.
+- ✅ **C15. Reproducibilidad determinista** — semillas centralizadas para Python,
+  NumPy y estimadores; cada experimento registra hashes de datos/config, Git, CLI y
+  dependencias y archiva el YAML efectivo junto al modelo.
 - ✅ **C16. Auditoría de fuga exhaustiva** — `tests/test_leakage_audit.py`: verifica que
   las features rolling de cada partido son idénticas al reconstruir el estado solo con
   partidos anteriores (garantía point-in-time).
-- ⬜ **C17. Backtest económico realista** (vig, límites de casa, cierre al momento, **CLV**).
+- ✅ **C17. Backtest economico realista** — `cs2model/economic.py` elimina el vig
+  para auditar probabilidades de mercado, simula Kelly fraccional con limites de
+  stake/payout y ejecucion configurable, y calcula CLV de precio contra la ultima
+  cuota pre-match. El cierre es auditoria: nunca decide lado, EV ni stake.
+
+**Validacion C12-C17 (2026-07-13):** `pytest tests/ -q` = 89 tests + 17 subtests;
+`ruff check MODEL BBDD DAILY_SNAPSHOTS tests` = OK; `python -m mypy` = 6 modulos
+tipados sin errores; smoke ejecutado dos veces = 160 filas, misma huella
+`5c60402fddfd` y misma accuracy. Monitor real: 79 predicciones cerradas, 55 con
+CLV (69,62% de cobertura), estado `ok` y CLV medio `-0,249%`.
 
 ### Prioridad (impacto/coste)
-1. A1 · 2. A4 · 3. A2 · 4. B11 + A6 (props, donde está el edge) · 5. C16/C14 (rigor).
+1. A1 · 2. A4 · 3. A2 · 4. B11 + A6 (props, donde esta el edge) · 5. aumentar cobertura point-in-time.
 
 > Honestidad: el modelo ya está en el techo predictivo publicado; A1/B10 son marginales
 > en accuracy. El valor grande está en **incertidumbre (A2), rigor (A4/C16), mercados
-> nuevos (A6/B11) y CLV (C17)** — no en exprimir más el moneyline.
+> nuevos (A6/B11) y medir CLV** — no en exprimir mas el moneyline.
 
 ---
 

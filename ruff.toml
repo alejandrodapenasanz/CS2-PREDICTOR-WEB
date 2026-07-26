@@ -3,12 +3,12 @@
 line-length = 120
 target-version = "py310"
 
+# Excluye el clon vendored de Scrapling y venvs.
+exclude = ["SCRAPPER/Scrapling", "**/.venv", "**/site-packages"]
+
 [lint]
 select = ["F", "E9"]   # Pyflakes (errores reales) + syntax; sin reglas de estilo agresivas
 ignore = ["F401"]      # imports "sin usar" (muchos son re-exports intencionados)
 
 [lint.per-file-ignores]
 "tests/*" = ["F811", "E402"]
-
-# Excluye el clon vendored de Scrapling y venvs.
-exclude = ["SCRAPPER/Scrapling", "**/.venv", "**/site-packages"]

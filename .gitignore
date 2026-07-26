@@ -41,6 +41,7 @@ MODEL/artifacts/*.pkl
 MODEL/artifacts/registry/
 MODEL/results/*.json
 MODEL/results/*.csv
+MODEL/results/*.yaml
 MODEL/results/professional_train_*/
 MODEL/results/full_train_catboost_*/
 MODEL/results/empirical_*/

@@ -22,17 +22,29 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
+import sys
 import time
 import warnings
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 warnings.filterwarnings("ignore")
+
+# Windows PowerShell may expose CP1252 stdout. Keep verbose training output
+# informative without letting one non-ASCII diagnostic abort a completed run.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="backslashreplace")
+    except (AttributeError, OSError):
+        pass
 
 from cs2model import dataio
 from cs2model.features import (
@@ -54,14 +66,43 @@ from cs2model.features import (
     TRUESKILL_FEATURE_COLUMNS,
     MOV_FEATURE_COLUMNS,
     PLAYER_RATING_FEATURE_COLUMNS,
+    SOS_FEATURE_COLUMNS,
+    BAYES_BT_FEATURE_COLUMNS,
+    KALMAN_FEATURE_COLUMNS,
+    BO3_COMPOSITIONAL_FEATURE_COLUMNS,
+    REGIME_FEATURE_COLUMNS,
     EXTENDED_DIFF_COLUMNS,
     _period_index,
 )
 from cs2model.metrics import metric_dict, calibration_bins
-from cs2model.artifacts import ModelArtifact, Component, ARTIFACT_PATH
+from cs2model.artifacts import (
+    ARTIFACT_PATH,
+    ColumnSubsetEstimator,
+    Component,
+    ModelArtifact,
+    ProbabilityColumnEstimator,
+)
 from cs2model.calibration import BetaCalibratedClassifier
+from cs2model.diagnostics import feature_pruning_diagnostics, prune_exact_redundancies
+from cs2model.rich_targets import (
+    BO3_SCORE_CLASSES,
+    evaluate_rich_target_walk_forward,
+    fit_rich_target_model,
+)
+from cs2model.compositional_bo3 import MAP_POOL_MIN_ROWS
+from cs2model.optuna_tuning import tune_logistic_c_purged
+from cs2model.config import (
+    DEFAULT_CONFIG_PATH,
+    get_runtime_config,
+    load_config,
+    set_runtime_config,
+)
+from cs2model.reproducibility import experiment_manifest, set_global_determinism
+from cs2model.economic import economic_backtest as run_economic_backtest
+from cs2model.drift import build_drift_report
 
 ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_CONFIG = load_config()
 DEFAULT_RAW = (
     ROOT / "SCRAPPER" / "hltv-scraper-api" / "hltv_scraper" / "data" / "raw"
     / "history_10000_2026-06-28" / "results_all.json"
@@ -77,27 +118,35 @@ ODDS_FEATURE_COLUMNS = [
 EXTRA_DIFF_COLUMNS = {"opening_odds_prob_centered"}
 # Las columnas DIFF de trueskill/mov/player-rating ya estan en
 # EXTENDED_DIFF_COLUMNS, asi que augment() las niega correctamente.
-ANALYTICS_MIN_TRAIN_ROWS = 120
-ANALYTICS_EXTENDED_MIN_TRAIN_ROWS = 200
+ANALYTICS_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("analytics", 120)
+ANALYTICS_EXTENDED_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("analytics_extended", 200)
 # Una alineacion anunciada completa tiene varias variables correlacionadas; se
 # exige una muestra cerrada mayor antes de dejar que altere produccion.
-ANNOUNCED_LINEUP_MIN_TRAIN_ROWS = 200
+ANNOUNCED_LINEUP_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("announced_lineups", 200)
 # Prize pool/tamano del evento son contexto de calibracion, no una ventaja de
 # lado. Requieren mas eventos antes de permitir interacciones no lineales.
-EVENT_METADATA_MIN_TRAIN_ROWS = 300
-CONTEXT_MIN_TRAIN_ROWS = 200
-CONTEXT_MIN_ENV_ROWS = 50
-PLAYER_MIN_TRAIN_ROWS = 200
-MAP_ASSET_MIN_TRAIN_ROWS = 200
-EVENT_HISTORY_MIN_TRAIN_ROWS = 200
-RANKING_MIN_TRAIN_ROWS = 200
-ROSTER_MIN_TRAIN_ROWS = 200
+EVENT_METADATA_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("event_metadata", 300)
+CONTEXT_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("context_total", 200)
+CONTEXT_MIN_ENV_ROWS = DEFAULT_CONFIG.feature_thresholds.get("context_per_environment", 50)
+PLAYER_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("player_snapshots", 200)
+MAP_ASSET_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("map_box_scores", 200)
+EVENT_HISTORY_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("event_history", 200)
+RANKING_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("rankings", 200)
+ROSTER_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("roster", 200)
 # Ratings adicionales auto-gated. MOV y TrueSkill son reconstruibles de todo el
 # histórico (umbral alto = entran con historia suficiente); el rating por jugador
 # depende de cobertura de box score, umbral como el de player snapshots.
-MOV_MIN_TRAIN_ROWS = 800
-TRUESKILL_MIN_TRAIN_ROWS = 800
-PLAYER_RATING_MIN_TRAIN_ROWS = 200
+MOV_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("mov_rating", 800)
+TRUESKILL_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("team_trueskill", 800)
+PLAYER_RATING_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("player_rating", 200)
+SOS_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("strength_of_schedule", 800)
+BAYES_BT_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("bayesian_bradley_terry", 800)
+KALMAN_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("kalman_state_space", 800)
+BO3_COMPOSITIONAL_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get(
+    "bo3_map_compositional", MAP_POOL_MIN_ROWS
+)
+RICH_TARGET_MIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("rich_target_total", 2000)
+RICH_TARGET_MIN_CLASS_ROWS = DEFAULT_CONFIG.feature_thresholds.get("rich_target_per_class", 300)
 ALL_ALGORITHMS = ("logistic", "lightgbm", "catboost", "xgboost", "random_forest")
 DEFAULT_ALGORITHMS = ALL_ALGORITHMS
 KIND_BY_ALGORITHM = {
@@ -129,6 +178,21 @@ AUTO_FEATURE_FAMILIES = (
     ("mov_rating", MOV_FEATURE_COLUMNS, "mov_available", MOV_MIN_TRAIN_ROWS),
     ("team_trueskill", TRUESKILL_FEATURE_COLUMNS, "trueskill_available", TRUESKILL_MIN_TRAIN_ROWS),
     ("player_rating", PLAYER_RATING_FEATURE_COLUMNS, "player_skill_available", PLAYER_RATING_MIN_TRAIN_ROWS),
+    ("strength_of_schedule", SOS_FEATURE_COLUMNS, "sos_available", SOS_MIN_TRAIN_ROWS),
+    ("bayesian_bradley_terry", BAYES_BT_FEATURE_COLUMNS, "bayesian_bt_available", BAYES_BT_MIN_TRAIN_ROWS),
+    ("kalman_state_space", KALMAN_FEATURE_COLUMNS, "kalman_available", KALMAN_MIN_TRAIN_ROWS),
+    (
+        "bo3_map_compositional",
+        BO3_COMPOSITIONAL_FEATURE_COLUMNS,
+        "bo3_compositional_available",
+        BO3_COMPOSITIONAL_MIN_TRAIN_ROWS,
+    ),
+    (
+        "regime",
+        REGIME_FEATURE_COLUMNS,
+        "regime_available",
+        DEFAULT_CONFIG.feature_thresholds.get("regime", 200),
+    ),
 )
 
 
@@ -154,15 +218,21 @@ def _recency_weights(periods_subset: np.ndarray, half_life_days: float) -> np.nd
 def select_feature_columns(
     X_dicts: list[dict[str, float]],
     feature_profile: str = "error-aware",
+    feature_thresholds: dict[str, int] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
+    thresholds = feature_thresholds or {}
+    context_min_rows = int(thresholds.get("context_total", CONTEXT_MIN_TRAIN_ROWS))
+    context_min_env_rows = int(
+        thresholds.get("context_per_environment", CONTEXT_MIN_ENV_ROWS)
+    )
     context_rows = sum(1 for row in X_dicts if (row.get("context_available") or 0.0) >= 0.5)
     lan_rows = sum(1 for row in X_dicts if (row.get("context_is_lan") or 0.0) >= 0.5)
     online_rows = sum(1 for row in X_dicts if (row.get("context_is_online") or 0.0) >= 0.5)
     stage_rows = sum(1 for row in X_dicts if (row.get("context_stage_known") or 0.0) >= 0.5)
     context_enabled = (
-        context_rows >= CONTEXT_MIN_TRAIN_ROWS
-        and lan_rows >= CONTEXT_MIN_ENV_ROWS
-        and online_rows >= CONTEXT_MIN_ENV_ROWS
+        context_rows >= context_min_rows
+        and lan_rows >= context_min_env_rows
+        and online_rows >= context_min_env_rows
     )
     use_strength_interactions = feature_profile == "error-aware"
     columns = list(FEATURE_COLUMNS if use_strength_interactions else BASE_FEATURE_COLUMNS)
@@ -182,6 +252,7 @@ def select_feature_columns(
         }
     }
     for name, family_columns, availability_column, min_rows in AUTO_FEATURE_FAMILIES:
+        min_rows = int(thresholds.get(name, min_rows))
         available_rows = sum(
             1 for row in X_dicts
             if (row.get(availability_column) or 0.0) >= 0.5
@@ -209,8 +280,8 @@ def select_feature_columns(
         "lan_rows": lan_rows,
         "online_rows": online_rows,
         "stage_rows": stage_rows,
-        "min_rows": CONTEXT_MIN_TRAIN_ROWS,
-        "min_env_rows": CONTEXT_MIN_ENV_ROWS,
+        "min_rows": context_min_rows,
+        "min_env_rows": context_min_env_rows,
         "enabled": context_enabled,
         "columns": list(CONTEXT_FEATURE_COLUMNS) if context_enabled else [],
         "activation": "automatic_at_training_time",
@@ -262,8 +333,16 @@ MONOTONE_INCREASING = {
     "trueskill_diff", "trueskill_prob_centered",
     "mov_diff", "mov_prob_centered",
     "player_skill_mean_diff", "player_skill_max_diff", "player_skill_min_diff",
+    "sos_performance_residual_l10_diff", "sos_performance_residual_decay_diff",
+    "bayesian_bt_mean_diff", "bayesian_bt_prob_centered",
+    "kalman_mean_diff", "kalman_prob_centered",
+    "bo3_compositional_prob_centered",
 }
 CALIBRATION_METHODS = ("sigmoid", "isotonic", "beta")
+RATING_CANDIDATE_COLUMNS = {
+    "bayesian_bt_cal": "bayesian_bt_prob_centered",
+    "kalman_cal": "kalman_prob_centered",
+}
 
 
 def _monotone_vector(cols: list[str]) -> list[int]:
@@ -329,22 +408,25 @@ def chronological_holdout_indices(y: np.ndarray, fraction: float) -> tuple[np.nd
 
 
 def make_lgbm(monotone: list[int] | None = None, verbose: bool = False):
+    runtime = get_runtime_config()
+    configured = runtime.estimators.get("lightgbm", {})
     try:
         from lightgbm import LGBMClassifier
 
         params = dict(
-            n_estimators=2000,          # techo alto; el early stopping lo recorta
-            learning_rate=0.02,
-            num_leaves=31,
+            n_estimators=int(configured.get("n_estimators", 2000)),
+            learning_rate=float(configured.get("learning_rate", 0.02)),
+            num_leaves=int(configured.get("num_leaves", 31)),
             max_depth=-1,
-            min_child_samples=80,
-            subsample=0.8,
+            min_child_samples=int(configured.get("min_child_samples", 80)),
+            subsample=float(configured.get("subsample", 0.8)),
             subsample_freq=1,
-            colsample_bytree=0.8,
-            reg_lambda=5.0,
+            colsample_bytree=float(configured.get("colsample_bytree", 0.8)),
+            reg_lambda=float(configured.get("reg_lambda", 5.0)),
             reg_alpha=0.0,
             objective="binary",
             n_jobs=-1,
+            random_state=runtime.random_seed,
             verbosity=1 if verbose else -1,
         )
         if monotone is not None and any(monotone):
@@ -362,7 +444,7 @@ def make_lgbm(monotone: list[int] | None = None, verbose: bool = False):
             early_stopping=True,
             validation_fraction=0.15,
             n_iter_no_change=40,
-            random_state=42,
+            random_state=runtime.random_seed,
         )
         if monotone is not None and any(monotone):
             kwargs["monotonic_cst"] = monotone
@@ -377,14 +459,16 @@ def make_catboost(monotone: list[int] | None = None, verbose: bool = False):
         from catboost import CatBoostClassifier
     except Exception:
         return None
+    runtime = get_runtime_config()
+    configured = runtime.estimators.get("catboost", {})
     params = dict(
-        iterations=2000,
-        learning_rate=0.02,
-        depth=5,
-        l2_leaf_reg=6.0,
+        iterations=int(configured.get("iterations", 2000)),
+        learning_rate=float(configured.get("learning_rate", 0.02)),
+        depth=int(configured.get("depth", 5)),
+        l2_leaf_reg=float(configured.get("l2_leaf_reg", 6.0)),
         loss_function="Logloss",
         eval_metric="Logloss",
-        random_seed=42,
+        random_seed=runtime.random_seed,
         allow_writing_files=False,
         verbose=100 if verbose else False,
     )
@@ -398,20 +482,22 @@ def make_xgboost(monotone: list[int] | None = None, verbose: bool = False):
         from xgboost import XGBClassifier
     except Exception:
         return None
+    runtime = get_runtime_config()
+    configured = runtime.estimators.get("xgboost", {})
     params = dict(
-        n_estimators=700,
-        learning_rate=0.02,
-        max_depth=4,
-        min_child_weight=20.0,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        reg_lambda=5.0,
+        n_estimators=int(configured.get("n_estimators", 700)),
+        learning_rate=float(configured.get("learning_rate", 0.02)),
+        max_depth=int(configured.get("max_depth", 4)),
+        min_child_weight=float(configured.get("min_child_weight", 20.0)),
+        subsample=float(configured.get("subsample", 0.8)),
+        colsample_bytree=float(configured.get("colsample_bytree", 0.8)),
+        reg_lambda=float(configured.get("reg_lambda", 5.0)),
         reg_alpha=0.0,
         objective="binary:logistic",
         eval_metric="logloss",
         tree_method="hist",
         n_jobs=-1,
-        random_state=42,
+        random_state=runtime.random_seed,
         verbosity=1 if verbose else 0,
     )
     if monotone is not None and any(monotone):
@@ -424,39 +510,56 @@ def make_random_forest():
     from sklearn.impute import SimpleImputer
     from sklearn.pipeline import Pipeline
 
+    runtime = get_runtime_config()
+    configured = runtime.estimators.get("random_forest", {})
     return Pipeline(
         [
             ("imputer", SimpleImputer(strategy="median")),
             (
                 "model",
                 RandomForestClassifier(
-                    n_estimators=600,
+                    n_estimators=int(configured.get("n_estimators", 600)),
                     max_features="sqrt",
-                    min_samples_leaf=12,
+                    min_samples_leaf=int(configured.get("min_samples_leaf", 12)),
                     n_jobs=-1,
-                    random_state=42,
+                    random_state=runtime.random_seed,
                 ),
             ),
         ]
     )
 
 
-def make_logistic():
+def make_logistic(c_value: float = 0.5):
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
     from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
+    runtime = get_runtime_config()
+    configured = runtime.estimators.get("logistic", {})
     return Pipeline(
         [
             ("imputer", SimpleImputer(strategy="median")),
             ("scaler", StandardScaler()),
-            ("model", LogisticRegression(max_iter=2000, C=0.5)),
+            (
+                "model",
+                LogisticRegression(
+                    max_iter=int(configured.get("max_iter", 2000)),
+                    C=float(c_value),
+                    random_state=runtime.random_seed,
+                ),
+            ),
         ]
     )
 
 
-def _new_estimator(kind: str, cols: list[str], verbose: bool = False):
+def _new_estimator(
+    kind: str,
+    cols: list[str],
+    verbose: bool = False,
+    estimator_params: dict[str, Any] | None = None,
+):
+    estimator_params = estimator_params or {}
     if kind == "gbm":
         return make_lgbm(_monotone_vector(cols), verbose=verbose)
     if kind == "catboost":
@@ -466,7 +569,7 @@ def _new_estimator(kind: str, cols: list[str], verbose: bool = False):
     if kind == "random_forest":
         return make_random_forest()
     if kind == "logistic":
-        return make_logistic()
+        return make_logistic(estimator_params.get("C", 0.5))
     raise ValueError(f"Tipo de estimador desconocido: {kind}")
 
 
@@ -478,14 +581,15 @@ def _weight_key(est) -> str:
 
 def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
               random_state: int = 0, verbose: bool = False,
-              sample_weight: np.ndarray | None = None):
+              sample_weight: np.ndarray | None = None,
+              estimator_params: dict[str, Any] | None = None):
     """Ajusta el base con augmentacion por simetria y, en GBDT, early stopping
     sobre un holdout interno por log loss (evita fijar n_estimators a mano).
 
     `sample_weight` (alineado a X_tr) pondera cada fila; augment lo duplica para
     las filas espejo A<->B. Si el estimador no acepta pesos, cae a sin pesos.
     """
-    est = _new_estimator(kind, cols, verbose=verbose)
+    est = _new_estimator(kind, cols, verbose=verbose, estimator_params=estimator_params)
 
     def _augw(idx: np.ndarray):
         if sample_weight is None:
@@ -535,7 +639,9 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                 return est
         except Exception:
             pass
-        est = _new_estimator(kind, cols, verbose=verbose)  # fallback robusto sin early stopping
+        est = _new_estimator(
+            kind, cols, verbose=verbose, estimator_params=estimator_params
+        )  # fallback robusto sin early stopping
         Xf, yf = augment(X_tr, y_tr, cols)
         wf = _augw(np.arange(len(X_tr)))
         try:
@@ -552,7 +658,7 @@ def _fit_base(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
             est.fit(Xf, yf, **{_weight_key(est): wf})
             return est
         except Exception:
-            est = _new_estimator(kind, cols, verbose=verbose)
+            est = _new_estimator(kind, cols, verbose=verbose, estimator_params=estimator_params)
     est.fit(Xf, yf)
     return est
 
@@ -569,7 +675,8 @@ def _make_calibrator(base, X_cal: np.ndarray, y_cal: np.ndarray, method: str):
 def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: list[str],
                          methods: tuple[str, ...] = CALIBRATION_METHODS,
                          cal_frac: float = 0.2, random_state: int = 0,
-                         verbose: bool = False, sample_weight: np.ndarray | None = None):
+                         verbose: bool = False, sample_weight: np.ndarray | None = None,
+                         estimator_params: dict[str, Any] | None = None):
     """Ajusta el base UNA vez y devuelve (base, {metodo: estimador_calibrado}).
 
     El base se entrena sobre tr_idx (augmentado) y cada calibrador sobre cal_idx.
@@ -580,7 +687,8 @@ def fit_calibrated_multi(kind: str, X_tr: np.ndarray, y_tr: np.ndarray, cols: li
     tr_idx, cal_idx = chronological_holdout_indices(y_tr, cal_frac)
     sw_tr = np.asarray(sample_weight)[tr_idx] if sample_weight is not None else None
     base = _fit_base(kind, X_tr[tr_idx], y_tr[tr_idx], cols,
-                     random_state=random_state, verbose=verbose, sample_weight=sw_tr)
+                     random_state=random_state, verbose=verbose, sample_weight=sw_tr,
+                     estimator_params=estimator_params)
     cals: dict[str, Any] = {}
     for m in methods:
         try:
@@ -661,12 +769,11 @@ def optimize_convex_weights(probabilities: np.ndarray, y: np.ndarray, l2: float 
     return equal
 
 
-def super_learner_weights(
+def super_learner_weights_for_candidates(
     preds: dict[str, list[dict[str, Any]]],
-    kinds: list[str] | tuple[str, ...],
+    component_names: list[str] | tuple[str, ...],
     min_history: int = SUPER_LEARNER_MIN_HISTORY,
 ) -> np.ndarray:
-    component_names = [INDIVIDUAL_CANDIDATE[kind] for kind in kinds]
     rows = [preds.get(name, []) for name in component_names]
     equal = np.full(len(component_names), 1.0 / len(component_names))
     if not rows or any(len(row) != len(rows[0]) for row in rows) or len(rows[0]) < min_history:
@@ -679,6 +786,51 @@ def super_learner_weights(
     )
     y = np.asarray([int(row["actual"]) for row in rows[0]], dtype=float)
     return optimize_convex_weights(probabilities, y)
+
+
+def super_learner_component_names(
+    kinds: list[str] | tuple[str, ...],
+    rating_candidates: list[str] | tuple[str, ...] = (),
+) -> list[str]:
+    return [INDIVIDUAL_CANDIDATE[kind] for kind in kinds] + list(rating_candidates)
+
+
+def super_learner_weights(
+    preds: dict[str, list[dict[str, Any]]],
+    kinds: list[str] | tuple[str, ...],
+    min_history: int = SUPER_LEARNER_MIN_HISTORY,
+) -> np.ndarray:
+    """Backward-compatible wrapper for estimator-kind component names."""
+    return super_learner_weights_for_candidates(
+        preds,
+        super_learner_component_names(kinds),
+        min_history=min_history,
+    )
+
+
+def fit_probability_column_estimator(
+    X: np.ndarray,
+    y: np.ndarray,
+    column_index: int,
+    sample_weight: np.ndarray | None = None,
+) -> ProbabilityColumnEstimator:
+    """Platt-calibrate a causal rating probability with A/B symmetry."""
+    from sklearn.linear_model import LogisticRegression
+
+    raw = np.clip(np.nan_to_num(X[:, column_index], nan=0.0) + 0.5, 1e-6, 1.0 - 1e-6)
+    logits = np.log(raw / (1.0 - raw)).reshape(-1, 1)
+    X_fit = np.vstack([logits, -logits])
+    y_fit = np.concatenate([y, 1 - y])
+    weights = None if sample_weight is None else np.concatenate([sample_weight, sample_weight])
+    estimator = LogisticRegression(
+        max_iter=1000, C=1.0, random_state=get_runtime_config().random_seed
+    )
+    estimator.fit(X_fit, y_fit, sample_weight=weights)
+    return ProbabilityColumnEstimator(
+        column_index=column_index,
+        slope=float(estimator.coef_[0, 0]),
+        intercept=float(estimator.intercept_[0]),
+    )
 
 
 def _proba(est, X: np.ndarray) -> np.ndarray:
@@ -697,6 +849,11 @@ def walk_forward(
     algorithm_kinds: tuple[str, ...] = ("logistic", "gbm"),
     verbose: bool = False,
     recency_half_life: float = 0.0,
+    optuna_trials: int = 0,
+    optuna_retune_periods: int = 26,
+    tuning_report: dict[str, Any] | None = None,
+    learner_cols: list[str] | None = None,
+    seed: int = 42,
 ) -> dict[str, list[dict[str, Any]]]:
     """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
 
@@ -710,9 +867,18 @@ def walk_forward(
 
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
+    learner_cols = list(learner_cols or cols)
+    learner_indices = [cols.index(column) for column in learner_cols]
 
     kinds = tuple(dict.fromkeys(algorithm_kinds))
     specs = candidate_specs(kinds)
+    rating_candidates = {
+        name: cols.index(column)
+        for name, column in RATING_CANDIDATE_COLUMNS.items()
+        if column in cols
+    }
+    current_logistic_c = 0.5
+    tuning_events: list[dict[str, Any]] = []
 
     for wi, period in enumerate(test_periods):
         train_mask = periods < (period - gap)
@@ -725,11 +891,40 @@ def walk_forward(
                     flush=True,
                 )
             continue
-        X_tr, y_tr = X_all[train_mask], y_all[train_mask]
-        X_te, y_te = X_all[test_mask], y_all[test_mask]
+        X_tr_full, y_tr = X_all[train_mask], y_all[train_mask]
+        X_te_full, y_te = X_all[test_mask], y_all[test_mask]
+        X_tr = X_tr_full[:, learner_indices]
+        X_te = X_te_full[:, learner_indices]
         te_meta = [meta[i] for i in np.where(test_mask)[0]]
         base_rate = float(np.mean(y_tr))
         sw_tr = _recency_weights(periods[train_mask], recency_half_life)
+        if (
+            "logistic" in kinds
+            and optuna_trials > 0
+            and (not tuning_events or wi % max(1, optuna_retune_periods) == 0)
+        ):
+            tuning = tune_logistic_c_purged(
+                X_tr,
+                y_tr,
+                periods[train_mask],
+                learner_cols,
+                set(learner_cols) & (set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS)),
+                n_trials=optuna_trials,
+                gap=max(1, gap),
+                seed=seed + wi,
+                verbose=verbose,
+            )
+            tuning["outer_period"] = int(period)
+            tuning["outer_train_rows"] = int(len(X_tr))
+            tuning_events.append(tuning)
+            if tuning.get("enabled"):
+                current_logistic_c = float(tuning["best_c"])
+            if verbose:
+                print(
+                    f"        Optuna purged: {'ON' if tuning.get('enabled') else 'OFF'} "
+                    f"C={current_logistic_c:.5f} reason={tuning.get('reason')}",
+                    flush=True,
+                )
         if verbose:
             print(
                 f"      fold {wi+1:03d}/{len(test_periods):03d} period={period}: "
@@ -738,8 +933,8 @@ def walk_forward(
             )
 
         # baselines (sin ajuste)
-        elo_p = np.clip(X_te[:, elo_idx] + 0.5, 1e-4, 1 - 1e-4)
-        glicko_p = np.clip(X_te[:, glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
+        elo_p = np.clip(X_te_full[:, elo_idx] + 0.5, 1e-4, 1 - 1e-4)
+        glicko_p = np.clip(X_te_full[:, glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
 
         # Ajusta cada tipo de base una vez (con sus calibradores) y reusa.
         fitted: dict[str, Any] = {}
@@ -748,13 +943,25 @@ def walk_forward(
                 if verbose:
                     print(f"        fitting {kind}...", flush=True)
                 fitted[kind] = fit_calibrated_multi(
-                    kind, X_tr, y_tr, cols, random_state=wi, verbose=verbose,
+                    kind, X_tr, y_tr, learner_cols, random_state=seed + wi, verbose=verbose,
                     sample_weight=sw_tr,
+                    estimator_params={"C": current_logistic_c} if kind == "logistic" else None,
                 )
             except Exception:
                 fitted[kind] = None
                 if verbose:
                     print(f"        fitting {kind}: FAILED", flush=True)
+
+        rating_arrays: dict[str, np.ndarray] = {}
+        for rating_name, column_index in rating_candidates.items():
+            try:
+                rating_estimator = fit_probability_column_estimator(
+                    X_tr_full, y_tr, column_index, sample_weight=sw_tr
+                )
+                rating_arrays[rating_name] = _proba(rating_estimator, X_te_full)
+            except Exception:
+                if verbose:
+                    print(f"        fitting {rating_name}: FAILED", flush=True)
 
         def _cand_pred(name: str, spec: tuple[list[str], str]) -> np.ndarray | None:
             est_kinds, method = spec
@@ -770,10 +977,13 @@ def walk_forward(
             if not arrs:
                 return None
             if name == "super_learner_cal":
-                weights = super_learner_weights(preds, est_kinds)
+                rating_names = [candidate for candidate in rating_candidates if candidate in rating_arrays]
+                arrs.extend(rating_arrays[candidate] for candidate in rating_names)
+                component_names = super_learner_component_names(est_kinds, rating_names)
+                weights = super_learner_weights_for_candidates(preds, component_names)
                 if verbose:
                     text_weights = ", ".join(
-                        f"{kind}={weight:.3f}" for kind, weight in zip(est_kinds, weights)
+                        f"{kind}={weight:.3f}" for kind, weight in zip(component_names, weights)
                     )
                     print(f"        super learner weights: {text_weights}", flush=True)
                 return np.clip(np.average(np.vstack(arrs), axis=0, weights=weights), 1e-4, 1 - 1e-4)
@@ -784,18 +994,35 @@ def walk_forward(
             arr = _cand_pred(name, spec)
             if arr is not None:
                 cand[name] = arr
+        cand.update(rating_arrays)
 
         for i, m in enumerate(te_meta):
             common = {
                 "match_id": m["id"], "date": m["date"], "event": m.get("event"),
                 "team1": m["team1"], "team2": m["team2"], "actual": int(y_te[i]),
                 "format": m.get("format"),
+                "environment": m.get("environment"),
+                "stage": m.get("stage"),
+                "event_tier": m.get("event_tier"),
+                "patch_version": m.get("patch_version"),
+                "map_pool_regime": m.get("map_pool_regime"),
             }
             preds["base_rate"].append({**common, "prob_team1": base_rate})
             preds["elo"].append({**common, "prob_team1": float(elo_p[i])})
             preds["glicko"].append({**common, "prob_team1": float(glicko_p[i])})
             for name, arr in cand.items():
                 preds[name].append({**common, "prob_team1": float(arr[i])})
+    if tuning_report is not None:
+        tuning_report.update({
+            "enabled": any(event.get("enabled") for event in tuning_events),
+            "automatic": True,
+            "objective": "nested_purged_inner_cv_log_loss",
+            "requested_trials_per_study": int(max(0, optuna_trials)),
+            "retune_periods": int(max(1, optuna_retune_periods)),
+            "inner_gap": int(max(1, gap)),
+            "events": tuning_events,
+            "last_best_c": current_logistic_c,
+        })
     return preds
 
 
@@ -855,6 +1082,9 @@ def segment_calibration(rows: list[dict[str, Any]], key: str = "format", min_n: 
         groups[str(r.get(key) or "unknown")].append(r)
     out: dict[str, Any] = {}
     for g, rs in groups.items():
+        if g.strip().lower() in {"", "unknown", "none"}:
+            out[g or "unknown"] = {"n": len(rs), "note": "segmento desconocido; excluido de conclusiones"}
+            continue
         if len(rs) < min_n:
             out[g] = {"n": len(rs), "note": f"muestra <{min_n}; no concluyente"}
             continue
@@ -862,6 +1092,29 @@ def segment_calibration(rows: list[dict[str, Any]], key: str = "format", min_n: 
         p = np.array([x["prob_team1"] for x in rs])
         out[g] = metric_dict(y, p)
     return out
+
+
+def segment_calibration_suite(rows: list[dict[str, Any]], min_n: int = 30) -> dict[str, Any]:
+    """A3: calibration audit across every pre-match segment we can observe."""
+    dimensions = {
+        "by_format": "format",
+        "by_environment": "environment",
+        "by_stage": "stage",
+        "by_event_tier": "event_tier",
+    }
+    suite: dict[str, Any] = {}
+    coverage: dict[str, Any] = {}
+    for label, key in dimensions.items():
+        known = [row for row in rows if str(row.get(key) or "").strip().lower() not in {"", "unknown", "none"}]
+        suite[label] = segment_calibration(rows, key, min_n=min_n)
+        coverage[key] = {
+            "known_rows": len(known),
+            "total_rows": len(rows),
+            "coverage": round(len(known) / len(rows), 4) if rows else 0.0,
+            "min_group_rows": min_n,
+        }
+    suite["coverage"] = coverage
+    return suite
 
 
 def favorite_accuracy_bands(rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -954,74 +1207,10 @@ def market_benchmark(rows: list[dict[str, Any]], preds: dict[str, list[dict[str,
     }
 
 
-def _kelly_fraction(probability: float, decimal_odds: float) -> float:
-    edge = probability * decimal_odds - 1.0
-    if edge <= 0 or decimal_odds <= 1:
-        return 0.0
-    return edge / (decimal_odds - 1.0)
-
-
 def economic_backtest(rows: list[dict[str, Any]], prod_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    pred_by_id = {row["match_id"]: row for row in prod_rows}
-    bankroll = 1.0
-    peak = 1.0
-    max_drawdown = 0.0
-    staked = 0.0
-    profit = 0.0
-    bets = []
-    for row in rows:
-        pred = pred_by_id.get(row["id"])
-        if not pred:
-            continue
-        p1 = float(pred["prob_team1"])
-        p2 = 1.0 - p1
-        odds1 = _safe_decimal_odds(row.get("opening_odds_decimal_t1"))
-        odds2 = _safe_decimal_odds(row.get("opening_odds_decimal_t2"))
-        if odds1 is None or odds2 is None:
-            continue
-        side = "team1" if p1 >= 0.5 else "team2"
-        probability = p1 if side == "team1" else p2
-        odds = odds1 if side == "team1" else odds2
-        kelly = _kelly_fraction(probability, odds)
-        if kelly <= 0:
-            continue
-        fraction = min(0.025, 0.25 * kelly)
-        stake = bankroll * fraction
-        won = bool(row["team1_win"]) if side == "team1" else not bool(row["team1_win"])
-        pnl = stake * (odds - 1.0) if won else -stake
-        bankroll += pnl
-        peak = max(peak, bankroll)
-        max_drawdown = max(max_drawdown, (peak - bankroll) / peak if peak else 0.0)
-        staked += stake
-        profit += pnl
-        bets.append(
-            {
-                "match_id": row["id"],
-                "date": row["date"],
-                "side": side,
-                "probability": probability,
-                "decimal_odds": odds,
-                "stake_fraction": fraction,
-                "won": won,
-                "pnl_fraction_start_bankroll": pnl,
-            }
-        )
-    wins = sum(1 for bet in bets if bet["won"])
-    return {
-        "n_bets": len(bets),
-        "wins": wins,
-        "hit_rate": wins / len(bets) if bets else None,
-        "roi_on_staked": profit / staked if staked else None,
-        "profit_fraction_start_bankroll": bankroll - 1.0,
-        "final_bankroll": bankroll,
-        "max_drawdown": max_drawdown,
-        "staking": "model_favorite_only_quarter_kelly_cap_2_5pct",
-        "note": (
-            "Siempre apuesta al favorito puro del modelo; las odds de apertura "
-            "solo filtran EV positivo y dimensionan el stake."
-        ),
-        "bets": bets,
-    }
+    return run_economic_backtest(
+        rows, prod_rows, get_runtime_config().economic_backtest
+    )
 
 
 def save_model_registry(
@@ -1052,15 +1241,24 @@ def save_model_registry(
     }
     (target / "metadata.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
     (target / "shap_importance.json").write_text(json.dumps(shap_rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    (target / "experiment_manifest.json").write_text(
+        json.dumps(artifact.metadata.get("reproducibility") or {}, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    config_path = artifact.metadata.get("effective_config_path") or artifact.metadata.get("config_path")
+    if config_path and Path(config_path).exists():
+        shutil.copyfile(config_path, target / "config.yaml")
     latest = {"latest": stamp, "artifact": str(artifact_path), "metadata": str(target / "metadata.json")}
     (MODEL_REGISTRY_DIR / "latest.json").write_text(json.dumps(latest, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"model_registry_dir": str(target), "registered_model": str(artifact_path)}
 
 
-def shap_importance(model, X: np.ndarray, cols: list[str], sample: int = 2000) -> list[dict[str, Any]]:
+def shap_importance(
+    model, X: np.ndarray, cols: list[str], sample: int = 2000, seed: int = 42
+) -> list[dict[str, Any]]:
     try:
         import shap
-        idx = np.random.RandomState(42).choice(len(X), size=min(sample, len(X)), replace=False)
+        idx = np.random.RandomState(seed).choice(len(X), size=min(sample, len(X)), replace=False)
         Xs = X[idx]
         explainer = shap.TreeExplainer(model)
         vals = explainer.shap_values(Xs)
@@ -1085,14 +1283,6 @@ def _safe_probability(value: Any) -> float | None:
     if not 0.0 < p < 1.0:
         return None
     return p
-
-
-def _safe_decimal_odds(value: Any) -> float | None:
-    try:
-        odds = float(value)
-    except (TypeError, ValueError):
-        return None
-    return odds if odds > 1.0 else None
 
 
 def add_odds_features(X_dicts: list[dict[str, float]], rows: list[dict[str, Any]]) -> list[dict[str, float]]:
@@ -1121,6 +1311,7 @@ def model_b_eval(
     model_a_rows: list[dict[str, Any]],
     model_b_columns: list[str],
     min_train_odds: int = 120,
+    random_seed: int = 42,
 ) -> dict[str, Any]:
     """Evalua Model B (stats + opening odds) solo cuando hay muestra suficiente.
 
@@ -1165,7 +1356,7 @@ def model_b_eval(
             X_b[train_mask],
             y_all[train_mask],
             model_b_columns,
-            random_state=10_000 + wi,
+            random_state=random_seed + 10_000 + wi,
         )
         test_indices = np.where(test_mask)[0]
         model_b_p = _proba(calibrated, X_b[test_indices])
@@ -1267,20 +1458,36 @@ def paired_significance(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any
 
 
 def main() -> int:
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument(
+        "--config", default=os.environ.get("CS2_CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
+    )
+    config_args, _ = config_parser.parse_known_args()
+    runtime_config = load_config(config_args.config)
+    set_runtime_config(runtime_config)
+    training_defaults = runtime_config.training
+
     parser = argparse.ArgumentParser(description="Entrena el modelo CS2 (Glicko-2 + LightGBM + calibración).")
+    parser.add_argument("--config", default=str(config_args.config),
+                        help="Configuracion YAML versionada; la CLI tiene prioridad.")
     parser.add_argument("--raw", default="",
                         help="Compatibilidad: results_all.json. Si se omite, entrena desde BBDD/cs2.db.")
     parser.add_argument("--db", default=str(DEFAULT_DB),
                         help="BBDD viva usada como fuente por defecto.")
+    parser.add_argument(
+        "--master",
+        default=str(ROOT / "DAILY_SNAPSHOTS" / "master" / "matches.json"),
+        help="Master diario opcional que se combina con --raw; usa un JSON vacio para aislar un experimento.",
+    )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
-    parser.add_argument("--warmup-weeks", type=int, default=10)
-    parser.add_argument("--min-train", type=int, default=800)
+    parser.add_argument("--warmup-weeks", type=int, default=training_defaults.warmup_weeks)
+    parser.add_argument("--min-train", type=int, default=training_defaults.min_train_rows)
     parser.add_argument("--no-cs2-filter", action="store_true")
-    parser.add_argument("--form-half-life", type=float, default=120.0,
+    parser.add_argument("--form-half-life", type=float, default=training_defaults.form_half_life_days,
                         help="Vida media (dias) del decaimiento de la forma. Tunable.")
-    parser.add_argument("--wf-gap", type=int, default=0,
+    parser.add_argument("--wf-gap", type=int, default=training_defaults.walk_forward_gap_periods,
                         help="Periodos de separacion train->test en walk-forward (anti-fuga).")
-    parser.add_argument("--recency-half-life", type=float, default=365.0,
+    parser.add_argument("--recency-half-life", type=float, default=training_defaults.recency_half_life_days,
                         help="A1: vida media (dias) del peso por recencia en el learner "
                              "(sample_weight, Dixon-Coles). 0 desactiva. Activo por defecto.")
     parser.add_argument("--no-catboost", action="store_true",
@@ -1294,14 +1501,35 @@ def main() -> int:
     parser.add_argument(
         "--feature-profile",
         choices=("core", "error-aware"),
-        default="core",
+        default=training_defaults.feature_profile,
         help="core para la ablacion; error-aware añade consenso, margen y desacuerdo point-in-time.",
     )
     parser.add_argument("--verbose", action="store_true",
                         help="Mostrar progreso detallado por fold y logs internos de LightGBM/CatBoost.")
     parser.add_argument("--no-promote", action="store_true",
                         help="Guarda el artefacto en --output-dir, sin sobrescribir MODEL/artifacts/model.pkl ni registry.")
+    parser.add_argument(
+        "--optuna-trials",
+        type=int,
+        default=training_defaults.optuna_trials,
+        help="B10: trials por estudio interno purgado; activo automaticamente (0 desactiva).",
+    )
+    parser.add_argument(
+        "--optuna-retune-weeks",
+        type=int,
+        default=training_defaults.optuna_retune_weeks,
+        help="B10: frecuencia causal de reoptimizacion durante walk-forward.",
+    )
+    parser.add_argument("--seed", type=int, default=runtime_config.random_seed,
+                        help="Semilla global registrada con el experimento.")
+    parser.add_argument("--smoke", action="store_true",
+                        help="Smoke determinista rapido; omite diagnosticos costosos.")
     args = parser.parse_args()
+
+    if args.seed != runtime_config.random_seed:
+        runtime_config = replace(runtime_config, random_seed=int(args.seed))
+        set_runtime_config(runtime_config)
+    set_global_determinism(args.seed)
 
     enabled_kinds = enabled_algorithm_kinds(args.algorithms, no_catboost=args.no_catboost)
     if not enabled_kinds:
@@ -1311,9 +1539,19 @@ def main() -> int:
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    effective_config_path = out / "config.effective.yaml"
+    effective_config = runtime_config.as_dict()
+    effective_config["cli_arguments"] = {
+        key: list(value) if isinstance(value, tuple) else value
+        for key, value in vars(args).items()
+    }
+    effective_config_path.write_text(
+        yaml.safe_dump(effective_config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
 
     print("[1/6] Cargando histórico…", flush=True)
-    master_path = ROOT / "DAILY_SNAPSHOTS" / "master" / "matches.json"
+    master_path = Path(args.master)
     raw_source = args.raw or None
     rows = dataio.load_training_rows(
         raw_source,
@@ -1332,6 +1570,11 @@ def main() -> int:
         )
     if not rows:
         raise SystemExit("No hay filas de entrenamiento. Inicializa BBDD o pasa --raw <results_all.json>.")
+    reproducibility = experiment_manifest(rows, runtime_config, ROOT, vars(args))
+    reproducibility["random_seed"] = int(args.seed)
+    (out / "experiment_manifest.json").write_text(
+        json.dumps(reproducibility, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     n_daily = sum(1 for r in rows if r.get("opening_odds_t1") is not None)
     source_label = f"DB {args.db}" if not raw_source else f"raw {raw_source}"
     print(f"      fuente: {source_label}")
@@ -1340,11 +1583,34 @@ def main() -> int:
     print("[2/6] Construyendo features point-in-time…", flush=True)
     t0 = time.time()
     X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
-    model_columns, feature_policies = select_feature_columns(X_dicts, args.feature_profile)
+    selected_columns, feature_policies = select_feature_columns(
+        X_dicts, args.feature_profile, runtime_config.feature_thresholds
+    )
+    selected_matrix = _matrix(X_dicts, selected_columns)
+    model_columns, exact_pruning = prune_exact_redundancies(
+        selected_matrix,
+        selected_columns,
+        protected={"elo_prob_centered", "glicko_prob_centered"},
+    )
+    feature_policies["feature_pruning"] = {
+        "available_rows": len(X_dicts),
+        "min_rows": 0,
+        "enabled": bool(exact_pruning["input_columns"] != exact_pruning["output_columns"]),
+        "columns": list(model_columns),
+        "activation": "automatic_target_free_exact_redundancy_only",
+        **exact_pruning,
+    }
+    candidate_only_columns = set(BAYES_BT_FEATURE_COLUMNS) | set(KALMAN_FEATURE_COLUMNS)
+    learner_columns = [column for column in model_columns if column not in candidate_only_columns]
+    learner_indices = [model_columns.index(column) for column in learner_columns]
+    for family in ("bayesian_bradley_terry", "kalman_state_space"):
+        feature_policies[family]["production_scope"] = (
+            "standalone_and_super_learner_candidate_not_generic_learner_matrix"
+        )
     analytics_policy = feature_policies["analytics"]
     context_policy = feature_policies["context"]
     player_policy = feature_policies["player_snapshots"]
-    model_b_columns = list(model_columns) + ODDS_FEATURE_COLUMNS
+    model_b_columns = list(learner_columns) + ODDS_FEATURE_COLUMNS
     X_all = _matrix(X_dicts, model_columns)
     X_model_b_dicts = add_odds_features(X_dicts, rows)
     X_model_b = _matrix(X_model_b_dicts, model_b_columns)
@@ -1364,24 +1630,56 @@ def main() -> int:
     print("[3/6] Walk-forward semanal…", flush=True)
     print(f"      candidatos: {'con' if has_catboost else 'sin'} CatBoost · half_life={args.form_half_life:.0f}d · wf_gap={args.wf_gap}")
     t0 = time.time()
+    optuna_report: dict[str, Any] = {}
     preds = walk_forward(
         X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
         args.min_train, gap=args.wf_gap, algorithm_kinds=enabled_kinds,
         verbose=args.verbose, recency_half_life=args.recency_half_life,
+        optuna_trials=max(0, args.optuna_trials),
+        optuna_retune_periods=max(1, args.optuna_retune_weeks),
+        tuning_report=optuna_report,
+        learner_cols=learner_columns,
+        seed=args.seed,
     )
     metrics = summarize(preds)
+    feature_policies["optuna_purged_cv"] = {
+        "available_rows": len(X_all),
+        "min_rows": 400,
+        "enabled": bool(optuna_report.get("enabled")),
+        "columns": [],
+        "activation": "automatic_nested_purged_cv_log_loss",
+        "requested_trials_per_study": max(0, args.optuna_trials),
+        "retune_weeks": max(1, args.optuna_retune_weeks),
+        "events": len(optuna_report.get("events") or []),
+        "note": (
+            "Optuna reoptimiza solo con periodos anteriores y embargo interno >=1 semana."
+            if optuna_report.get("enabled") else
+            "Optuna no tuvo folds internos suficientes o no esta instalado."
+        ),
+    }
     n_test = max((int(item.get("n", 0)) for item in metrics.values()), default=0)
     print(f"      hecho en {time.time()-t0:.1f}s; n_test={n_test}")
     specs = candidate_specs(enabled_kinds)
-    model_order = ["base_rate", "elo", "glicko"] + list(specs.keys())
+    active_rating_candidates = [name for name in RATING_CANDIDATE_COLUMNS if name in metrics]
+    model_order = ["base_rate", "elo", "glicko"] + active_rating_candidates + list(specs.keys())
     for model in model_order:
         m = metrics.get(model)
         if m:
             print(f"      {model:16s} acc={m['accuracy']:.4f} logloss={m['log_loss']:.4f} "
                   f"brier={m['brier']:.4f} auc={m['roc_auc']:.4f} ece={m['ece_10']:.4f}")
+    print(
+        "      Optuna purged CV: "
+        f"{'ON' if optuna_report.get('enabled') else 'OFF'} "
+        f"studies={len(optuna_report.get('events') or [])} "
+        f"last_C={optuna_report.get('last_best_c', 0.5):.5f}"
+    )
 
     # Selección del modelo de producción por menor log loss walk-forward.
-    candidates = {k: metrics[k] for k in specs if k in metrics}
+    candidates = {
+        key: metrics[key]
+        for key in list(specs) + active_rating_candidates
+        if key in metrics
+    }
     if not candidates:
         raise SystemExit("Sin candidatos evaluables en walk-forward (revisa min-train/warmup).")
     best_name = min(candidates, key=lambda k: candidates[k]["log_loss"])
@@ -1394,34 +1692,78 @@ def main() -> int:
     significance = {
         "production_model": best_name,
         "walk_forward_gap": args.wf_gap,
-        "vs_glicko_baseline": paired_significance(preds.get(best_name, []), preds.get("glicko", [])),
+        "vs_glicko_baseline": paired_significance(
+            preds.get(best_name, []), preds.get("glicko", []), seed=args.seed
+        ),
     }
     if second_best:
         significance["vs_second_best"] = {
             "model": second_best,
-            **paired_significance(preds.get(best_name, []), preds.get(second_best, [])),
+            **paired_significance(
+                preds.get(best_name, []), preds.get(second_best, []), seed=args.seed
+            ),
         }
     _sg = significance["vs_glicko_baseline"]
     if _sg.get("n"):
-        print(f"      significancia vs glicko: Δlogloss={_sg.get('mean_logloss_diff')} "
+        print(f"      significancia vs glicko: delta_logloss={_sg.get('mean_logloss_diff')} "
               f"ci95=[{_sg.get('ci95_low')},{_sg.get('ci95_high')}] p={_sg.get('wilcoxon_p')} "
               f"-> {'SIGNIFICATIVO' if _sg.get('significant') else 'no concluyente'}")
 
     # Evaluación segmentada por competitividad + benchmark de mercado.
     segments = segmented_eval(preds.get(best_name, []))
     favorite_accuracy = favorite_accuracy_bands(preds.get(best_name, []))
-    segment_cal = {"by_format": segment_calibration(preds.get(best_name, []), "format")}
-    print("      calibracion por formato:")
-    for g, mm in segment_cal["by_format"].items():
-        if mm.get("log_loss") is not None:
-            print(f"        {g:6s} n={mm['n']:5d} logloss={mm['log_loss']:.3f} ece={mm['ece_10']:.3f}")
+    segment_cal = segment_calibration_suite(preds.get(best_name, []))
+    print("      calibracion por segmento:")
+    for dimension in ("by_format", "by_environment", "by_stage", "by_event_tier"):
+        conclusive = [
+            f"{group}:n={metrics_row['n']},ll={metrics_row['log_loss']:.3f},ece={metrics_row['ece_10']:.3f}"
+            for group, metrics_row in segment_cal[dimension].items()
+            if metrics_row.get("log_loss") is not None
+        ]
+        print(f"        {dimension}: " + (" | ".join(conclusive) if conclusive else "sin muestra concluyente"))
+    rich_target_eval = evaluate_rich_target_walk_forward(
+        X_all,
+        rows,
+        periods,
+        model_columns,
+        set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS),
+        warmup_weeks=args.warmup_weeks,
+        min_train=max(1000, args.min_train),
+        gap=args.wf_gap,
+        recency_half_life=args.recency_half_life,
+        min_rows=int(runtime_config.feature_thresholds.get("rich_target_total", RICH_TARGET_MIN_ROWS)),
+        min_class_rows=int(
+            runtime_config.feature_thresholds.get("rich_target_per_class", RICH_TARGET_MIN_CLASS_ROWS)
+        ),
+        random_seed=args.seed,
+    )
+    rich_target_predictions = rich_target_eval.pop("predictions", [])
+    if rich_target_predictions:
+        binary_by_id = {row["match_id"]: row for row in preds.get(best_name, [])}
+        comparable_binary = [binary_by_id[row["match_id"]] for row in rich_target_predictions if row["match_id"] in binary_by_id]
+        comparable_rich = [row for row in rich_target_predictions if row["match_id"] in binary_by_id]
+        rich_target_eval["winner_metrics"] = summarize({"rich_target": comparable_rich}).get("rich_target", {})
+        rich_target_eval["winner_vs_binary_significance"] = paired_significance(
+            comparable_rich, comparable_binary, seed=args.seed
+        )
+    rich_target_eval["columns"] = list(BO3_SCORE_CLASSES) if rich_target_eval.get("enabled") else []
+    feature_policies["rich_target_bo3_scoreline"] = rich_target_eval
+    print(
+        "      target BO3 scoreline: "
+        f"{'ON' if rich_target_eval.get('enabled') else 'OFF'} "
+        f"({rich_target_eval.get('available_rows', 0)}/{rich_target_eval.get('min_rows', RICH_TARGET_MIN_ROWS)}; "
+        f"wf={rich_target_eval.get('n_walk_forward', 0)})"
+    )
     print("      por competitividad:")
     for s in segments:
         print(f"        {s['band']:18s} n={s['n']:5d} ({s['share']*100:4.1f}%) acc={s['accuracy']:.3f} logloss={s['log_loss']:.3f}")
     market = market_benchmark(rows, preds, best_name)
     if market.get("n"):
         print(f"      mercado (n={market['n']}): modelo logloss={market.get('model_log_loss')} vs mercado={market.get('market_log_loss')}")
-    model_b = model_b_eval(X_model_b, y_all, periods, meta, rows, preds.get(best_name, []), model_b_columns)
+    model_b = model_b_eval(
+        X_model_b, y_all, periods, meta, rows, preds.get(best_name, []), model_b_columns,
+        random_seed=args.seed,
+    )
     feature_policies["opening_odds_model_b"] = {
         "available_rows": int(model_b.get("n_odds_rows", n_daily)),
         "min_rows": int(model_b.get("min_train_odds", 120)),
@@ -1432,6 +1774,9 @@ def main() -> int:
         "note": model_b.get("note", ""),
     }
     economic = economic_backtest(rows, preds.get(best_name, []))
+    drift_report = build_drift_report(
+        preds.get(best_name, []), rows, runtime_config.drift
+    )
     if model_b.get("available"):
         mb = model_b["metrics"].get("model_b_stats_plus_opening_odds", {})
         print(
@@ -1445,17 +1790,46 @@ def main() -> int:
         f"roi={economic['roi_on_staked'] if economic['roi_on_staked'] is not None else 'NA'} "
         f"drawdown={economic['max_drawdown']:.3f}"
     )
+    print(
+        f"      drift: {drift_report['status']} "
+        f"warnings={','.join(drift_report['warnings']) or 'none'} "
+        f"clv_n={drift_report['clv'].get('n', 0)}"
+    )
 
     print("[4/6] Ajuste final sobre todo el histórico…", flush=True)
-    best_kinds, best_method = specs[best_name]
+    if best_name in RATING_CANDIDATE_COLUMNS:
+        best_kinds, best_method = [], "sigmoid"
+        final_component_names = [best_name]
+    else:
+        best_kinds, best_method = specs[best_name]
+        final_component_names = super_learner_component_names(best_kinds)
+        if best_name == "super_learner_cal":
+            final_component_names += active_rating_candidates
     fitted_full: dict[str, Any] = {}
-    for kind in sorted(set(best_kinds) | {"gbm"}):  # gbm siempre, para SHAP
+    final_tuning = tune_logistic_c_purged(
+        X_all[:, learner_indices],
+        y_all,
+        periods,
+        learner_columns,
+        set(learner_columns) & (set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS)),
+        n_trials=max(0, args.optuna_trials),
+        gap=max(1, args.wf_gap),
+        seed=args.seed,
+        verbose=args.verbose,
+    ) if "logistic" in best_kinds else {"enabled": False, "reason": "logistic_not_in_production"}
+    optuna_report["final_full_history_tuning"] = final_tuning
+    final_logistic_c = float(final_tuning.get("best_c", optuna_report.get("last_best_c", 0.5)))
+    final_fit_kinds = set(best_kinds) | (set() if args.smoke else {"gbm"})
+    for kind in sorted(final_fit_kinds):  # gbm adicional solo para SHAP en entreno completo
         if args.verbose:
             print(f"      fitting final {kind}...", flush=True)
-        fitted_full[kind] = fit_calibrated_multi(kind, X_all, y_all, model_columns,
-                                                 cal_frac=0.18, random_state=7,
-                                                 verbose=args.verbose,
-                                                 sample_weight=_recency_weights(periods, args.recency_half_life))
+        fitted_full[kind] = fit_calibrated_multi(
+            kind, X_all[:, learner_indices], y_all, learner_columns,
+            cal_frac=training_defaults.final_calibration_fraction, random_state=args.seed,
+            verbose=args.verbose,
+            sample_weight=_recency_weights(periods, args.recency_half_life),
+            estimator_params={"C": final_logistic_c} if kind == "logistic" else None,
+        )
     _component_kind = {
         "logistic": "logistic",
         "gbm": "lightgbm",
@@ -1464,22 +1838,54 @@ def main() -> int:
         "random_forest": "random_forest",
     }
     if best_name == "super_learner_cal":
-        component_weights = super_learner_weights(preds, best_kinds, min_history=1)
+        component_weights = super_learner_weights_for_candidates(
+            preds, final_component_names, min_history=1
+        )
     else:
-        component_weights = np.full(len(best_kinds), 1.0 / len(best_kinds))
+        component_weights = np.full(len(final_component_names), 1.0 / len(final_component_names))
     print(
         "      pesos finales: " + ", ".join(
-            f"{kind}={weight:.3f}" for kind, weight in zip(best_kinds, component_weights)
+            f"{kind}={weight:.3f}" for kind, weight in zip(final_component_names, component_weights)
         )
     )
     components = []
-    for kind, weight in zip(best_kinds, component_weights):
+    kind_by_candidate = {value: key for key, value in INDIVIDUAL_CANDIDATE.items()}
+    full_weights = _recency_weights(periods, args.recency_half_life)
+    for component_name, weight in zip(final_component_names, component_weights):
+        if component_name in RATING_CANDIDATE_COLUMNS:
+            column_index = model_columns.index(RATING_CANDIDATE_COLUMNS[component_name])
+            estimator = fit_probability_column_estimator(
+                X_all, y_all, column_index, sample_weight=full_weights
+            )
+            components.append(Component(component_name, estimator, None, float(weight)))
+            continue
+        kind = kind_by_candidate[component_name]
         est = fitted_full[kind][1].get(best_method) or fitted_full[kind][1].get("sigmoid")
-        components.append(Component(_component_kind.get(kind, kind), est, None, float(weight)))
+        wrapped = ColumnSubsetEstimator(estimator=est, column_indices=learner_indices)
+        components.append(Component(_component_kind.get(kind, kind), wrapped, None, float(weight)))
 
     print("[5/6] Importancia SHAP…", flush=True)
-    gbm_base = fitted_full["gbm"][0]
-    shap_rows = shap_importance(gbm_base, X_all, model_columns)
+    gbm_base = fitted_full.get("gbm", (None,))[0]
+    shap_rows = [] if args.smoke else shap_importance(
+        gbm_base, X_all[:, learner_indices], learner_columns, seed=args.seed
+    )
+    pruning_diagnostics = (
+        {"available": False, "reason": "smoke_mode"}
+        if args.smoke else feature_pruning_diagnostics(X_all, y_all, model_columns, shap_rows)
+    )
+    directional_columns = sorted(
+        set(model_columns) & (set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS))
+    )
+    rich_target_model = None
+    if rich_target_eval.get("enabled"):
+        rich_target_model = fit_rich_target_model(
+            X_all,
+            rows,
+            model_columns,
+            directional_columns,
+            sample_weight=_recency_weights(periods, args.recency_half_life),
+            random_state=args.seed,
+        )
 
     print("[6/6] Guardando artefacto y resultados…", flush=True)
     artifact = ModelArtifact(
@@ -1493,6 +1899,12 @@ def main() -> int:
             "date_min": rows[0]["date"],
             "date_max": rows[-1]["date"],
             "cs2_only": not args.no_cs2_filter,
+            "reproducibility": reproducibility,
+            "config_version": runtime_config.version,
+            "config_sha256": runtime_config.sha256,
+            "config_path": str(Path(args.config).resolve()),
+            "effective_config_path": str(effective_config_path.resolve()),
+            "random_seed": int(args.seed),
             "analytics_features": analytics_policy,
             "context_features": context_policy,
             "player_snapshot_features": player_policy,
@@ -1500,6 +1912,9 @@ def main() -> int:
             "ranking_features": feature_policies["rankings"],
             "roster_features": feature_policies["roster"],
             "feature_policies": feature_policies,
+            "feature_pruning_diagnostics": pruning_diagnostics,
+            "rich_target_bo3_scoreline": rich_target_eval,
+            "optuna_tuning": optuna_report,
             "walk_forward_metrics": metrics,
             "significance": significance,
             "segment_calibration": segment_cal,
@@ -1507,6 +1922,7 @@ def main() -> int:
             "market_benchmark": market,
             "model_b": model_b,
             "economic_backtest": {k: v for k, v in economic.items() if k != "bets"},
+            "drift_monitoring": drift_report,
             "production_model": best_name,
             "model": "Glicko-2 features + " + {
                 "ensemble_cal": "LightGBM ⊕ Logística (Platt)",
@@ -1519,6 +1935,8 @@ def main() -> int:
                 "xgboost_cal": "XGBoost (Platt)",
                 "random_forest_cal": "Random Forest (Platt)",
                 "super_learner_cal": "Super Learner temporal (pesos convexos, Platt)",
+                "bayesian_bt_cal": "Bradley-Terry bayesiano (partial pooling, Platt)",
+                "kalman_cal": "Kalman state-space (Platt)",
             }.get(best_name, best_name),
             "production_calibration": best_method,
             "production_components": [c.name for c in components],
@@ -1526,6 +1944,8 @@ def main() -> int:
             "algorithm_request": list(args.algorithms),
             "algorithms_enabled": list(enabled_kinds),
             "feature_profile": args.feature_profile,
+            "generic_learner_feature_columns": learner_columns,
+            "candidate_only_feature_columns": sorted(candidate_only_columns & set(model_columns)),
             "inner_split": "chronological_holdout",
             "form_half_life_days": args.form_half_life,
             "recency_half_life_days": args.recency_half_life,
@@ -1533,8 +1953,11 @@ def main() -> int:
             "catboost_enabled": has_catboost,
             "xgboost_enabled": has_xgboost,
             "monotone_features": sorted(MONOTONE_INCREASING),
+            "directional_feature_columns": directional_columns,
             "period_days": 7,
         },
+        rich_target_estimator=rich_target_model,
+        rich_target_classes=list(BO3_SCORE_CLASSES) if rich_target_model is not None else [],
     )
     favorite_accuracy.update(
         {
@@ -1561,11 +1984,33 @@ def main() -> int:
         encoding="utf-8",
     )
     (out / "shap_importance.json").write_text(json.dumps(shap_rows, indent=2), encoding="utf-8")
+    (out / "feature_pruning.json").write_text(
+        json.dumps(pruning_diagnostics, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (out / "optuna_tuning.json").write_text(
+        json.dumps(optuna_report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (out / "rich_target_bo3.json").write_text(
+        json.dumps(rich_target_eval, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    (out / "rich_target_bo3_predictions.json").write_text(
+        json.dumps(rich_target_predictions, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     (out / "model_b_eval.json").write_text(json.dumps(model_b, indent=2, ensure_ascii=False), encoding="utf-8")
     (out / "economic_backtest.json").write_text(json.dumps(economic, indent=2, ensure_ascii=False), encoding="utf-8")
+    (out / "drift_report.json").write_text(
+        json.dumps(drift_report, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     (out / "segmented_eval.json").write_text(
         json.dumps(
-            {"segments": segments, "favorite_accuracy": favorite_accuracy, "market": market, "model_b": model_b, "economic_backtest": {k: v for k, v in economic.items() if k != "bets"}},
+            {
+                "segments": segments,
+                "favorite_accuracy": favorite_accuracy,
+                "market": market,
+                "model_b": model_b,
+                "economic_backtest": {k: v for k, v in economic.items() if k != "bets"},
+                "drift": drift_report,
+            },
             indent=2,
             ensure_ascii=False,
         ),
@@ -1575,10 +2020,17 @@ def main() -> int:
 
     with open(out / "predictions_walkforward.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["model", "match_id", "date", "event", "team1", "team2", "actual", "prob_team1"])
+        w.writerow([
+            "model", "match_id", "date", "event", "team1", "team2", "actual", "prob_team1",
+            "format", "environment", "stage", "event_tier", "patch_version", "map_pool_regime",
+        ])
         for model, rs in preds.items():
             for r in rs:
-                w.writerow([model, r["match_id"], r["date"], r.get("event"), r["team1"], r["team2"], r["actual"], r["prob_team1"]])
+                w.writerow([
+                    model, r["match_id"], r["date"], r.get("event"), r["team1"], r["team2"],
+                    r["actual"], r["prob_team1"], r.get("format"), r.get("environment"),
+                    r.get("stage"), r.get("event_tier"), r.get("patch_version"), r.get("map_pool_regime"),
+                ])
     with open(out / "calibration.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.DictWriter(fh, fieldnames=["model", "bin", "low", "high", "n", "avg_pred", "observed"])
         w.writeheader()
@@ -1636,6 +2088,8 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         row("base_rate", "Base rate (baseline)"),
         row("elo", "Elo (baseline)"),
         row("glicko", "Glicko-2 (baseline)"),
+        row("bayesian_bt_cal", "Bradley-Terry bayesiano (Platt)"),
+        row("kalman_cal", "Kalman state-space (Platt)"),
         row("logistic_cal", "Logística (Platt)"),
         row("lightgbm_cal", "LightGBM (Platt)"),
         row("catboost_cal", "CatBoost (Platt)"),
@@ -1654,6 +2108,88 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
     ]
     for r in shap_rows[:15]:
         lines.append(f"| {r['feature']} | {r['mean_abs_shap']:.4f} |\n")
+
+    pruning = artifact.metadata.get("feature_pruning_diagnostics") or {}
+    exact_pruning = feature_policies.get("feature_pruning") or {}
+    lines.append("\n## Poda y multicolinealidad (A5)\n\n")
+    lines.append(
+        f"- Poda automatica sin target: {exact_pruning.get('input_columns', 0)} -> "
+        f"{exact_pruning.get('output_columns', len(artifact.feature_columns))} columnas.\n"
+        f"- Constantes eliminadas: {len(exact_pruning.get('removed_constants') or [])}.\n"
+        f"- Duplicados exactos o de signo opuesto eliminados: "
+        f"{len(exact_pruning.get('removed_exact_redundancies') or [])}.\n"
+    )
+    if pruning.get("available"):
+        candidates = pruning.get("review_drop_candidates") or []
+        lines.append(
+            f"- Diagnostico temporal: VIF + permutation importance en los ultimos "
+            f"{pruning.get('holdout_rows', 0)} casos + RFE + contraste SHAP.\n"
+            f"- Candidatas para revision: {', '.join(candidates) if candidates else 'ninguna'}.\n\n"
+            "> Las sugerencias supervisadas son auditoria, no poda automatica: para retirar una "
+            "feature deben ganar una validacion walk-forward anidada.\n"
+        )
+    else:
+        lines.append(f"\n> Diagnostico no disponible: {pruning.get('reason', 'sin resultado')}.\n")
+
+    segment_calibration_result = artifact.metadata.get("segment_calibration") or {}
+    lines.append("\n## Calibracion por segmento (A3)\n\n")
+    lines.append("| Dimension | Segmento | N | Accuracy | Log loss | Brier | ECE | Estado |\n")
+    lines.append("|---|---|---:|---:|---:|---:|---:|---|\n")
+    for dimension in ("by_format", "by_environment", "by_stage", "by_event_tier"):
+        for segment, values in (segment_calibration_result.get(dimension) or {}).items():
+            if values.get("note"):
+                lines.append(
+                    f"| {dimension.removeprefix('by_')} | {segment} | {values.get('n', 0)} | "
+                    f"- | - | - | - | {values['note']} |\n"
+                )
+                continue
+            lines.append(
+                f"| {dimension.removeprefix('by_')} | {segment} | {values.get('n', 0)} | "
+                f"{values.get('accuracy', 0.0):.4f} | {values.get('log_loss', 0.0):.4f} | "
+                f"{values.get('brier', 0.0):.4f} | {values.get('ece_10', 0.0):.4f} | concluyente |\n"
+            )
+    lines.append("\nCobertura conocida: ")
+    coverage_parts = []
+    for dimension, values in (segment_calibration_result.get("coverage") or {}).items():
+        coverage_parts.append(
+            f"{dimension} {values.get('known_rows', 0)}/{values.get('total_rows', 0)} "
+            f"({100 * float(values.get('coverage', 0.0)):.1f}%)"
+        )
+    lines.append(("; ".join(coverage_parts) if coverage_parts else "sin filas evaluables") + ".\n")
+
+    rich_target = artifact.metadata.get("rich_target_bo3_scoreline") or {}
+    lines.append("\n## Target BO3 enriquecido (A6)\n\n")
+    lines.append(
+        f"- Estado: {'ON' if rich_target.get('enabled') else 'OFF'}.\n"
+        f"- Cobertura BO3: {rich_target.get('available_rows', 0)}/{rich_target.get('min_rows', 0)}; "
+        f"minimo por clase: {rich_target.get('min_class_rows', 0)}.\n"
+        f"- Clases: {rich_target.get('class_counts') or {}}.\n"
+        f"- Scope: {rich_target.get('production_scope', 'scoreline auxiliar')}.\n"
+    )
+    if rich_target.get("n_walk_forward"):
+        lines.append(
+            f"- Walk-forward: n={rich_target.get('n_walk_forward')}; log loss multiclase="
+            f"{rich_target.get('multiclass_log_loss')}; baseline empirico="
+            f"{rich_target.get('empirical_baseline_log_loss')}; accuracy scoreline="
+            f"{rich_target.get('scoreline_accuracy')}; accuracy ganador="
+            f"{rich_target.get('winner_accuracy')}.\n"
+        )
+    lines.append(f"\n> {rich_target.get('note', 'pendiente de evaluar')}.\n")
+
+    optuna_result = artifact.metadata.get("optuna_tuning") or {}
+    map_policy = feature_policies.get("bo3_map_compositional") or {}
+    lines.append("\n## Ratings y optimizacion B8-B11\n\n")
+    lines.append(
+        f"- B8 Bradley-Terry bayesiano: {'ON' if (feature_policies.get('bayesian_bradley_terry') or {}).get('enabled') else 'OFF'}; "
+        "partial pooling gaussiano, incertidumbre predictiva y candidato calibrado.\n"
+        f"- B9 Kalman state-space: {'ON' if (feature_policies.get('kalman_state_space') or {}).get('enabled') else 'OFF'}; "
+        "deriva de estado, varianza y candidato calibrado.\n"
+        f"- B10 Optuna purgado: {'ON' if optuna_result.get('enabled') else 'OFF'}; "
+        f"estudios={len(optuna_result.get('events') or [])}, C final="
+        f"{(optuna_result.get('final_full_history_tuning') or {}).get('best_c', optuna_result.get('last_best_c'))}.\n"
+        f"- B11 BO3 composicional: {'ON' if map_policy.get('enabled') else 'OFF'}; "
+        f"cobertura={map_policy.get('available_rows', 0)}/{map_policy.get('min_rows', 0)}.\n"
+    )
 
     lines.append("\n## Acierto por competitividad (¿hay skill o son palizas?)\n\n")
     lines.append("| Banda (confianza) | N | % | Accuracy | Log loss |\n|---|---:|---:|---:|---:|\n")
@@ -1734,10 +2270,33 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         f"- Apuestas simuladas: {economic.get('n_bets')}\n"
         f"- Hit rate: {economic.get('hit_rate')}\n"
         f"- ROI sobre stake: {economic.get('roi_on_staked')}\n"
+        f"- Banca: {economic.get('initial_bankroll')} -> {economic.get('final_bankroll')}\n"
         f"- Profit sobre banca inicial: {economic.get('profit_fraction_start_bankroll')}\n"
         f"- Max drawdown: {economic.get('max_drawdown')}\n"
+        f"- Vig medio de apertura: {economic.get('average_opening_vig')}\n"
+        f"- CLV: n={(economic.get('clv') or {}).get('n')}; cobertura="
+        f"{(economic.get('clv') or {}).get('coverage')}; media precio="
+        f"{(economic.get('clv') or {}).get('mean_price_clv')}; mediana="
+        f"{(economic.get('clv') or {}).get('median_price_clv')}\n"
+        f"- Apuestas limitadas por stake/payout: "
+        f"{(economic.get('limits') or {}).get('constrained_bets')}\n"
         f"- Staking: {economic.get('staking')}\n\n"
         f"> {economic.get('note')}\n"
+    )
+
+    drift = artifact.metadata.get("drift_monitoring") or {}
+    lines.append("\n## Drift causal (C12)\n\n")
+    lines.append(
+        f"- Estado: **{drift.get('status', 'unknown')}**.\n"
+        f"- Predicciones OOS cerradas: {drift.get('n_predictions', 0)}.\n"
+        f"- Alertas: {', '.join(drift.get('warnings') or []) or 'ninguna'}.\n"
+        f"- Log loss ventana actual: {(drift.get('log_loss') or {}).get('current_mean')}; "
+        f"referencia: {(drift.get('log_loss') or {}).get('reference_mean')}.\n"
+        f"- CLV evaluable: {(drift.get('clv') or {}).get('n', 0)} "
+        f"({100 * float((drift.get('clv') or {}).get('coverage', 0.0)):.1f}%); "
+        f"media: {(drift.get('clv') or {}).get('current_mean')}.\n\n"
+        "> Page-Hinkley se aplica al log loss y a -CLV en orden temporal. Las cuotas de cierre "
+        "solo auditan la ejecucion y nunca son features.\n"
     )
 
     registry = artifact.metadata.get("registry") or {}
@@ -1754,8 +2313,9 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         "se compara contra isotónica/sin-calibrar y se elige por log loss walk-forward.\n"
         "- Augmentación por simetría A↔B para una frontera antisimétrica sin sesgo de lado.\n"
         "- Model B usa solo odds de apertura con timestamp; las odds de cierre se guardan como auditoría/benchmark, no como feature.\n"
-        "- El modelo predice el ganador de la SERIE directamente; la arquitectura composicional Bo3 "
-        "(P(serie)=P(2-0)+P(2-1)) queda como extensión cuando haya datos por mapa suficientes (PROJECT.md §7.3).\n"
+        "- Strength-of-schedule usa Elo del rival y rendimiento real menos esperado, ambos calculados estrictamente antes del partido.\n"
+        "- El modelo A sigue prediciendo el ganador de la serie. El sidecar BO3 estima 0-2/1-2/2-1/2-0 "
+        "y solo se publica si mejora el baseline multiclase en walk-forward. El modelo por mapa queda pendiente de mas mapstats point-in-time.\n"
     )
     (out / "REPORT.md").write_text("".join(lines), encoding="utf-8")
 

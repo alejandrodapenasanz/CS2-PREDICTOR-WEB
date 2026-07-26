@@ -268,9 +268,74 @@ def parse_stats_from_text(selector: Selector) -> list[dict[str, Any]]:
     return rows
 
 
+def parse_compare_column(column: Selector) -> tuple[int | None, dict[str, str]]:
+    """Parse one player's column without borrowing values from the other side."""
+    map_text = _first_clean(column.css(".selector-map-count::text").getall())
+    map_match = re.search(r"Based on\s+(\d+)\s+maps", map_text or "", flags=re.IGNORECASE)
+    stats: dict[str, str] = {}
+    for row in column.css("div.stats-row"):
+        texts = [" ".join(text.split()) for text in row.css("::text").getall()]
+        texts = [text for text in texts if text]
+        label = next((canonical_stat(text) for text in texts if canonical_stat(text)), None)
+        if not label:
+            continue
+        value = next(
+            (
+                text
+                for text in reversed(texts)
+                if canonical_stat(text) is None and has_stat_value(text) and is_numeric(text)
+            ),
+            None,
+        )
+        if value is not None:
+            stats[label] = value
+    return (int(map_match.group(1)) if map_match else None), stats
+
+
 def parse_compare_page(html: str, p1: PlayerRef, p2: PlayerRef, url: str, time_filter: str) -> dict[str, Any]:
     selector = Selector(text=html)
     title = selector.css("title::text").get()
+    columns = selector.css(".stats-player-compare > .columns > .col.stats-rows")
+    if len(columns) >= 2:
+        p1_maps, p1_stats = parse_compare_column(columns[0])
+        p2_maps, p2_stats = parse_compare_column(columns[1])
+        stat_names = list(dict.fromkeys([*p1_stats, *p2_stats]))
+        rows = [
+            {
+                "stat": stat,
+                "player1": p1_stats.get(stat),
+                "player2": p2_stats.get(stat),
+            }
+            for stat in stat_names
+        ]
+        return {
+            "url": url,
+            "time_filter": time_filter,
+            "title": title,
+            "players": [
+                {
+                    "id": p1.id,
+                    "name": p1.name,
+                    "slug": p1.slug,
+                    "link": p1.link,
+                    "maps": p1_maps,
+                    "time_filter": time_filter,
+                    "stats": p1_stats,
+                },
+                {
+                    "id": p2.id,
+                    "name": p2.name,
+                    "slug": p2.slug,
+                    "link": p2.link,
+                    "maps": p2_maps,
+                    "time_filter": time_filter,
+                    "stats": p2_stats,
+                },
+            ],
+            "comparison_rows": rows,
+        }
+
+    # Compatibility fallback for older HLTV markup.
     maps = [
         int(match)
         for match in re.findall(r"Based on\s+(\d+)\s+maps", " ".join(clean_texts(selector)))
@@ -382,7 +447,10 @@ def comparison_details_complete(comparison: dict[str, Any]) -> bool:
 def merge_player_profile_stats(player: dict[str, Any], detail: dict[str, Any]) -> None:
     compare_stats = dict(player.get("stats") or {})
     profile_stats = dict(detail.get("stats") or {})
-    merged = dict(compare_stats)
+    profile_maps = detail.get("maps")
+    # A zero-map profile is authoritative. Keeping compare-page values here can
+    # leak the other column's values when HLTV renders one side as unavailable.
+    merged = {} if profile_maps == 0 else dict(compare_stats)
     # HLTV renders unavailable profile values as "-".  They are not a value
     # and must neither replace a compare-page metric nor satisfy completeness.
     merged.update({key: value for key, value in profile_stats.items() if has_stat_value(value)})
@@ -391,8 +459,8 @@ def merge_player_profile_stats(player: dict[str, Any], detail: dict[str, Any]) -
     player["stats"] = merged
     player["profile_url"] = detail.get("url")
     player["profile_time_filter"] = detail.get("time_filter")
-    if detail.get("maps") is not None:
-        player["maps"] = detail["maps"]
+    if profile_maps is not None:
+        player["maps"] = profile_maps
     player["detail_status"] = "ok" if player_stats_complete(merged) else "partial"
 
 

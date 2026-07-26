@@ -1188,7 +1188,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 map_filter = None
                 for player in comparison.get("players") or []:
                     player_id = str(player.get("id") or "")
-                    if not player_id:
+                    if not player_id or player.get("fetch_origin") == "cache":
                         continue
                     time_filter = str(player.get("time_filter") or time_filter or "")
                     stats = player.get("stats") or {}
@@ -1205,7 +1205,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                             player.get("slug"),
                             player.get("link"),
                             run_id,
-                            run_captured_at,
+                            player.get("captured_at") or run_captured_at,
                             year,
                             time_filter,
                             match_filter,

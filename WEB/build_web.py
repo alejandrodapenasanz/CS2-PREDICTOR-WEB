@@ -254,6 +254,7 @@ def database_payload() -> dict:
                            SUM(CASE WHEN last_status='partial' THEN 1 ELSE 0 END) AS partial,
                            SUM(CASE WHEN last_status='blocked' THEN 1 ELSE 0 END) AS blocked,
                            SUM(CASE WHEN last_status='error' THEN 1 ELSE 0 END) AS error,
+                           SUM(CASE WHEN last_status='not_found' THEN 1 ELSE 0 END) AS not_found,
                            SUM(CASE WHEN next_eligible_at_utc IS NOT NULL AND next_eligible_at_utc > ? THEN 1 ELSE 0 END) AS fresh
                     FROM fetch_state
                     GROUP BY entity_type

@@ -30,11 +30,15 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from .glicko2 import Glicko2, Rating, _Match
 from .trueskill import TeamTrueSkill, TSRating
+from .bayesian_bt import BayesianBradleyTerry, BTRating
+from .kalman_rating import KalmanRating, KalmanTeamRating
+from .compositional_bo3 import compositional_bo3_features
+from .config import get_runtime_config
 
 PERIOD_DAYS = 7           # periodo de rating semanal (alineado con ranking HLTV)
 FORM_HALF_LIFE = 120.0    # días: vida media del decaimiento de la forma
@@ -145,6 +149,51 @@ PLAYER_RATING_DIFF_COLUMNS = [
 ]
 PLAYER_RATING_SYM_COLUMNS = ["player_skill_available"]
 PLAYER_RATING_FEATURE_COLUMNS = PLAYER_RATING_DIFF_COLUMNS + PLAYER_RATING_SYM_COLUMNS
+
+# Strength of schedule explicito. No se limita a la media de Elo rival: mide
+# tambien cuanto rindio cada equipo por encima/debajo de lo esperado contra
+# esos rivales, conservando el Elo que tenian justo antes de cada encuentro.
+SOS_DIFF_COLUMNS = [
+    "sos_opp_elo_decay_diff",
+    "sos_performance_residual_l10_diff",
+    "sos_performance_residual_decay_diff",
+]
+SOS_SYM_COLUMNS = [
+    "sos_available",
+    "sos_matches_min",
+    "sos_opponent_elo_std_sum",
+]
+SOS_FEATURE_COLUMNS = SOS_DIFF_COLUMNS + SOS_SYM_COLUMNS
+
+BAYES_BT_DIFF_COLUMNS = ["bayesian_bt_mean_diff", "bayesian_bt_prob_centered"]
+BAYES_BT_SYM_COLUMNS = ["bayesian_bt_available", "bayesian_bt_games_min", "bayesian_bt_uncertainty_sum"]
+BAYES_BT_FEATURE_COLUMNS = BAYES_BT_DIFF_COLUMNS + BAYES_BT_SYM_COLUMNS
+
+KALMAN_DIFF_COLUMNS = ["kalman_mean_diff", "kalman_prob_centered"]
+KALMAN_SYM_COLUMNS = ["kalman_available", "kalman_games_min", "kalman_uncertainty_sum"]
+KALMAN_FEATURE_COLUMNS = KALMAN_DIFF_COLUMNS + KALMAN_SYM_COLUMNS
+
+BO3_COMPOSITIONAL_DIFF_COLUMNS = ["bo3_compositional_prob_centered"]
+BO3_COMPOSITIONAL_SYM_COLUMNS = [
+    "bo3_compositional_available",
+    "bo3_map_probability_spread",
+    "bo3_map_sample_min",
+    "bo3_veto_confidence",
+]
+BO3_COMPOSITIONAL_FEATURE_COLUMNS = BO3_COMPOSITIONAL_DIFF_COLUMNS + BO3_COMPOSITIONAL_SYM_COLUMNS
+
+# Meta-regime variables are symmetric calibration inputs. Map-pool state is
+# reconstructed only from previously observed mapstats; patch metadata must be
+# explicitly present in a pre-match source and is never guessed from results.
+REGIME_FEATURE_COLUMNS = [
+    "regime_available",
+    "regime_patch_known",
+    "regime_patch_age_log_days",
+    "regime_patch_recent",
+    "regime_map_pool_available",
+    "regime_map_pool_size",
+    "regime_map_pool_turnover",
+]
 
 MAP_ASSET_DIFF_COLUMNS = [
     "asset_map_winrate_diff",
@@ -328,6 +377,10 @@ EXTENDED_DIFF_COLUMNS = (
     + TRUESKILL_DIFF_COLUMNS
     + MOV_DIFF_COLUMNS
     + PLAYER_RATING_DIFF_COLUMNS
+    + SOS_DIFF_COLUMNS
+    + BAYES_BT_DIFF_COLUMNS
+    + KALMAN_DIFF_COLUMNS
+    + BO3_COMPOSITIONAL_DIFF_COLUMNS
 )
 
 
@@ -459,7 +512,14 @@ def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
     These are same-match pre-game features, not rolling state. They are only
     used by training when coverage is high enough; otherwise they stay inert.
     """
-    feats = {col: 0.0 for col in ANALYTICS_FEATURE_COLUMNS + ANALYTICS_EXTENDED_FEATURE_COLUMNS}
+    feats = {
+        col: 0.0
+        for col in (
+            ANALYTICS_FEATURE_COLUMNS
+            + ANALYTICS_EXTENDED_FEATURE_COLUMNS
+            + BO3_COMPOSITIONAL_FEATURE_COLUMNS
+        )
+    }
     analytics = match.get("analytics") or {}
     if not isinstance(analytics, dict) or not analytics.get("available"):
         return feats
@@ -469,6 +529,15 @@ def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
     if not t1 or not t2:
         t1 = _clean_team(match.get("team1_key"))
         t2 = _clean_team(match.get("team2_key"))
+
+    feats.update(
+        compositional_bo3_features(
+            analytics,
+            match.get("team1") or match.get("team1_name") or match.get("team1_key") or "",
+            match.get("team2") or match.get("team2_name") or match.get("team2_key") or "",
+            match.get("format") or "bo3",
+        )
+    )
 
     feats["analytics_available"] = 1.0
     rows_by_map: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
@@ -755,6 +824,16 @@ class ChronologicalState:
         self.trueskill = TeamTrueSkill()
         self.ts_ratings: dict[str, TSRating] = {}
 
+        # B8: Bradley-Terry bayesiano con prior compartido (partial pooling).
+        self.bayesian_bt = BayesianBradleyTerry()
+        self.bt_ratings: dict[str, BTRating] = {}
+        self.bt_last_date: dict[str, datetime] = {}
+
+        # B9: alternativa en espacio de estados con deriva de habilidad.
+        self.kalman = KalmanTeamRating()
+        self.kalman_ratings: dict[str, KalmanRating] = {}
+        self.kalman_last_date: dict[str, datetime] = {}
+
         # Rating consciente del margen (Elo-MOV) a nivel equipo.
         self.mov: dict[str, float] = defaultdict(lambda: 1500.0)
 
@@ -768,6 +847,7 @@ class ChronologicalState:
         self.diff_hist: dict[str, list[int]] = defaultdict(list)
         self.match_dates: dict[str, list[datetime]] = defaultdict(list)
         self.opp_elo_hist: dict[str, list[float]] = defaultdict(list)
+        self.sos_hist: dict[str, list[tuple[float, float, datetime | None]]] = defaultdict(list)
         self.n_matches: dict[str, int] = defaultdict(int)
         self.streak: dict[str, int] = defaultdict(int)
         self.last_date: dict[str, datetime] = {}
@@ -790,6 +870,63 @@ class ChronologicalState:
         self.asset_adr_hist: dict[str, list[float]] = defaultdict(list)
         self.asset_kast_hist: dict[str, list[float]] = defaultdict(list)
         self.asset_opening_diff_hist: dict[str, list[float]] = defaultdict(list)
+        self.map_regime_observations: list[tuple[datetime, str]] = []
+
+    def _map_pool_sets(self, as_of: datetime | None) -> tuple[set[str], set[str], int]:
+        if as_of is None:
+            return set(), set(), 0
+        cfg = get_runtime_config().drift
+        current_start = as_of - timedelta(days=cfg.regime_map_window_days)
+        previous_start = current_start - timedelta(days=cfg.regime_previous_window_days)
+        current: list[str] = []
+        previous: list[str] = []
+        for observed_at, map_name in self.map_regime_observations:
+            if current_start <= observed_at < as_of:
+                current.append(map_name)
+            elif previous_start <= observed_at < current_start:
+                previous.append(map_name)
+        return set(current), set(previous), len(current)
+
+    def map_pool_regime_label(self, as_of: datetime | None) -> str | None:
+        current, _previous, observations = self._map_pool_sets(as_of)
+        minimum = get_runtime_config().drift.regime_min_observed_maps
+        if observations < minimum or not current:
+            return None
+        return "+".join(sorted(current))
+
+    def regime_features(self, match: dict[str, Any]) -> dict[str, float]:
+        feats = {column: 0.0 for column in REGIME_FEATURE_COLUMNS}
+        as_of = match.get("date_obj")
+        context = match.get("match_context") or {}
+        patch_version = match.get("patch_version") or context.get("patch_version")
+        patch_released_at = match.get("patch_released_at") or context.get("patch_released_at")
+        feats["regime_patch_known"] = 1.0 if patch_version else 0.0
+        if patch_version and patch_released_at and as_of is not None:
+            if not isinstance(patch_released_at, datetime):
+                try:
+                    patch_released_at = datetime.fromisoformat(
+                        str(patch_released_at).replace("Z", "+00:00")
+                    ).replace(tzinfo=None)
+                except ValueError:
+                    patch_released_at = None
+            if patch_released_at is not None:
+                age_days = max(0.0, (as_of - patch_released_at).total_seconds() / 86400.0)
+                feats["regime_patch_age_log_days"] = math.log1p(age_days)
+                feats["regime_patch_recent"] = float(age_days <= 14.0)
+
+        current, previous, observations = self._map_pool_sets(as_of)
+        minimum = get_runtime_config().drift.regime_min_observed_maps
+        if observations >= minimum and current:
+            feats["regime_map_pool_available"] = 1.0
+            feats["regime_map_pool_size"] = float(len(current))
+            union = current | previous
+            feats["regime_map_pool_turnover"] = (
+                1.0 - len(current & previous) / len(union) if previous and union else 0.0
+            )
+        feats["regime_available"] = float(
+            feats["regime_patch_known"] >= 0.5 or feats["regime_map_pool_available"] >= 0.5
+        )
+        return feats
 
     # ---- gestión de ratings -------------------------------------------
     def _get_rating(self, key: str) -> Rating:
@@ -798,6 +935,24 @@ class ChronologicalState:
             r = Rating()
             self.ratings[key] = r
         return r
+
+    @staticmethod
+    def _elapsed_days(last_date: datetime | None, as_of: datetime | None) -> float:
+        if last_date is None or as_of is None:
+            return 0.0
+        return max(0.0, (as_of - last_date).total_seconds() / 86400.0)
+
+    def _bt_asof(self, key: str, as_of: datetime | None) -> BTRating:
+        rating = self.bt_ratings.get(key) or self.bayesian_bt.default()
+        return self.bayesian_bt.evolve(
+            rating, self._elapsed_days(self.bt_last_date.get(key), as_of)
+        )
+
+    def _kalman_asof(self, key: str, as_of: datetime | None) -> KalmanRating:
+        rating = self.kalman_ratings.get(key) or self.kalman.default()
+        return self.kalman.evolve(
+            rating, self._elapsed_days(self.kalman_last_date.get(key), as_of)
+        )
 
     def rating_asof(self, key: str, period: int) -> Rating:
         """Rating con la RD decaída hasta 'period' (sin mutar el estado)."""
@@ -879,6 +1034,35 @@ class ChronologicalState:
         hist = self.opp_elo_hist[key][-last:]
         return sum(hist) / len(hist) if hist else 1500.0
 
+    def _sos_summary(self, key: str, as_of: datetime | None, last: int = 20) -> dict[str, float]:
+        """Schedule strength and Elo-adjusted performance, strictly as-of."""
+        hist = self.sos_hist[key][-last:]
+        if not hist:
+            return {"n": 0.0, "opp_elo_decay": 1500.0, "residual_l10": 0.0, "residual_decay": 0.0, "opp_elo_std": 0.0}
+        weights: list[float] = []
+        for _opp_elo, _residual, played_at in hist:
+            if as_of is None or played_at is None:
+                weights.append(1.0)
+            else:
+                age = max(0.0, (as_of - played_at).total_seconds() / 86400.0)
+                weights.append(0.5 ** (age / self.form_half_life))
+        weight_sum = sum(weights) or 1.0
+        opponent_elos = [item[0] for item in hist]
+        residuals = [item[1] for item in hist]
+        opp_mean = sum(weight * value for weight, value in zip(weights, opponent_elos)) / weight_sum
+        residual_decay = sum(weight * value for weight, value in zip(weights, residuals)) / weight_sum
+        residual_l10_values = residuals[-10:]
+        residual_l10 = sum(residual_l10_values) / len(residual_l10_values)
+        plain_mean = sum(opponent_elos) / len(opponent_elos)
+        opp_std = math.sqrt(sum((value - plain_mean) ** 2 for value in opponent_elos) / len(opponent_elos))
+        return {
+            "n": float(len(hist)),
+            "opp_elo_decay": opp_mean,
+            "residual_l10": residual_l10,
+            "residual_decay": residual_decay,
+            "opp_elo_std": opp_std,
+        }
+
     def _format_key(self, key: str, fmt: str) -> tuple[str, str]:
         fmt = fmt if fmt in {"bo1", "bo3", "bo5"} else "bo3"
         return key, fmt
@@ -940,6 +1124,12 @@ class ChronologicalState:
         ts_a = self.ts_ratings.get(a_key) or self.trueskill.default()
         ts_b = self.ts_ratings.get(b_key) or self.trueskill.default()
         ts_prob = self.trueskill.win_probability(ts_a, ts_b)
+        bt_a = self._bt_asof(a_key, date_obj)
+        bt_b = self._bt_asof(b_key, date_obj)
+        bt_prob = self.bayesian_bt.win_probability(bt_a, bt_b)
+        kalman_a = self._kalman_asof(a_key, date_obj)
+        kalman_b = self._kalman_asof(b_key, date_obj)
+        kalman_prob = self.kalman.win_probability(kalman_a, kalman_b)
 
         pair = tuple(sorted((a_key, b_key)))
         pstats = self.h2h[pair]
@@ -1003,6 +1193,9 @@ class ChronologicalState:
         ps_min = (ps_a["min"] - ps_b["min"]) if ps_ok else 0.0
         ps_spread = (ps_a["spread"] - ps_b["spread"]) if ps_ok else 0.0
         rating_ready = float(min(self.n_matches[a_key], self.n_matches[b_key]) >= 1)
+        sos_a = self._sos_summary(a_key, date_obj)
+        sos_b = self._sos_summary(b_key, date_obj)
+        sos_matches_min = min(sos_a["n"], sos_b["n"])
 
         feats = {
             "glicko_diff": ra.rating - rb.rating,
@@ -1014,6 +1207,16 @@ class ChronologicalState:
             "trueskill_diff": ts_a.mu - ts_b.mu,
             "trueskill_prob_centered": ts_prob - 0.5,
             "trueskill_available": rating_ready,
+            "bayesian_bt_mean_diff": bt_a.mean - bt_b.mean,
+            "bayesian_bt_prob_centered": bt_prob - 0.5,
+            "bayesian_bt_available": float(min(bt_a.games, bt_b.games) >= 5),
+            "bayesian_bt_games_min": float(min(bt_a.games, bt_b.games)),
+            "bayesian_bt_uncertainty_sum": math.sqrt(bt_a.variance) + math.sqrt(bt_b.variance),
+            "kalman_mean_diff": kalman_a.mean - kalman_b.mean,
+            "kalman_prob_centered": kalman_prob - 0.5,
+            "kalman_available": float(min(kalman_a.games, kalman_b.games) >= 5),
+            "kalman_games_min": float(min(kalman_a.games, kalman_b.games)),
+            "kalman_uncertainty_sum": math.sqrt(kalman_a.variance) + math.sqrt(kalman_b.variance),
             "mov_diff": mov_a - mov_b,
             "mov_prob_centered": mov_prob - 0.5,
             "mov_available": rating_ready,
@@ -1049,6 +1252,12 @@ class ChronologicalState:
             "opp_elo_last5_diff": self._avg_opp_elo(a_key, 5) - self._avg_opp_elo(b_key, 5),
             "recent_opponent_elo_diff": self._avg_opp_elo(a_key) - self._avg_opp_elo(b_key),
             "opp_elo_last20_diff": self._avg_opp_elo(a_key, 20) - self._avg_opp_elo(b_key, 20),
+            "sos_opp_elo_decay_diff": sos_a["opp_elo_decay"] - sos_b["opp_elo_decay"],
+            "sos_performance_residual_l10_diff": sos_a["residual_l10"] - sos_b["residual_l10"],
+            "sos_performance_residual_decay_diff": sos_a["residual_decay"] - sos_b["residual_decay"],
+            "sos_available": float(sos_matches_min >= 5),
+            "sos_matches_min": sos_matches_min,
+            "sos_opponent_elo_std_sum": sos_a["opp_elo_std"] + sos_b["opp_elo_std"],
             "format_matches_log_diff": math.log1p(self.format_n_matches[fa]) - math.log1p(self.format_n_matches[fb]),
             "format_experience_min": float(min(self.format_n_matches[fa], self.format_n_matches[fb])),
             "format_experience_total": float(self.format_n_matches[fa] + self.format_n_matches[fb]),
@@ -1130,6 +1339,20 @@ class ChronologicalState:
         else:
             self.ts_ratings[b], self.ts_ratings[a] = self.trueskill.update(ts_b, ts_a)
 
+        bt_a = self._bt_asof(a, date_obj)
+        bt_b = self._bt_asof(b, date_obj)
+        self.bt_ratings[a], self.bt_ratings[b] = self.bayesian_bt.update(bt_a, bt_b, a_won)
+        if date_obj is not None:
+            self.bt_last_date[a] = date_obj
+            self.bt_last_date[b] = date_obj
+
+        kalman_a = self._kalman_asof(a, date_obj)
+        kalman_b = self._kalman_asof(b, date_obj)
+        self.kalman_ratings[a], self.kalman_ratings[b] = self.kalman.update(kalman_a, kalman_b, a_won)
+        if date_obj is not None:
+            self.kalman_last_date[a] = date_obj
+            self.kalman_last_date[b] = date_obj
+
         # Elo-MOV: mismo esquema Elo pero con multiplicador por margen de mapas
         # (formula estilo FiveThirtyEight; 2-0 pesa mas que 2-1).
         mov_a, mov_b = self.mov[a], self.mov[b]
@@ -1153,6 +1376,8 @@ class ChronologicalState:
         self.diff_hist[b].append(s2 - s1)
         self.opp_elo_hist[a].append(elo_b)
         self.opp_elo_hist[b].append(elo_a)
+        self.sos_hist[a].append((elo_b, actual_a - exp_a, date_obj))
+        self.sos_hist[b].append((elo_a, exp_a - actual_a, date_obj))
         fa = self._format_key(a, fmt)
         fb = self._format_key(b, fmt)
         self.format_n_matches[fa] += 1
@@ -1258,9 +1483,16 @@ class ChronologicalState:
         asset = match.get("asset")
         if not isinstance(asset, dict):
             return
+        observed_at = match.get("date_obj")
         for map_payload in asset.get("mapstats") or []:
             info = map_payload.get("info") or {}
             map_name = info.get("map_name") or "Unknown"
+            normalized_map = str(map_name).strip().lower()
+            if (
+                isinstance(observed_at, datetime)
+                and normalized_map not in {"", "unknown", "tba"}
+            ):
+                self.map_regime_observations.append((observed_at, normalized_map))
             left = info.get("team_left") or {}
             right = info.get("team_right") or {}
             left_key = _clean_team(left.get("name"))
@@ -1345,9 +1577,11 @@ def build_training_frame(
     y: list[int] = []
     meta: list[dict[str, Any]] = []
     for m in rows:
+        match_context = m.get("match_context") or {}
         feats = state.emit_features(
             m["team1_key"], m["team2_key"], m.get("date_obj"), m.get("event") or "", m.get("format") or "bo3"
         )
+        feats.update(state.regime_features(m))
         feats.update(analytics_match_features(m))
         feats.update(announced_lineup_features(m))
         feats.update(event_metadata_features(m))
@@ -1361,7 +1595,12 @@ def build_training_frame(
                 "id": m["id"],
                 "date": m["date"],
                 "event": m.get("event"),
+                "event_tier": m.get("event_tier"),
                 "format": m.get("format"),
+                "environment": match_context.get("environment"),
+                "stage": match_context.get("stage"),
+                "patch_version": m.get("patch_version") or match_context.get("patch_version"),
+                "map_pool_regime": state.map_pool_regime_label(m.get("date_obj")),
                 "team1": m["team1"],
                 "team2": m["team2"],
                 "team1_key": m["team1_key"],

@@ -12,7 +12,8 @@
      5) Enriquece predicciones con el modelo calibrado, odds y flags.
      6) Analiza si el contexto HLTV ayuda a calibrar el modelo.
      7) Ingest final a la BBDD viva SQLite y export compat JSON.
-     8) Genera WEB\data.js para el dashboard.
+     8) Monitoriza drift causal sobre predicciones cerradas (log loss + CLV).
+     9) Genera WEB\data.js para el dashboard.
 
   Flags:
      -SkipScrape             No scrapear; usa el ultimo run existente.
@@ -363,6 +364,7 @@ $Enrich = Join-Path $Root "DAILY_SNAPSHOTS\enrich_predictions.py"
 $BuildWeb = Join-Path $Root "WEB\build_web.py"
 $Train = Join-Path $Root "MODEL\train.py"
 $ContextCalibration = Join-Path $Root "MODEL\analyze_context_calibration.py"
+$DriftMonitor = Join-Path $Root "MODEL\monitor_drift.py"
 $BuildDb = Join-Path $Root "BBDD\build_db.py"
 $IngestDb = Join-Path $Root "BBDD\ingest.py"
 $ExportMaster = Join-Path $Root "BBDD\export_master_json.py"
@@ -370,7 +372,7 @@ $Artifact = Join-Path $Root "MODEL\artifacts\model.pkl"
 $MasterMani = Join-Path $Root "DAILY_SNAPSHOTS\master\manifest.json"
 
 $total = 4
-if (-not $NoDb) { $total += 3 }
+if (-not $NoDb) { $total += 4 }
 $needTrain = $Retrain -or (-not (Test-Path $Artifact))
 if ($needTrain) { $total++ }
 $n = 0
@@ -432,7 +434,9 @@ if (-not $NoDb) {
 if ($needTrain) {
     $n++
     Step $n $total "Entrenando modelo (Glicko-2 + calibracion) con master actualizado"
-    Invoke-Native $ModelPython @($Train) "Entrenamiento modelo"
+    $TrainArgs = @($Train)
+    if (-not $Quiet) { $TrainArgs += "--verbose" }
+    Invoke-Native $ModelPython $TrainArgs "Entrenamiento modelo"
 }
 
 $n++
@@ -448,6 +452,10 @@ if (-not $NoDb) {
     Step $n $total "Ingest final a BBDD viva (predicciones) + export master JSON compat"
     Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir) "Ingest incremental BBDD"
     Invoke-Native $ModelPython @($ExportMaster) "Export master JSON compat"
+
+    $n++
+    Step $n $total "Monitorizando drift causal (log loss rodante + CLV)"
+    Invoke-Native $ModelPython @($DriftMonitor) "Monitor drift"
 }
 
 $n++

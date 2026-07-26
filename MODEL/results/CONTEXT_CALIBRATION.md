@@ -1,127 +1,137 @@
 # Context Calibration Diagnostic
 
-Generado: 2026-07-13T08:31:46Z  
-Muestras cerradas con prediccion pre-partido: **175**  
-Muestras con contexto HLTV: **175**  
+Generado: 2026-07-26T14:17:58Z
+Muestras cerradas con prediccion pre-partido: **330**
+Muestras con contexto HLTV: **330**
 
 ## Resultado
 
-- Estado: **insufficient_sample**
-- Decision: No activar calibracion contextual en produccion.
-- Motivo: Solo hay 175 muestras con contexto; minimo recomendado 200.
+- Estado: **not_useful_yet**
+- Decision: Mantener solo como flags/reporting.
+- Motivo: No hay mejora probabilistica robusta en walk-forward.
 
 ## Global
 
 | Metrica | Modelo |
 |---|---:|
-| n | 175 |
-| accuracy | 0.5829 |
-| log_loss | 0.6984 |
-| brier | 0.2507 |
-| ece_10 | 0.1361 |
-| avg_confidence | 0.6586 |
+| n | 330 |
+| accuracy | 0.6212 |
+| log_loss | 0.6759 |
+| brier | 0.2401 |
+| ece_10 | 0.0817 |
+| avg_confidence | 0.6459 |
 
 ## Partidos Activos Por LAN/Online
 
 | Hora | Partido | Env | Stage | Favorito | Conf | HLTV |
 |---|---|---|---|---|---:|---|
-| 2026-07-13 10:00 | GenOne vs RUSTEC | online | Group D elimination match | GenOne | 0.6659 | [link](https://www.hltv.org/matches/2395532/genone-vs-ex-rustec-european-pro-league-series-8) |
-| 2026-07-13 10:00 | Inner Circle Academy vs BIG Academy | online | Group B opening match | BIG Academy | 0.5766 | [link](https://www.hltv.org/matches/2395796/inner-circle-academy-vs-big-academy-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-13 12:30 | BRUTE vs Honvéd | online | Group D winners' match | BRUTE | 0.5342 | [link](https://www.hltv.org/matches/2395533/brute-vs-honvd-european-pro-league-series-8) |
-| 2026-07-13 13:00 | Honvéd vs Julie&Cie | online | Group A opening match | Honvéd | 0.6673 | [link](https://www.hltv.org/matches/2395797/honvd-vs-juliecie-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-13 15:00 | Inner Circle Academy vs BRUTE | online | Group A decider match | BRUTE | 0.5976 | [link](https://www.hltv.org/matches/2395820/inner-circle-academy-vs-brute-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | The Last Resort vs QUAZAR | online | Group B decider match | The Last Resort | 0.5888 | [link](https://www.hltv.org/matches/2395821/the-last-resort-vs-quazar-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | Just Players vs Entropy | online | Group C decider match | Just Players | 0.6703 | [link](https://www.hltv.org/matches/2395822/just-players-vs-entropy-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 15:00 | MOUZ NXT vs SPARTA | online | Group D decider match | MOUZ NXT | 0.5510 | [link](https://www.hltv.org/matches/2395823/mouz-nxt-vs-sparta-esl-challenger-league-season-52-europe-cup-1) |
-| 2026-07-13 16:00 | Mai Tai vs megoshort | online | Group A opening match | megoshort | 0.5399 | [link](https://www.hltv.org/matches/2395798/mai-tai-vs-megoshort-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-13 19:00 | ex-MANA vs DONSTU | online | Group B opening match | DONSTU | 0.5112 | [link](https://www.hltv.org/matches/2395799/ex-mana-vs-donstu-nodwin-clutch-series-10-closed-qualifier) |
-| 2026-07-14 10:00 | ENCE vs SPARTA | online | Group C decider match | SPARTA | 0.5737 | [link](https://www.hltv.org/matches/2395534/ence-vs-sparta-european-pro-league-series-8) |
-| 2026-07-14 12:30 | Honvéd vs GenOne/ex-RUSTEC winner | online | Group D decider match | Honvéd | 0.5135 | [link](https://www.hltv.org/matches/2395535/honvd-vs-genone-ex-rustec-winner-european-pro-league-series-8) |
-| 2026-07-14 15:00 | METANOIA Wolves vs Patins da Ferrari | online | Swiss round 1 | Patins da Ferrari | 0.6743 | [link](https://www.hltv.org/matches/2395732/metanoia-wolves-vs-patins-da-ferrari-cct-2026-south-america-series-4) |
-| 2026-07-14 18:00 | paiN Academy vs ODDIK | online | Swiss round 1 | ODDIK | 0.7049 | [link](https://www.hltv.org/matches/2395733/pain-academy-vs-oddik-cct-2026-south-america-series-4) |
-| 2026-07-14 21:00 | Vasco vs MAGICOS | online | Swiss round 1 | Vasco | 0.6868 | [link](https://www.hltv.org/matches/2395734/vasco-vs-magicos-cct-2026-south-america-series-4) |
-| 2026-07-15 00:00 | ex-KRÜ vs ALZON | online | Swiss round 1 | ex-KRÜ | 0.5972 | [link](https://www.hltv.org/matches/2395735/ex-kr-vs-alzon-cct-2026-south-america-series-4) |
-| 2026-07-15 10:00 | Lavked vs Just Players | online | Group A decider match | Lavked | 0.5560 | [link](https://www.hltv.org/matches/2395536/lavked-vs-just-players-european-pro-league-series-8) |
-| 2026-07-15 12:00 | Ninjas in Pyjamas vs K27 | lan | Upper bracket quarter-final | K27 | 0.5129 | [link](https://www.hltv.org/matches/2395696/ninjas-in-pyjamas-vs-k27-stake-ranked-episode-3) |
-| 2026-07-15 12:30 | The Last Resort vs Enjoy | online | Group B decider match | The Last Resort | 0.5169 | [link](https://www.hltv.org/matches/2395537/the-last-resort-vs-enjoy-european-pro-league-series-8) |
-| 2026-07-15 14:30 | 3DMAX vs HEROIC | lan | Upper bracket quarter-final | HEROIC | 0.5188 | [link](https://www.hltv.org/matches/2395697/3dmax-vs-heroic-stake-ranked-episode-3) |
-| 2026-07-15 15:00 | Procyon vs Red Feet | online | Swiss round 1 | Procyon | 0.5904 | [link](https://www.hltv.org/matches/2395736/procyon-vs-red-feet-cct-2026-south-america-series-4) |
-| 2026-07-15 17:00 | Wildcard vs Gentle Mates | lan | Upper bracket quarter-final | Gentle Mates | 0.5793 | [link](https://www.hltv.org/matches/2395698/wildcard-vs-gentle-mates-stake-ranked-episode-3) |
-| 2026-07-15 18:00 | GameHunters vs Blitzkrieg | online | Swiss round 1 | GameHunters | 0.6452 | [link](https://www.hltv.org/matches/2395737/gamehunters-vs-blitzkrieg-cct-2026-south-america-series-4) |
-| 2026-07-15 19:30 | paiN vs Phantom | lan | Upper bracket quarter-final | paiN | 0.6204 | [link](https://www.hltv.org/matches/2395699/pain-vs-phantom-stake-ranked-episode-3) |
-| 2026-07-15 21:00 | BESTIA Academy vs GUARA | online | Swiss round 1 | BESTIA Academy | 0.6392 | [link](https://www.hltv.org/matches/2395738/bestia-academy-vs-guara-cct-2026-south-america-series-4) |
-| 2026-07-16 00:00 | ALKA vs BORRACHEIROS | online | Swiss round 1 | ALKA | 0.6942 | [link](https://www.hltv.org/matches/2395739/alka-vs-borracheiros-cct-2026-south-america-series-4) |
-| 2026-07-17 02:00 | THUNDER dOWNUNDER vs Mindfreak | lan | Group A opening match | THUNDER dOWNUNDER | 0.6830 | [link](https://www.hltv.org/matches/2395780/thunder-downunder-vs-mindfreak-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 02:00 | Abyssal vs Rooster | lan | Group A opening match | Rooster | 0.5948 | [link](https://www.hltv.org/matches/2395781/abyssal-vs-rooster-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 07:00 | FlyQuest vs DXA | lan | Group B opening match | FlyQuest | 0.6524 | [link](https://www.hltv.org/matches/2395785/flyquest-vs-dxa-dfrag-hyperx-nationals-2026) |
-| 2026-07-17 07:00 | Ground Zero vs Arcade | lan | Group B opening match | Ground Zero | 0.7492 | [link](https://www.hltv.org/matches/2395786/ground-zero-vs-arcade-dfrag-hyperx-nationals-2026) |
+| 2026-07-26 17:00 | LP vs ODDIK | online | Semi-final | LP | 0.5431 | [link](https://www.hltv.org/matches/2395777/lp-vs-oddik-cct-2026-south-america-series-4) |
+| 2026-07-26 17:00 | Wildcard vs The MongolZ | lan | Stage 2 round of 16. Winner qualifies for LAN Finals. | The MongolZ | 0.5992 | [link](https://www.hltv.org/matches/2396008/wildcard-vs-the-mongolz-blast-bounty-2026-season-2) |
+| 2026-07-26 18:00 | magic vs Ninjas in Pyjamas | online | Semi-final. Winner qualifies for StarLadder StarSeries Fall 2026. | Ninjas in Pyjamas | 0.5290 | [link](https://www.hltv.org/matches/2396080/magic-vs-ninjas-in-pyjamas-starladder-starseries-fall-2026-europe-closed-qualifier) |
+| 2026-07-26 19:00 | Lavked vs Butterfly | online | Swiss round 2 (teams with a 1-0 record) | Lavked | 0.6186 | [link](https://www.hltv.org/matches/2395847/lavked-vs-butterfly-nodwin-clutch-series-10) |
+| 2026-07-26 19:00 | EAC vs Atreides | online | Swiss round 3 (teams with a 2-0 record). Winner advances to playoffs. | Atreides | 0.6017 | [link](https://www.hltv.org/matches/2395946/eac-vs-atreides-cct-2026-europe-series-5) |
+| 2026-07-26 19:00 | Honvéd vs Privateer | online | Play-in. Winner qualifies for CCT 2026 Europe Series 6. | Honvéd | 0.5256 | [link](https://www.hltv.org/matches/2396104/honvd-vs-privateer-cct-2026-europe-series-6-closed-qualifier) |
+| 2026-07-26 19:00 | los kogutos vs megoshort | online | Group B winners' match | los kogutos | 0.6403 | [link](https://www.hltv.org/matches/2396166/los-kogutos-vs-megoshort-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-26 19:30 | 100 Thieves vs Spirit | lan | Stage 2 round of 16. Winner qualifies for LAN Finals. | Spirit | 0.7868 | [link](https://www.hltv.org/matches/2396014/100-thieves-vs-spirit-blast-bounty-2026-season-2) |
+| 2026-07-26 20:00 | Fluxo vs Isurus | online | Semi-final | Fluxo | 0.6741 | [link](https://www.hltv.org/matches/2395778/fluxo-vs-isurus-cct-2026-south-america-series-4) |
+| 2026-07-27 10:00 | ex-RUSTEC vs Entropy | online | Group C opening match | Entropy | 0.5315 | [link](https://www.hltv.org/matches/2396167/ex-rustec-vs-entropy-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-27 13:00 | UNiTY vs Mai Tai | online | Group C opening match | UNiTY | 0.5266 | [link](https://www.hltv.org/matches/2396168/unity-vs-mai-tai-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-27 13:00 | ASTRAL vs Noir Verse | lan | Group A | ASTRAL | 0.6725 | [link](https://www.hltv.org/matches/2396207/astral-vs-noir-verse-urban-riga-open-season-6) |
+| 2026-07-27 13:00 | PURE vs atputies | lan | Group A | PURE | 0.5048 | [link](https://www.hltv.org/matches/2396208/pure-vs-atputies-urban-riga-open-season-6) |
+| 2026-07-27 14:00 | Noir Verse vs atputies | lan | Group A | Noir Verse | 0.5168 | [link](https://www.hltv.org/matches/2396209/noir-verse-vs-atputies-urban-riga-open-season-6) |
+| 2026-07-27 14:00 | PURE vs ASTRAL | lan | Group A | ASTRAL | 0.6473 | [link](https://www.hltv.org/matches/2396210/pure-vs-astral-urban-riga-open-season-6) |
+| 2026-07-27 15:00 | ASTRAL vs atputies | lan | Group A | ASTRAL | 0.5467 | [link](https://www.hltv.org/matches/2396211/astral-vs-atputies-urban-riga-open-season-6) |
+| 2026-07-27 15:00 | Noir Verse vs PURE | lan | Group A | Noir Verse | 0.5339 | [link](https://www.hltv.org/matches/2396212/noir-verse-vs-pure-urban-riga-open-season-6) |
+| 2026-07-27 16:00 | Black Phoenix vs Misa | online | Group D opening match | Misa | 0.5350 | [link](https://www.hltv.org/matches/2396169/black-phoenix-vs-misa-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-27 17:30 | MOUZ NXT vs LEO | lan | Group B | MOUZ NXT | 0.5992 | [link](https://www.hltv.org/matches/2396213/mouz-nxt-vs-leo-urban-riga-open-season-6) |
+| 2026-07-27 17:30 | BRUTE vs NAVI Junior | lan | Group B | BRUTE | 0.6867 | [link](https://www.hltv.org/matches/2396214/brute-vs-navi-junior-urban-riga-open-season-6) |
+| 2026-07-27 18:30 | MOUZ NXT vs BRUTE | lan | Group B | BRUTE | 0.5161 | [link](https://www.hltv.org/matches/2396215/mouz-nxt-vs-brute-urban-riga-open-season-6) |
+| 2026-07-27 18:30 | NAVI Junior vs LEO | lan | Group B | LEO | 0.5740 | [link](https://www.hltv.org/matches/2396216/navi-junior-vs-leo-urban-riga-open-season-6) |
+| 2026-07-27 19:00 | Bebop vs Falcons Force | online | Group D opening match | Bebop | 0.6699 | [link](https://www.hltv.org/matches/2396170/bebop-vs-falcons-force-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-27 19:30 | NAVI Junior vs MOUZ NXT | lan | Group B | MOUZ NXT | 0.6687 | [link](https://www.hltv.org/matches/2396217/navi-junior-vs-mouz-nxt-urban-riga-open-season-6) |
+| 2026-07-27 19:30 | BRUTE vs LEO | lan | Group B | BRUTE | 0.5906 | [link](https://www.hltv.org/matches/2396218/brute-vs-leo-urban-riga-open-season-6) |
+| 2026-07-28 17:00 | MIBR vs Fluxo | online | Upper bracket quarter-final | MIBR | 0.6851 | [link](https://www.hltv.org/matches/2396225/mibr-vs-fluxo-starladder-starseries-fall-2026-south-america-closed-qualifier) |
+| 2026-07-28 20:00 | LP vs Bounty Hunters | online | Upper bracket quarter-final | LP | 0.5313 | [link](https://www.hltv.org/matches/2396226/lp-vs-bounty-hunters-starladder-starseries-fall-2026-south-america-closed-qualifier) |
+| 2026-07-28 21:00 | NRG vs Iowa Stormboar | online | Upper bracket quarter-final | NRG | 0.7721 | [link](https://www.hltv.org/matches/2396239/nrg-vs-iowa-stormboar-starladder-starseries-fall-2026-north-america-closed-qualifier) |
+| 2026-07-28 23:00 | BESTIA vs Imperial | online | Upper bracket quarter-final | Imperial | 0.5777 | [link](https://www.hltv.org/matches/2396227/bestia-vs-imperial-starladder-starseries-fall-2026-south-america-closed-qualifier) |
+| 2026-07-29 00:00 | Marsborne vs LAG | online | Upper bracket quarter-final | Marsborne | 0.5989 | [link](https://www.hltv.org/matches/2396240/marsborne-vs-lag-starladder-starseries-fall-2026-north-america-closed-qualifier) |
+| 2026-07-29 03:00 | Voca vs regain | online | Upper bracket quarter-final | Voca | 0.7034 | [link](https://www.hltv.org/matches/2396241/voca-vs-regain-starladder-starseries-fall-2026-north-america-closed-qualifier) |
+| 2026-07-29 10:00 | Fortress vs STATE/Lazer Cats loser | online | Group A decider match | Fortress | 0.5057 | [link](https://www.hltv.org/matches/2396175/fortress-vs-state-lazer-cats-loser-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-29 13:00 | ex-MANA vs los kogutos/megoshort loser | online | Group B decider match | ex-MANA | 0.5075 | [link](https://www.hltv.org/matches/2396176/ex-mana-vs-los-kogutos-megoshort-loser-thunderpick-world-championship-2026-europe-series-2) |
+| 2026-07-29 17:00 | ShindeN vs Galorys | online | Upper bracket quarter-final | ShindeN | 0.5368 | [link](https://www.hltv.org/matches/2396228/shinden-vs-galorys-starladder-starseries-fall-2026-south-america-closed-qualifier) |
+| 2026-07-29 21:00 | Chicken Coop vs SportsBetExpert | online | Upper bracket quarter-final | Chicken Coop | 0.5312 | [link](https://www.hltv.org/matches/2396242/chicken-coop-vs-sportsbetexpert-starladder-starseries-fall-2026-north-america-closed-qualifier) |
 
 ## Calibrador Contextual Diagnostico
 
 | Metrica | Base | Contexto | Delta |
 |---|---:|---:|---:|
-| log_loss | 0.6953 | 0.7012 | 0.0059 |
-| brier | 0.2491 | 0.2492 | 0.0001 |
-| accuracy | 0.5926 | 0.5852 | -0.0074 |
-| ece_10 | 0.1197 | 0.0954 | -0.0243 |
+| log_loss | 0.6713 | 0.6785 | 0.0072 |
+| brier | 0.2380 | 0.2402 | 0.0022 |
+| accuracy | 0.6310 | 0.6138 | -0.0172 |
+| ece_10 | 0.0761 | 0.0687 | -0.0074 |
 
-Eval folds: 135 con min_train=40. Diagnostico. No activar en produccion sin 200+ muestras y grupos con 30+ partidos.
+Eval folds: 290 con min_train=40. Diagnostico. No activar en produccion sin 200+ muestras y grupos con 30+ partidos.
 
 ## environment
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| online | 144 | 0.5694 | 0.7099 | 0.2559 | 0.5694 | 0.0904 |
-| lan | 31 | 0.6452 | 0.6452 | 0.2263 | 0.6452 | 0.0075 |
+| online | 266 | 0.6165 | 0.6872 | 0.2450 | 0.6165 | 0.0310 |
+| lan | 64 | 0.6406 | 0.6289 | 0.2200 | 0.6406 | -0.0013 |
 
 ## stage
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| group | 43 | 0.6047 | 0.6703 | 0.2379 | 0.6047 | 0.0418 |
-| swiss | 42 | 0.5714 | 0.7080 | 0.2555 | 0.5714 | 0.1099 |
-| quarter | 35 | 0.7429 | 0.5805 | 0.1967 | 0.7429 | -0.0787 |
-| semi | 25 | 0.6000 | 0.7333 | 0.2628 | 0.6000 | 0.0606 |
-| final | 20 | 0.4500 | 0.7534 | 0.2782 | 0.4500 | 0.1601 |
-| lower_bracket | 6 | 0.3333 | 0.8855 | 0.3362 | 0.3333 | 0.3584 |
+| group | 110 | 0.6455 | 0.6556 | 0.2311 | 0.6455 | -0.0125 |
+| swiss | 65 | 0.6462 | 0.6607 | 0.2340 | 0.6462 | 0.0227 |
+| quarter | 47 | 0.7447 | 0.5917 | 0.2019 | 0.7447 | -0.0980 |
+| semi | 40 | 0.6000 | 0.6797 | 0.2404 | 0.6000 | 0.0600 |
+| final | 25 | 0.4400 | 0.7922 | 0.2932 | 0.4400 | 0.1723 |
+| unknown | 21 | 0.5238 | 0.7315 | 0.2646 | 0.5238 | 0.1222 |
+| lower_bracket | 8 | 0.3750 | 0.8539 | 0.3228 | 0.3750 | 0.2818 |
+| ro16 | 8 | 0.7500 | 0.6994 | 0.2467 | 0.7500 | -0.1221 |
 | league | 4 | 0.0000 | 1.1589 | 0.4679 | 0.0000 | 0.6822 |
+| upper_bracket | 2 | 1.0000 | 0.3722 | 0.1002 | 1.0000 | -0.3060 |
 
 ## high_stakes
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| yes | 123 | 0.6016 | 0.6946 | 0.2478 | 0.6016 | 0.0629 |
-| no | 52 | 0.5385 | 0.7075 | 0.2574 | 0.5385 | 0.1061 |
+| yes | 177 | 0.6271 | 0.6757 | 0.2394 | 0.6271 | 0.0259 |
+| no | 153 | 0.6144 | 0.6760 | 0.2410 | 0.6144 | 0.0233 |
 
 ## incentive_label
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| playoff_or_bracket | 82 | 0.5976 | 0.6875 | 0.2451 | 0.5976 | 0.0574 |
-| group_or_swiss | 28 | 0.5000 | 0.7460 | 0.2747 | 0.5000 | 0.1524 |
-| elimination_match | 24 | 0.6667 | 0.6587 | 0.2273 | 0.6667 | 0.0146 |
-| winner_advances | 17 | 0.5294 | 0.7797 | 0.2902 | 0.5294 | 0.1574 |
-| opening_match | 14 | 0.7857 | 0.5526 | 0.1839 | 0.7857 | -0.1455 |
-| winners_match | 10 | 0.3000 | 0.8165 | 0.3115 | 0.3000 | 0.3290 |
+| playoff_or_bracket | 116 | 0.6034 | 0.6808 | 0.2421 | 0.6034 | 0.0427 |
+| group_or_swiss | 74 | 0.5405 | 0.7188 | 0.2611 | 0.5405 | 0.1007 |
+| opening_match | 50 | 0.7200 | 0.5981 | 0.2049 | 0.7200 | -0.0850 |
+| elimination_match | 35 | 0.7143 | 0.6272 | 0.2143 | 0.7143 | -0.0508 |
+| winner_advances | 26 | 0.6154 | 0.7183 | 0.2616 | 0.6154 | 0.0544 |
+| winners_match | 18 | 0.5000 | 0.7563 | 0.2796 | 0.5000 | 0.1262 |
+| unknown | 10 | 0.8000 | 0.6340 | 0.2174 | 0.8000 | -0.1588 |
+| placement_match | 1 | 1.0000 | 0.3762 | 0.0983 | 1.0000 | -0.3136 |
 
 ## winner_advances
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| no | 153 | 0.5752 | 0.7024 | 0.2522 | 0.5752 | 0.0776 |
-| yes | 22 | 0.6364 | 0.6710 | 0.2403 | 0.6364 | 0.0632 |
+| no | 299 | 0.6154 | 0.6784 | 0.2411 | 0.6154 | 0.0269 |
+| yes | 31 | 0.6774 | 0.6511 | 0.2309 | 0.6774 | 0.0041 |
 
 ## loser_eliminated
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| no | 151 | 0.5695 | 0.7047 | 0.2544 | 0.5695 | 0.0855 |
-| yes | 24 | 0.6667 | 0.6587 | 0.2273 | 0.6667 | 0.0146 |
+| no | 295 | 0.6102 | 0.6816 | 0.2432 | 0.6102 | 0.0337 |
+| yes | 35 | 0.7143 | 0.6272 | 0.2143 | 0.7143 | -0.0508 |
 
 ## format
 
 | Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |
 |---|---:|---:|---:|---:|---:|---:|
-| bo3 | 158 | 0.5886 | 0.6983 | 0.2506 | 0.5886 | 0.0718 |
-| bo1 | 15 | 0.5333 | 0.7223 | 0.2617 | 0.5333 | 0.1068 |
-| bo5 | 2 | 0.5000 | 0.5285 | 0.1767 | 0.5000 | 0.1563 |
+| bo3 | 308 | 0.6234 | 0.6786 | 0.2414 | 0.6234 | 0.0223 |
+| bo1 | 19 | 0.6316 | 0.6431 | 0.2252 | 0.6316 | 0.0236 |
+| bo5 | 3 | 0.3333 | 0.6029 | 0.2108 | 0.3333 | 0.2803 |

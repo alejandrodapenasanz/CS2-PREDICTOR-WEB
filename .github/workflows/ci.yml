@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, dev, pre-dev]
   pull_request:
+    branches: [main, dev, pre-dev]
 
 jobs:
   tests:
@@ -12,16 +13,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.12"
+          cache: pip
       - name: Install model dependencies
         run: |
           python -m pip install --upgrade pip
           # Stack ML del lado modelo (el scraper tiene su propio venv aparte).
-          python -m pip install numpy pandas scikit-learn scipy matplotlib lightgbm shap parsel pytest
-      - name: Ruff (lint, no bloqueante)
-        continue-on-error: true
+          python -m pip install numpy pandas scikit-learn scipy matplotlib lightgbm shap optuna pyyaml parsel pytest ruff mypy
+      - name: Ruff
         run: |
-          python -m pip install ruff
-          ruff check MODEL BBDD DAILY_SNAPSHOTS || true
+          ruff check MODEL BBDD DAILY_SNAPSHOTS tests
+      - name: Mypy infrastructure
+        run: python -m mypy
       - name: Run test suite
         run: python -m pytest tests/ -q
+      - name: Deterministic pipeline smoke
+        run: python MODEL/smoke_pipeline.py

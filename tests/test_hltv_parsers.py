@@ -75,9 +75,86 @@ class HltvParserTests(unittest.TestCase):
             {"url": "https://example.test", "time_filter": "past3months", "maps": 0,
              "stats": {"KPR": "-", "DPR": "-", "ADR": "-"}},
         )
-        self.assertEqual(player["stats"]["KPR"], "0.68")
+        self.assertNotIn("KPR", player["stats"])
         self.assertNotIn("ADR", player["stats"])
+        self.assertEqual(player["maps"], 0)
         self.assertFalse(player_compare_stats.player_stats_complete(player["stats"]))
+
+    def test_compare_parser_keeps_empty_player_column_empty(self) -> None:
+        html = """
+        <div class="stats-section stats-player stats-player-compare">
+          <div class="columns">
+            <div class="col stats-rows">
+              <div class="selector-map-count">Based on 31 maps</div>
+              <div class="stats-row"><span>KPR</span><span>0.62</span></div>
+              <div class="stats-row"><span>KAST</span><span>70.7%</span></div>
+            </div>
+            <div class="col stats-rows">
+              <div class="selector-map-count">Based on 0 maps</div>
+            </div>
+          </div>
+        </div>
+        """
+        p1 = player_compare_stats.PlayerRef("1", "Alpha", "alpha", "/player/1/alpha")
+        p2 = player_compare_stats.PlayerRef("2", "Beta", "beta", "/player/2/beta")
+
+        parsed = player_compare_stats.parse_compare_page(html, p1, p2, "https://example.test", "past3months")
+
+        self.assertEqual(parsed["players"][0]["maps"], 31)
+        self.assertEqual(parsed["players"][0]["stats"]["KPR"], "0.62")
+        self.assertEqual(parsed["players"][1]["maps"], 0)
+        self.assertEqual(parsed["players"][1]["stats"], {})
+
+    def test_player_profile_filter_keeps_only_ids_due_for_refresh(self) -> None:
+        profiles = [{
+            "id": "10",
+            "profile": {
+                "name": "Alpha",
+                "squad": [
+                    {"id": "101", "name": "Fresh"},
+                    {"id": "102", "name": "Due"},
+                ],
+            },
+        }]
+
+        filtered = start.filter_team_profiles_players(profiles, {"102"})
+
+        self.assertEqual(len(filtered), 1)
+        self.assertEqual(filtered[0]["profile"]["name"], "Alpha")
+        self.assertEqual(filtered[0]["profile"]["squad"], [{"id": "102", "name": "Due"}])
+        self.assertEqual(len(profiles[0]["profile"]["squad"]), 2)
+
+    def test_player_payload_merge_prefers_online_refresh_and_keeps_fresh_cache(self) -> None:
+        cached = {
+            "101": {"id": "101", "maps": 20, "fetch_origin": "cache", "stats": {"KPR": 0.60}},
+            "102": {"id": "102", "maps": 12, "fetch_origin": "cache", "stats": {"KPR": 0.61}},
+        }
+        fetched = {
+            "comparisons_collected": 1,
+            "comparisons_failed": 0,
+            "requests_attempted": 3,
+            "results": [{"players": [{"id": "102", "maps": 18, "stats": {"KPR": 0.70}}]}],
+        }
+
+        payload = start.merge_player_stats_payload(
+            year=2026,
+            requested_ids={"101", "102"},
+            cached_players=cached,
+            fetched_payload=fetched,
+            refresh_ids={"102"},
+        )
+        players = {
+            player["id"]: player
+            for player in payload["results"][0]["players"]
+        }
+
+        self.assertEqual(payload["players_loaded"], 2)
+        self.assertEqual(payload["players_fetched_online"], 1)
+        self.assertEqual(payload["players_loaded_from_cache"], 1)
+        self.assertEqual(payload["players_stale_fallback"], 0)
+        self.assertEqual(players["101"]["fetch_origin"], "cache")
+        self.assertEqual(players["102"]["fetch_origin"], "online")
+        self.assertEqual(players["102"]["stats"]["KPR"], 0.70)
 
     def test_parse_veto_html(self) -> None:
         html = """

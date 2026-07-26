@@ -40,10 +40,45 @@ class Component:
 
 
 @dataclass
+class ProbabilityColumnEstimator:
+    """Platt scaling for an already probabilistic point-in-time rating column."""
+
+    column_index: int
+    slope: float = 1.0
+    intercept: float = 0.0
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        centered = np.asarray(X, dtype=float)[:, self.column_index]
+        raw = np.clip(np.nan_to_num(centered, nan=0.0) + 0.5, 1e-6, 1.0 - 1e-6)
+        logits = np.log(raw / (1.0 - raw))
+        values = self.intercept + self.slope * logits
+        positive = np.empty_like(values)
+        mask = values >= 0.0
+        positive[mask] = 1.0 / (1.0 + np.exp(-values[mask]))
+        exp_values = np.exp(values[~mask])
+        positive[~mask] = exp_values / (1.0 + exp_values)
+        positive = np.clip(positive, 1e-4, 1.0 - 1e-4)
+        return np.column_stack([1.0 - positive, positive])
+
+
+@dataclass
+class ColumnSubsetEstimator:
+    """Adapter allowing one artifact to host components with different inputs."""
+
+    estimator: Any
+    column_indices: list[int]
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self.estimator.predict_proba(np.asarray(X)[:, self.column_indices])
+
+
+@dataclass
 class ModelArtifact:
     feature_columns: list[str]
     components: list[Component]
     metadata: dict[str, Any] = field(default_factory=dict)
+    rich_target_estimator: Any | None = None
+    rich_target_classes: list[str] = field(default_factory=list)
 
     def _matrix(self, feature_rows: list[dict[str, float]]) -> np.ndarray:
         return np.array(
@@ -83,6 +118,42 @@ class ModelArtifact:
             return mean, np.zeros(len(X))
         var = ((preds - mean[:, None]) ** 2) @ weights
         return mean, np.sqrt(np.maximum(var, 0.0))
+
+    def predict_series_score_distribution(
+        self, feature_rows: list[dict[str, float]]
+    ) -> list[dict[str, float]]:
+        """A6: symmetric BO3 scoreline probabilities when the sidecar is active."""
+        estimator = getattr(self, "rich_target_estimator", None)
+        classes = list(getattr(self, "rich_target_classes", None) or [])
+        if estimator is None or not classes:
+            return []
+        X = self._matrix(feature_rows)
+        if len(X) == 0:
+            return []
+
+        def aligned(matrix: np.ndarray) -> np.ndarray:
+            raw = np.asarray(estimator.predict_proba(matrix), dtype=float)
+            estimator_classes = [int(value) for value in estimator.classes_]
+            result = np.zeros((len(matrix), len(classes)), dtype=float)
+            for source_index, class_index in enumerate(estimator_classes):
+                if 0 <= class_index < len(classes):
+                    result[:, class_index] = raw[:, source_index]
+            totals = result.sum(axis=1, keepdims=True)
+            return np.divide(result, totals, out=np.full_like(result, 1.0 / len(classes)), where=totals > 0)
+
+        direct = aligned(X)
+        reverse = X.copy()
+        directional = set(self.metadata.get("directional_feature_columns") or [])
+        for index, column in enumerate(self.feature_columns):
+            if column in directional:
+                reverse[:, index] *= -1.0
+        # Swapping teams reverses 0-2,1-2,2-1,2-0.
+        mirrored = aligned(reverse)[:, ::-1]
+        probabilities = 0.5 * (direct + mirrored)
+        return [
+            {name: float(row[index]) for index, name in enumerate(classes)}
+            for row in probabilities
+        ]
 
     def save(self, path: str | Path = ARTIFACT_PATH) -> Path:
         path = Path(path)
