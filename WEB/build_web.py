@@ -9,12 +9,23 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DAILY_ROOT = ROOT / "DAILY_SNAPSHOTS"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+ROOT = REPO_ROOT / "CS2"
+DAILY_ROOT = ROOT / "PIPELINE"
 MODEL_ROOT = ROOT / "MODEL"
-WEB_ROOT = ROOT / "WEB"
+WEB_ROOT = REPO_ROOT / "WEB"
 BBDD_ROOT = ROOT / "BBDD"
 DB_PATH = BBDD_ROOT / "cs2.db"
+
+
+def configure_sport_root(sport_root: Path) -> None:
+    """Select the sport domain while keeping the web output repository-wide."""
+    global ROOT, DAILY_ROOT, MODEL_ROOT, BBDD_ROOT, DB_PATH
+    ROOT = sport_root.resolve()
+    DAILY_ROOT = ROOT / "PIPELINE"
+    MODEL_ROOT = ROOT / "MODEL"
+    BBDD_ROOT = ROOT / "BBDD"
+    DB_PATH = BBDD_ROOT / "cs2.db"
 
 
 def read_json(path: Path, default):
@@ -29,7 +40,7 @@ def latest_run() -> Path:
         return DAILY_ROOT / "runs" / manifest["last_run_id"]
     runs = sorted([path for path in (DAILY_ROOT / "runs").iterdir() if path.is_dir()])
     if not runs:
-        raise FileNotFoundError("No DAILY_SNAPSHOTS runs found.")
+        raise FileNotFoundError("No PIPELINE runs found.")
     return runs[-1]
 
 
@@ -341,8 +352,10 @@ def publishable_matches(matches: list[dict], grace_minutes: int = 15) -> tuple[l
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Build local static web dashboard.")
+    parser.add_argument("--sport-root", type=Path, default=REPO_ROOT / "CS2")
     parser.add_argument("--run-dir", default="")
     args = parser.parse_args()
+    configure_sport_root(args.sport_root)
     run_dir = Path(args.run_dir) if args.run_dir else latest_run()
     raw_data = read_json(run_dir / "predictions_enriched.json", [])
     data, skipped_web = publishable_matches(raw_data)
@@ -351,6 +364,7 @@ def main() -> int:
     calibration = read_json(run_dir / "calibration.json", {})
 
     payload = {
+        "sport": ROOT.name,
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "runDir": str(run_dir),
         "manifest": manifest,
