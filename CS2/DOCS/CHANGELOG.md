@@ -1,5 +1,26 @@
 # Changelog / registro de decisiones
 
+## 2026-07-27 - BLACKBOX: caja negra portatil de la fuente de verdad
+
+- Nueva herramienta `BBDD/blackbox.py` (solo stdlib) con cuatro mecanismos:
+  `export`, `verify`, `restore` y `autoheal`. Permite reconstruir `cs2.db`
+  completa a partir de una unica carpeta portatil `BBDD/BLACKBOX/` (USB/nube).
+- Principio: en BLACKBOX solo se guarda la FUENTE DE VERDAD no recomputable
+  (identidad, hechos, staging raw, odds, sanciones, predicciones congeladas).
+  Lo derivado (`ratings_history`, `match_features`) y lo operativo
+  (`fetch_state`, `ingest_runs`) se EXCLUYE: se regenera.
+- Formato duradero y no propietario: SQLite podado + volcado SQL de texto,
+  gzip, con `manifest.json` (SHA-256 por fichero y hash de contenido por tabla,
+  version y timestamp). Export atomico con auto-verificacion y generacion previa
+  en `.prev/`.
+- `restore` es idempotente y tiene guardian: nunca pisa una `cs2.db` sana sin
+  `--force`, y respalda en `BBDD/backups/` antes de cualquier reemplazo.
+- `start.ps1`: auto-heal al inicio (restaura si la BBDD falta/vacia/corrupta)
+  y flags `-BackupBlackbox`, `-RestoreBlackbox`, `-SkipAutoHeal`.
+- `BBDD/BLACKBOX/README.md` + `restore_standalone.py` permiten restaurar a mano
+  sin el proyecto. Test `TESTS/test_blackbox_disaster.py` simula el desastre y
+  verifica identidad por checksums + dry-run del lector de entrenamiento.
+
 ## 2026-07-26 - Dominio CS2 aislado para arquitectura multideporte
 
 - Todo el dominio (`BBDD`, `MODEL`, `PIPELINE`, `SCRAPER`, `TESTS`, `DOCS`,
