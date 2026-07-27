@@ -34,6 +34,9 @@
      -RecoveryWindowDays N   Dias hacia atras para recuperar odds/detalle/analytics.
      -RecoveryDelay S        Retardo entre peticiones de recuperacion.
      -RecreateScraperVenv    Recrear el venv del scraper antes de ejecutar.
+     -BackupBlackbox         Al terminar, exporta la caja negra portatil (BBDD/BLACKBOX).
+     -RestoreBlackbox        Al inicio, restaura la BBDD desde BBDD/BLACKBOX (guardian).
+     -SkipAutoHeal           No comprobar/curar la BBDD desde BLACKBOX al arrancar.
      -Quiet                  Reduce logs internos del scraper.
 #>
 param(
@@ -55,6 +58,9 @@ param(
     [int]$RecoveryWindowDays = 2,
     [double]$RecoveryDelay = 1.5,
     [switch]$RecreateScraperVenv,
+    [switch]$BackupBlackbox,
+    [switch]$RestoreBlackbox,
+    [switch]$SkipAutoHeal,
     [switch]$Quiet
 )
 
@@ -372,12 +378,29 @@ $IngestDb = Join-Path $Root "BBDD\ingest.py"
 $ExportMaster = Join-Path $Root "BBDD\export_master_json.py"
 $Artifact = Join-Path $Root "MODEL\artifacts\model.pkl"
 $MasterMani = Join-Path $Root "PIPELINE\master\manifest.json"
+$Blackbox = Join-Path $Root "BBDD\blackbox.py"
+$BlackboxDir = Join-Path $Root "BBDD\BLACKBOX"
+$DbPath = Join-Path $Root "BBDD\cs2.db"
 
 $total = 4
 if (-not $NoDb) { $total += 4 }
 $needTrain = $Retrain -or (-not (Test-Path $Artifact))
 if ($needTrain) { $total++ }
 $n = 0
+
+# --- BLACKBOX: restauracion explicita / auto-heal ANTES de tocar la BBDD -----
+# Si se pide restore explicito, o si la BBDD falta/esta vacia/corrupta, se
+# reconstruye desde BBDD/BLACKBOX antes de que build_db cree un esquema vacio.
+# El guardian de blackbox.py nunca pisa una BBDD sana sin --force.
+if (-not $NoDb) {
+    if ($RestoreBlackbox) {
+        Write-Host "[BLACKBOX] Restauracion explicita solicitada (-RestoreBlackbox)" -ForegroundColor Cyan
+        Invoke-Native $ModelPython @($Blackbox, "restore", "--db", $DbPath, "--blackbox", $BlackboxDir, "--force") "BLACKBOX restore"
+    } elseif (-not $SkipAutoHeal) {
+        Write-Host "[BLACKBOX] Auto-heal: comprobando salud de la BBDD" -ForegroundColor Cyan
+        Invoke-Native $ModelPython @($Blackbox, "autoheal", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX autoheal"
+    }
+}
 
 if (-not $NoDb) {
     $n++
@@ -460,6 +483,12 @@ if (-not $NoDb) {
     Invoke-Native $ModelPython @($DriftMonitor) "Monitor drift"
 }
 
+# --- BLACKBOX: export de respaldo con la BBDD ya consolidada -----------------
+if ($BackupBlackbox -and (-not $NoDb)) {
+    Write-Host "[BLACKBOX] Export de respaldo portatil (-BackupBlackbox)" -ForegroundColor Cyan
+    Invoke-Native $ModelPython @($Blackbox, "export", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX export"
+}
+
 $n++
 Step $n $total "Generando WEB\data.js compartido"
 Invoke-Native $ModelPython @($BuildWeb, "--sport-root", $Root, "--run-dir", $RunDir) "Generacion web"
@@ -470,6 +499,9 @@ Write-Host ("  Run:       " + $RunDir)
 Write-Host ("  Dashboard: " + (Join-Path $WebRoot "index.html"))
 Write-Host ("  Contexto:  " + (Join-Path $Root "MODEL\results\CONTEXT_CALIBRATION.md"))
 Write-Host ("  Abrir:     start " + (Join-Path $WebRoot "index.html"))
+if ($BackupBlackbox -and (-not $NoDb)) {
+    Write-Host ("  Blackbox:  " + $BlackboxDir + "  (copiala a USB/nube)")
+}
 Write-Host ("  Log:       " + $script:StartPs1Log)
 
 if ($script:TranscriptStarted) {
