@@ -2,18 +2,21 @@
   CS2 Predictor - online pipeline de una sola orden.
 
   Por defecto (.\start.ps1) ejecuta el flujo online:
-     0) Resuelve Python de modelo y Python del scraper.
-     1) Instala/repara el venv del scraper si hace falta.
-     2) Scrapea HLTV en vivo, actualiza pendientes y reintenta huecos recientes
-        de odds/detalle/Analytics. Si el scrape no produce datos, la pipeline falla.
+     0) Resuelve Python de modelo y del scraper (venv, CA bundle, guardas HLTV).
+     P) BLACKBOX: auto-heal/restore de la BBDD si falta/vacia/corrupta.
+     1) Inicializa/siembra la BBDD viva si hace falta.
+     2) Scrapea HLTV en vivo y actualiza pendientes. Si no produce datos, falla.
      3) Ingest pre-entreno a la BBDD viva (hechos/odds/assets/snapshots).
-     4) Entrena el modelo si falta el artefacto (o si se pasa -Retrain), ya
-        con SQLite actualizado.
+     4) Entrena el modelo si falta el artefacto (o si se pasa -Retrain).
      5) Enriquece predicciones con el modelo calibrado, odds y flags.
      6) Analiza si el contexto HLTV ayuda a calibrar el modelo.
      7) Ingest final a la BBDD viva SQLite y export compat JSON.
      8) Monitoriza drift causal sobre predicciones cerradas (log loss + CLV).
+     P) BLACKBOX: export de respaldo si se pide -BackupBlackbox.
      9) Genera ..\WEB\data.js para el dashboard compartido.
+
+  La configuracion operativa (guardas HLTV, deps, exit-codes) vive en
+  PIPELINE\pipeline.config.psd1. Los helpers en PIPELINE\pipeline.helpers.ps1.
 
   Flags:
      -SkipScrape             No scrapear; usa el ultimo run existente.
@@ -38,335 +41,136 @@
      -RestoreBlackbox        Al inicio, restaura la BBDD desde BBDD/BLACKBOX (guardian).
      -SkipAutoHeal           No comprobar/curar la BBDD desde BLACKBOX al arrancar.
      -Quiet                  Reduce logs internos del scraper.
+     -DryRun / -WhatIf       Muestra que etapas se ejecutarian, sin ejecutarlas.
+     -LogLevel LEVEL         DEBUG|INFO|WARN|ERROR (consola). El JSONL guarda todo.
+     -Config PATH            Fichero de configuracion .psd1 alternativo.
 #>
+[CmdletBinding(SupportsShouldProcess)]
 param(
     [switch]$SkipScrape,
     [switch]$AllowOfflineFallback,
     [switch]$Retrain,
     [switch]$NoDb,
-    [int]$MaxMatches = 0,
-    [double]$PlayerDelay = 1.5,
+    [ValidateRange(0, [int]::MaxValue)][int]$MaxMatches = 0,
+    [ValidateRange(0.0, [double]::MaxValue)][double]$PlayerDelay = 1.5,
     [switch]$SkipPlayerStats,
     [switch]$SkipTeamProfiles,
     [switch]$SkipMatchAssets,
-    [int]$MatchAssetsLimit = 20,
-    [double]$MatchAssetsDelay = 1.5,
+    [ValidateRange(0, [int]::MaxValue)][int]$MatchAssetsLimit = 20,
+    [ValidateRange(0.0, [double]::MaxValue)][double]$MatchAssetsDelay = 1.5,
     [switch]$SkipAnalytics,
     [switch]$SkipRankings,
     [switch]$SkipWarmup,
     [switch]$SkipSameDayRecovery,
-    [int]$RecoveryWindowDays = 2,
-    [double]$RecoveryDelay = 1.5,
+    [ValidateRange(0, [int]::MaxValue)][int]$RecoveryWindowDays = 2,
+    [ValidateRange(0.0, [double]::MaxValue)][double]$RecoveryDelay = 1.5,
     [switch]$RecreateScraperVenv,
     [switch]$BackupBlackbox,
     [switch]$RestoreBlackbox,
     [switch]$SkipAutoHeal,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$DryRun,
+    [ValidateSet('DEBUG', 'INFO', 'WARN', 'ERROR')][string]$LogLevel = 'INFO',
+    [string]$Config
 )
 
 $ErrorActionPreference = "Stop"
 if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
     $PSNativeCommandUseErrorActionPreference = $false
 }
+
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $Root
 $WebRoot = Join-Path $RepoRoot "WEB"
 $LogDir = Join-Path $Root "PIPELINE\logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
-$script:StartPs1Log = Join-Path $LogDir ("start_" + (Get-Date -Format "yyyyMMdd_HHmmss") + ".log")
+
+# --- Helpers + configuracion -------------------------------------------------
+. (Join-Path $Root "PIPELINE\pipeline.helpers.ps1")
+
+if (-not $Config) { $Config = Join-Path $Root "PIPELINE\pipeline.config.psd1" }
+$Cfg = Import-PipelineConfig -Path $Config
+$script:ExitCode = $Cfg.ExitCodes.Generic
+$script:DryRun = [bool]($DryRun -or $WhatIfPreference)
+
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$script:StartPs1Log = Join-Path $LogDir ("start_" + $stamp + ".log")
+$LogJsonl = Join-Path $LogDir ("start_" + $stamp + ".jsonl")
+$TimingJson = Join-Path $LogDir ("start_" + $stamp + ".timing.json")
+Initialize-PipelineLogging -JsonlPath $LogJsonl -Level $LogLevel
+
 $script:TranscriptStarted = $false
 try {
     Start-Transcript -Path $script:StartPs1Log -Force | Out-Null
     $script:TranscriptStarted = $true
-    Write-Host ("Log start.ps1: " + $script:StartPs1Log) -ForegroundColor DarkGray
+    Write-Log ("Log start.ps1: " + $script:StartPs1Log) -Level INFO -Color DarkGray
+    Write-Log ("Log estructurado: " + $LogJsonl) -Level DEBUG
 } catch {
-    Write-Host ("AVISO: no se pudo iniciar transcript: " + $_.Exception.Message) -ForegroundColor Yellow
+    Write-Log ("no se pudo iniciar transcript: " + $_.Exception.Message) -Level WARN
 }
 
 trap {
-    Write-Host ""
-    Write-Host ("ERROR start.ps1: " + $_.Exception.Message) -ForegroundColor Red
-    Write-Host ("Log completo: " + $script:StartPs1Log) -ForegroundColor Yellow
-    if ($_.ScriptStackTrace) {
-        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
-    }
+    Write-Log ("ERROR start.ps1: " + $_.Exception.Message) -Level ERROR
+    Write-Log ("Log completo: " + $script:StartPs1Log) -Level WARN
+    if ($_.ScriptStackTrace) { Write-Log $_.ScriptStackTrace -Level DEBUG }
     if ($script:TranscriptStarted) {
-        try {
-            Stop-Transcript | Out-Null
-            $script:TranscriptStarted = $false
-        } catch { }
+        try { Stop-Transcript | Out-Null; $script:TranscriptStarted = $false } catch { }
     }
-    exit 1
+    exit $script:ExitCode
 }
 
-function Step($n, $total, $msg) {
-    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    Write-Host "[$ts] [$n/$total] $msg" -ForegroundColor Cyan
-}
+# --- Modelo de etapas: timing + progreso + dry-run + exit codes --------------
+$script:StageIndex = 0
+$script:StageTotal = 0
+$script:StageTimings = @()
 
-function Invoke-Native {
+function Invoke-Stage {
+    <#
+      Envuelve una unidad de trabajo: cabecera [n/total], cronometraje, registro
+      estructurado, soporte de dry-run y mapeo de exit code al fallar.
+    #>
     param(
-        [string]$FilePath,
-        [string[]]$Arguments = @(),
-        [string]$Description = ""
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [int]$FailExit = $Cfg.ExitCodes.Generic,
+        [switch]$Auxiliary
     )
-    $label = if ($Description) { $Description } else { Split-Path -Leaf $FilePath }
-    $started = Get-Date
-    Write-Host (">> " + $label) -ForegroundColor DarkGray
-    Write-Host ("   " + $FilePath + " " + ($Arguments -join " ")) -ForegroundColor DarkGray
-    $stderrFile = New-TemporaryFile
-    $oldErrorActionPreference = $ErrorActionPreference
-    $oldNativeErrorPreference = $null
-    $exit = $null
-    if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
-        $oldNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
-        $PSNativeCommandUseErrorActionPreference = $false
+    if ($Auxiliary) {
+        $header = "[BLACKBOX] $Name"
+    } else {
+        $script:StageIndex++
+        $header = "[{0}/{1}] {2}" -f $script:StageIndex, $script:StageTotal, $Name
     }
-    $ErrorActionPreference = "Continue"
-    try {
-        & $FilePath @Arguments 2> $stderrFile.FullName | ForEach-Object { Write-Host $_ }
-        $exit = $LASTEXITCODE
-        if (($exit -ne 0) -and (Test-Path $stderrFile.FullName)) {
-            Get-Content -LiteralPath $stderrFile.FullName -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-        }
-    } finally {
-        $ErrorActionPreference = $oldErrorActionPreference
-        if ($null -ne $oldNativeErrorPreference) {
-            $PSNativeCommandUseErrorActionPreference = $oldNativeErrorPreference
-        }
-        Remove-Item -LiteralPath $stderrFile.FullName -Force -ErrorAction SilentlyContinue
-    }
-    $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
-    if ($exit -ne 0) {
-        Write-Host ("<< " + $label + " FAILED exit=" + $exit + " elapsed=" + $elapsed + "s") -ForegroundColor Red
-        if ($Description) {
-            throw "$Description fallo con exit code $exit."
-        }
-        throw "Comando fallo con exit code ${exit}: $FilePath $($Arguments -join ' ')"
-    }
-    Write-Host ("<< " + $label + " OK exit=0 elapsed=" + $elapsed + "s") -ForegroundColor DarkGray
-}
+    Write-Log $header -Level INFO -Color Cyan -Stage $Name
 
-function Get-SystemPython {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) {
-        throw "No se encontro Python en PATH."
-    }
-    return $cmd.Source
-}
-
-function Get-ScraperBasePython {
-    # Scrapling (navegador stealth) soporta Python 3.10-3.13, NO 3.14.
-    # Preferimos 3.13/3.12/3.11 via el 'py' launcher; si no hay, caemos al
-    # Python del sistema (scrapling stealth podria no instalar; se degrada).
-    foreach ($v in @("3.13", "3.12", "3.11", "3.10")) {
-        try {
-            $out = & py "-$v" -c "import sys; print(sys.executable)" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
-        } catch { }
-    }
-    Write-Host "AVISO: no se encontro Python 3.10-3.13; uso el del sistema. El navegador stealth de Scrapling podria no instalar (se usara solo el tier HTTP / requests)." -ForegroundColor Yellow
-    return (Get-SystemPython)
-}
-
-function Ensure-CaBundle {
-    # En redes con inspeccion TLS (proxy corporativo con CA propia), curl_cffi y
-    # requests fallan la verificacion. Exportamos el trust store de Windows a un
-    # bundle y lo publicamos por variables de entorno. En un PC sin restricciones
-    # no hace falta: si el probe pasa, no se genera nada.
-    param([string]$ScraperDir)
-    $bundle = Join-Path $ScraperDir "corp_ca_bundle.pem"
-
-    # Si ya existe un bundle, publicalo y termina.
-    if (Test-Path $bundle) {
-        Set-Item -Path "Env:HLTV_CA_BUNDLE" -Value $bundle
-        Set-Item -Path "Env:CURL_CA_BUNDLE" -Value $bundle
-        Set-Item -Path "Env:SSL_CERT_FILE" -Value $bundle
-        Set-Item -Path "Env:REQUESTS_CA_BUNDLE" -Value $bundle
-        Write-Host ("CA bundle en uso: " + $bundle) -ForegroundColor DarkGray
+    if ($script:DryRun) {
+        Write-Log ("DRY-RUN: se omitiria '{0}'" -f $Name) -Level INFO -Color DarkYellow -Stage $Name
+        $script:StageTimings += [pscustomobject]@{ stage = $Name; seconds = 0; status = 'dry-run' }
         return
     }
 
-    # Probe TLS: si la verificacion por defecto funciona, no hacemos nada.
-    $probe = @'
-import urllib.request, ssl
-try:
-    urllib.request.urlopen('https://www.hltv.org/robots.txt', timeout=15)
-    print('TLS_OK')
-except ssl.SSLCertVerificationError:
-    print('TLS_MITM')
-except Exception:
-    print('TLS_OK')
-'@
-    $result = & (Get-SystemPython) -c $probe 2>$null
-    if ($result -match "TLS_MITM") {
-        Write-Host "Inspeccion TLS detectada; exporto el trust store de Windows a corp_ca_bundle.pem..." -ForegroundColor Yellow
-        $stores = @('Cert:\LocalMachine\Root','Cert:\CurrentUser\Root','Cert:\LocalMachine\CA','Cert:\CurrentUser\CA')
-        $seen = @{}
-        $sb = New-Object System.Text.StringBuilder
-        foreach ($s in $stores) {
-            Get-ChildItem $s -ErrorAction SilentlyContinue | ForEach-Object {
-                if (-not $seen.ContainsKey($_.Thumbprint)) {
-                    $seen[$_.Thumbprint] = $true
-                    $b64 = [System.Convert]::ToBase64String($_.RawData, 'InsertLineBreaks')
-                    [void]$sb.AppendLine("# $($_.Subject)")
-                    [void]$sb.AppendLine("-----BEGIN CERTIFICATE-----")
-                    [void]$sb.AppendLine($b64)
-                    [void]$sb.AppendLine("-----END CERTIFICATE-----")
-                }
-            }
-        }
-        [System.IO.File]::WriteAllText($bundle, $sb.ToString())
-        Set-Item -Path "Env:HLTV_CA_BUNDLE" -Value $bundle
-        Set-Item -Path "Env:CURL_CA_BUNDLE" -Value $bundle
-        Set-Item -Path "Env:SSL_CERT_FILE" -Value $bundle
-        Set-Item -Path "Env:REQUESTS_CA_BUNDLE" -Value $bundle
-        Write-Host ("CA bundle generado: " + $bundle) -ForegroundColor DarkGray
+    $start = Get-Date
+    try {
+        & $Action
+    } catch {
+        $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds, 1)
+        $script:StageTimings += [pscustomobject]@{ stage = $Name; seconds = $elapsed; status = 'FAILED' }
+        $script:ExitCode = $FailExit
+        throw
     }
+    $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds, 1)
+    $script:StageTimings += [pscustomobject]@{ stage = $Name; seconds = $elapsed; status = 'ok' }
+    Write-Log ("OK '{0}' ({1}s)" -f $Name, $elapsed) -Level DEBUG -Stage $Name
 }
 
-function Test-PythonImports($python, $imports) {
-    $code = "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in sys.argv[1:]) else 1)"
-    & $python -c $code @imports *> $null
-    return ($LASTEXITCODE -eq 0)
-}
+# --- Validacion de combinaciones de parametros -------------------------------
+if ($NoDb -and $BackupBlackbox) { Write-Log "-BackupBlackbox se ignora con -NoDb (no se toca la BBDD)." -Level WARN }
+if ($NoDb -and $RestoreBlackbox) { Write-Log "-RestoreBlackbox se ignora con -NoDb (no se toca la BBDD)." -Level WARN }
+if ($SkipScrape -and $MaxMatches -gt 0) { Write-Log "-MaxMatches se ignora con -SkipScrape (no hay scrape)." -Level WARN }
+if ($RestoreBlackbox -and $SkipAutoHeal) { Write-Log "-RestoreBlackbox tiene prioridad; -SkipAutoHeal es redundante." -Level INFO }
+if ($script:DryRun) { Write-Log "MODO DRY-RUN: no se ejecutara ninguna etapa (solo se listaran)." -Level WARN }
 
-function Set-DefaultEnv($name, $value) {
-    if (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
-        Set-Item -Path ("Env:" + $name) -Value $value
-    }
-}
-
-function Configure-ScrapeGuards {
-    Set-DefaultEnv "HLTV_FETCH_MAX_ATTEMPTS" "10"
-    Set-DefaultEnv "HLTV_FETCH_BASE_DELAY" "5.0"
-    Set-DefaultEnv "HLTV_FETCH_MAX_DELAY" "600.0"
-    Set-DefaultEnv "HLTV_FETCH_MIN_INTERVAL" "2.5"
-    Set-DefaultEnv "HLTV_FETCH_CACHE_TTL" "240.0"
-    Set-DefaultEnv "HLTV_BLOCK_COOLDOWN_BASE" "90.0"
-    Set-DefaultEnv "HLTV_BLOCK_COOLDOWN_MAX" "1200.0"
-    Set-DefaultEnv "HLTV_BLOCK_STREAK_THRESHOLD" "3"
-    Set-DefaultEnv "HLTV_CIRCUIT_BREAKER_SLEEP" "420.0"
-    Set-DefaultEnv "HLTV_FETCH_WARMUP" "1"
-    Set-DefaultEnv "HLTV_URL_QUARANTINE_SECONDS" "900.0"
-    Set-DefaultEnv "HLTV_MAX_HTTP_REQUESTS_PER_RUN" "2500"
-    # Scrapling: tier 1 HTTP impersonation + tier 2 navegador stealth.
-    Set-DefaultEnv "HLTV_USE_SCRAPLING" "1"
-    Set-DefaultEnv "HLTV_SOLVE_CLOUDFLARE" "1"
-    Set-DefaultEnv "HLTV_IMPERSONATE" "chrome"
-    Set-DefaultEnv "HLTV_STEALTH_HEADLESS" "1"
-    Set-DefaultEnv "HLTV_STEALTH_TIMEOUT_MS" "45000"
-    Set-DefaultEnv "HLTV_STEALTH_MAX_SOLVES_PER_RUN" "6"
-    Set-DefaultEnv "HLTV_SCRAPLING_TIER1_ATTEMPTS" "3"
-    Set-DefaultEnv "HLTV_AUTO_REFRESH_CF_ON_BLOCK" "1"
-    Set-DefaultEnv "HLTV_CF_REFRESH_TIMEOUT_SECONDS" "240"
-    Set-DefaultEnv "HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS" "900"
-    Set-DefaultEnv "BBDD_TEAM_PROFILE_TTL_DAYS" "7"
-    Set-DefaultEnv "BBDD_PLAYER_STATS_TTL_DAYS" "3"
-    Set-DefaultEnv "BBDD_RANKING_TTL_DAYS" "7"
-    Set-DefaultEnv "BBDD_ASSETS_BACKFILL_LIMIT" "20"
-    # HLTV_PROXY vacio por defecto (sin proxy). Ej: http://user:pass@host:port
-}
-
-function Ensure-ModelPython {
-    $python = Get-SystemPython
-    $imports = @("numpy", "pandas", "sklearn", "scipy", "matplotlib", "lightgbm", "shap")
-    if (-not (Test-PythonImports $python $imports)) {
-        Write-Host "Instalando dependencias ML en el Python del sistema..." -ForegroundColor Yellow
-        Invoke-Native $python @("-m", "pip", "install", "numpy", "pandas", "scikit-learn", "scipy", "matplotlib", "lightgbm", "shap") "Instalacion dependencias ML"
-    }
-    if (-not (Test-PythonImports $python $imports)) {
-        throw "No se pudieron cargar las dependencias ML requeridas."
-    }
-    return $python
-}
-
-function Ensure-ScraperPython {
-    param([string]$SystemPython)
-    $ScraperDir = Join-Path $Root "SCRAPER\hltv-scraper-api"
-    $VenvPython = Join-Path $ScraperDir ".venv\Scripts\python.exe"
-    $Requirements = Join-Path $ScraperDir "requirements.txt"
-
-    # El venv debe crearse con un Python 3.10-3.13 para que Scrapling stealth
-    # instale. Si el venv ya existe con 3.14 (sin scrapling), se recrea.
-    $BasePython = Get-ScraperBasePython
-    $baseOk = Test-PythonImports $BasePython @("sys")
-
-    $valid = $false
-    if ((Test-Path $VenvPython) -and (-not $RecreateScraperVenv)) {
-        # Valido core + scrapling (si el base soporta scrapling exigimos scrapling).
-        $valid = Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests", "scrapling", "curl_cffi")
-        if (-not $valid) {
-            $valid = Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests")
-            if ($valid) {
-                Write-Host "El venv del scraper no tiene Scrapling; se recreara para anadirlo." -ForegroundColor Yellow
-                $valid = $false
-            }
-        }
-    }
-
-    if (-not $valid) {
-        Write-Host ("Preparando venv online del scraper con: " + $BasePython) -ForegroundColor Yellow
-        if (Test-Path (Join-Path $ScraperDir ".venv")) {
-            Remove-Item -LiteralPath (Join-Path $ScraperDir ".venv") -Recurse -Force
-        }
-        Invoke-Native $BasePython @("-m", "venv", (Join-Path $ScraperDir ".venv")) "Creacion venv scraper"
-        Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade pip scraper"
-        Invoke-Native $VenvPython @("-m", "pip", "install", "-r", $Requirements) "Instalacion requirements scraper"
-        # Descarga de navegadores de Scrapling (patchright/chromium). Best-effort:
-        # si falla (p.ej. Python 3.14 sin wheels), seguimos con el tier HTTP.
-        try {
-            & $VenvPython -c "from scrapling.cli import install; install([], standalone_mode=False)"
-            if ($LASTEXITCODE -ne 0) { Write-Host "AVISO: 'scrapling install' devolvio error; el navegador stealth podria no estar disponible." -ForegroundColor Yellow }
-        } catch {
-            Write-Host ("AVISO: no se pudieron instalar los navegadores de Scrapling: " + $_.Exception.Message) -ForegroundColor Yellow
-        }
-    }
-
-    if (-not (Test-PythonImports $VenvPython @("scrapy", "cloudscraper", "parsel", "requests"))) {
-        throw "El venv del scraper no tiene las dependencias base requeridas."
-    }
-
-    # Estado de Scrapling: si no importa, desactivamos su uso y avisamos.
-    if (Test-PythonImports $VenvPython @("scrapling", "curl_cffi")) {
-        if (Test-PythonImports $VenvPython @("scrapling.fetchers")) {
-            Write-Host "Scrapling disponible (tier HTTP impersonation + navegador stealth)." -ForegroundColor DarkGray
-        }
-    } else {
-        Write-Host "AVISO: Scrapling no disponible en el venv; el scraper usara requests/cloudscraper. Instala Python 3.13 para el modo stealth." -ForegroundColor Yellow
-        Set-Item -Path "Env:HLTV_USE_SCRAPLING" -Value "0"
-    }
-
-    return $VenvPython
-}
-
-$ModelPython = Ensure-ModelPython
-$ScraperPython = $null
-if (-not $SkipScrape) {
-    Configure-ScrapeGuards
-    Ensure-CaBundle -ScraperDir (Join-Path $Root "SCRAPER\hltv-scraper-api")
-    $ScraperPython = Ensure-ScraperPython -SystemPython $ModelPython
-}
-Write-Host ("Python modelo:  " + $ModelPython) -ForegroundColor DarkGray
-if ($ScraperPython) {
-    Write-Host ("Python scraper: " + $ScraperPython) -ForegroundColor DarkGray
-    Write-Host (
-        "Guardas HLTV: min_interval={0}s attempts={1} base_delay={2}s max_delay={3}s cache_ttl={4}s block_cooldown={5}-{6}s circuit={7}s url_quarantine={8}s max_requests={9} stealth_timeout={10}ms auto_cf_refresh={11}" -f
-        $env:HLTV_FETCH_MIN_INTERVAL,
-        $env:HLTV_FETCH_MAX_ATTEMPTS,
-        $env:HLTV_FETCH_BASE_DELAY,
-        $env:HLTV_FETCH_MAX_DELAY,
-        $env:HLTV_FETCH_CACHE_TTL,
-        $env:HLTV_BLOCK_COOLDOWN_BASE,
-        $env:HLTV_BLOCK_COOLDOWN_MAX,
-        $env:HLTV_CIRCUIT_BREAKER_SLEEP,
-        $env:HLTV_URL_QUARANTINE_SECONDS,
-        $env:HLTV_MAX_HTTP_REQUESTS_PER_RUN,
-        $env:HLTV_STEALTH_TIMEOUT_MS,
-        $env:HLTV_AUTO_REFRESH_CF_ON_BLOCK
-    ) -ForegroundColor DarkGray
-}
-
+# --- Rutas de scripts --------------------------------------------------------
 $DailyStart = Join-Path $Root "PIPELINE\start.py"
 $Enrich = Join-Path $Root "PIPELINE\enrich_predictions.py"
 $BuildWeb = Join-Path $WebRoot "build_web.py"
@@ -382,119 +186,166 @@ $Blackbox = Join-Path $Root "BBDD\blackbox.py"
 $BlackboxDir = Join-Path $Root "BBDD\BLACKBOX"
 $DbPath = Join-Path $Root "BBDD\cs2.db"
 
-$total = 4
-if (-not $NoDb) { $total += 4 }
-$needTrain = $Retrain -or (-not (Test-Path $Artifact))
-if ($needTrain) { $total++ }
-$n = 0
+# --- Fase 0: Python del modelo y del scraper ---------------------------------
+$ModelPython = Ensure-ModelPython -Imports $Cfg.ModelImports -PipPackages $Cfg.ModelPipPackages -DryRun:$script:DryRun
+$ScraperPython = $null
+if (-not $SkipScrape) {
+    Set-ScrapeGuardsFromConfig -Guards $Cfg.ScrapeGuards
+    Ensure-CaBundle -ScraperDir (Join-Path $Root "SCRAPER\hltv-scraper-api") -DryRun:$script:DryRun
+    $ScraperPython = Ensure-ScraperPython -ScraperDir (Join-Path $Root "SCRAPER\hltv-scraper-api") `
+        -BaseImports $Cfg.ScraperBaseImports -StealthImports $Cfg.ScraperStealthImports `
+        -Recreate:$RecreateScraperVenv -DryRun:$script:DryRun
+}
+Write-Log ("Python modelo:  " + $ModelPython) -Level DEBUG
+if ($ScraperPython) {
+    Write-Log ("Python scraper: " + $ScraperPython) -Level DEBUG
+    Write-Log ("Guardas HLTV: min_interval={0}s attempts={1} cache_ttl={2}s circuit={3}s max_requests={4} stealth={5}ms" -f `
+            $env:HLTV_FETCH_MIN_INTERVAL, $env:HLTV_FETCH_MAX_ATTEMPTS, $env:HLTV_FETCH_CACHE_TTL, `
+            $env:HLTV_CIRCUIT_BREAKER_SLEEP, $env:HLTV_MAX_HTTP_REQUESTS_PER_RUN, $env:HLTV_STEALTH_TIMEOUT_MS) -Level DEBUG
+}
 
-# --- BLACKBOX: restauracion explicita / auto-heal ANTES de tocar la BBDD -----
-# Si se pide restore explicito, o si la BBDD falta/esta vacia/corrupta, se
-# reconstruye desde BBDD/BLACKBOX antes de que build_db cree un esquema vacio.
-# El guardian de blackbox.py nunca pisa una BBDD sana sin --force.
+# --- Total de etapas numeradas (identico al comportamiento previo) -----------
+$needTrain = $Retrain -or (-not (Test-Path $Artifact))
+$script:StageTotal = 4                       # scrape + enrich + context + web
+if (-not $NoDb) { $script:StageTotal += 4 }  # build_db + ingest-pre + ingest-final + drift
+if ($needTrain) { $script:StageTotal += 1 }
+
+# --- Fase P: BLACKBOX restore explicito / auto-heal (antes de tocar BBDD) -----
 if (-not $NoDb) {
     if ($RestoreBlackbox) {
-        Write-Host "[BLACKBOX] Restauracion explicita solicitada (-RestoreBlackbox)" -ForegroundColor Cyan
-        Invoke-Native $ModelPython @($Blackbox, "restore", "--db", $DbPath, "--blackbox", $BlackboxDir, "--force") "BLACKBOX restore"
+        Invoke-Stage -Auxiliary -Name "Restauracion explicita desde BLACKBOX (-RestoreBlackbox)" -FailExit $Cfg.ExitCodes.Blackbox -Action {
+            Invoke-Native $ModelPython @($Blackbox, "restore", "--db", $DbPath, "--blackbox", $BlackboxDir, "--force") "BLACKBOX restore" | Out-Null
+        }
     } elseif (-not $SkipAutoHeal) {
-        Write-Host "[BLACKBOX] Auto-heal: comprobando salud de la BBDD" -ForegroundColor Cyan
-        Invoke-Native $ModelPython @($Blackbox, "autoheal", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX autoheal"
+        Invoke-Stage -Auxiliary -Name "Auto-heal: comprobando salud de la BBDD" -FailExit $Cfg.ExitCodes.Blackbox -Action {
+            Invoke-Native $ModelPython @($Blackbox, "autoheal", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX autoheal" | Out-Null
+        }
     }
 }
 
+# --- Etapa 1: init/siembra BBDD ----------------------------------------------
 if (-not $NoDb) {
-    $n++
-    Step $n $total "Inicializando/sembrando BBDD viva si hace falta"
-    Invoke-Native $ModelPython @($BuildDb) "Semilla BBDD"
+    Invoke-Stage -Name "Inicializando/sembrando BBDD viva si hace falta" -FailExit $Cfg.ExitCodes.IngestPre -Action {
+        Invoke-Native $ModelPython @($BuildDb) "Semilla BBDD" | Out-Null
+    }
 }
 
-$n++
+# --- Etapa 2: scrape ----------------------------------------------------------
 if (-not $SkipScrape) {
-    Step $n $total "Scrape online de HLTV + actualizacion de pendientes"
-    $StartArgs = @($DailyStart, "--player-delay", [string]$PlayerDelay)
-    if (-not $Quiet) { $StartArgs += "--verbose" }
-    if ($MaxMatches -gt 0) { $StartArgs += @("--max-matches", [string]$MaxMatches) }
-    if ($MaxMatches -gt 0) { $StartArgs += "--no-promote" }
-    if ($SkipPlayerStats) { $StartArgs += "--skip-player-stats" }
-    if ($SkipTeamProfiles) { $StartArgs += "--skip-team-profiles" }
-    if ($SkipMatchAssets) { $StartArgs += "--skip-match-assets" }
-    if ($SkipAnalytics) { $StartArgs += "--skip-analytics" }
-    if ($SkipRankings) { $StartArgs += "--skip-rankings" }
-    if ($SkipWarmup) { $StartArgs += "--skip-warmup" }
-    if ($SkipSameDayRecovery) { $StartArgs += "--skip-same-day-recovery" }
-    $StartArgs += @("--match-assets-limit", [string]$MatchAssetsLimit)
-    $StartArgs += @("--match-assets-delay", [string]$MatchAssetsDelay)
-    $StartArgs += @("--same-day-recovery-window-days", [string]$RecoveryWindowDays)
-    $StartArgs += @("--recovery-delay", [string]$RecoveryDelay)
-    if ($AllowOfflineFallback) { $StartArgs += "--allow-empty-scrape" }
-
-    try {
-        Invoke-Native $ScraperPython $StartArgs "Scrape online HLTV"
-    } catch {
-        if ($AllowOfflineFallback) {
-            Write-Host ("Scrape fallo; continuo con ultimo run por -AllowOfflineFallback: " + $_.Exception.Message) -ForegroundColor Yellow
-        } else {
-            throw
+    Invoke-Stage -Name "Scrape online de HLTV + actualizacion de pendientes" -FailExit $Cfg.ExitCodes.Scrape -Action {
+        $StartArgs = @($DailyStart, "--player-delay", [string]$PlayerDelay)
+        if (-not $Quiet) { $StartArgs += "--verbose" }
+        if ($MaxMatches -gt 0) { $StartArgs += @("--max-matches", [string]$MaxMatches, "--no-promote") }
+        if ($SkipPlayerStats) { $StartArgs += "--skip-player-stats" }
+        if ($SkipTeamProfiles) { $StartArgs += "--skip-team-profiles" }
+        if ($SkipMatchAssets) { $StartArgs += "--skip-match-assets" }
+        if ($SkipAnalytics) { $StartArgs += "--skip-analytics" }
+        if ($SkipRankings) { $StartArgs += "--skip-rankings" }
+        if ($SkipWarmup) { $StartArgs += "--skip-warmup" }
+        if ($SkipSameDayRecovery) { $StartArgs += "--skip-same-day-recovery" }
+        $StartArgs += @("--match-assets-limit", [string]$MatchAssetsLimit)
+        $StartArgs += @("--match-assets-delay", [string]$MatchAssetsDelay)
+        $StartArgs += @("--same-day-recovery-window-days", [string]$RecoveryWindowDays)
+        $StartArgs += @("--recovery-delay", [string]$RecoveryDelay)
+        if ($AllowOfflineFallback) { $StartArgs += "--allow-empty-scrape" }
+        try {
+            Invoke-Native $ScraperPython $StartArgs "Scrape online HLTV" | Out-Null
+        } catch {
+            if ($AllowOfflineFallback) {
+                Write-Log ("Scrape fallo; continuo con ultimo run por -AllowOfflineFallback: " + $_.Exception.Message) -Level WARN
+            } else {
+                throw
+            }
         }
     }
 } else {
-    Step $n $total "Scrape omitido (-SkipScrape): uso el ultimo run existente"
+    Invoke-Stage -Name "Scrape omitido (-SkipScrape): uso el ultimo run existente" -Action { }
 }
 
+# --- Resolucion del run publicado --------------------------------------------
+$RunDir = $null
 if (-not (Test-Path $MasterMani)) {
-    throw "No hay master manifest. Ejecuta un scrape online valido primero."
+    if ($script:DryRun) {
+        Write-Log "DRY-RUN: no hay master manifest; se usaria el ultimo run publicado." -Level WARN
+        $RunDir = Join-Path $Root "PIPELINE\runs\<RUN_ID>"
+    } else {
+        throw "No hay master manifest. Ejecuta un scrape online valido primero."
+    }
+} else {
+    $Manifest = Get-Content -LiteralPath $MasterMani -Raw | ConvertFrom-Json
+    $RunDir = Join-Path $Root ("PIPELINE\runs\" + $Manifest.last_run_id)
+    if ((-not (Test-Path $RunDir)) -and (-not $script:DryRun)) {
+        throw "El run $($Manifest.last_run_id) no existe en disco."
+    }
 }
-$Manifest = Get-Content -LiteralPath $MasterMani -Raw | ConvertFrom-Json
-$RunDir = Join-Path $Root ("PIPELINE\runs\" + $Manifest.last_run_id)
-if (-not (Test-Path $RunDir)) {
-    throw "El run $($Manifest.last_run_id) no existe en disco."
-}
+Write-Log ("Run activo: " + $RunDir) -Level DEBUG
 
+# --- Etapa 3: ingest pre-entreno (hechos; lo consume enrich y train) ---------
 if (-not $NoDb) {
-    $n++
-    Step $n $total "Ingest pre-entreno a BBDD viva (hechos, odds, assets, snapshots)"
-    Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir, "--no-backup", "--no-mirror-backup") "Ingest pre-entreno BBDD"
+    Invoke-Stage -Name "Ingest pre-entreno a BBDD viva (hechos, odds, assets, snapshots)" -FailExit $Cfg.ExitCodes.IngestPre -Action {
+        Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir, "--no-backup", "--no-mirror-backup") "Ingest pre-entreno BBDD" | Out-Null
+    }
 }
 
+# --- Etapa 4: entrenamiento (solo si -Retrain o falta el artefacto) ----------
 if ($needTrain) {
-    $n++
-    Step $n $total "Entrenando modelo (Glicko-2 + calibracion) con master actualizado"
-    $TrainArgs = @($Train)
-    if (-not $Quiet) { $TrainArgs += "--verbose" }
-    Invoke-Native $ModelPython $TrainArgs "Entrenamiento modelo"
+    Invoke-Stage -Name "Entrenando modelo (Glicko-2 + calibracion) con master actualizado" -FailExit $Cfg.ExitCodes.Train -Action {
+        $TrainArgs = @($Train)
+        if (-not $Quiet) { $TrainArgs += "--verbose" }
+        Invoke-Native $ModelPython $TrainArgs "Entrenamiento modelo" | Out-Null
+    }
 }
 
-$n++
-Step $n $total "Enriqueciendo predicciones (modelo + odds + flags + calibracion)"
-Invoke-Native $ModelPython @($Enrich, "--run-dir", $RunDir) "Enriquecimiento predicciones"
+# --- Etapa 5: enrich ----------------------------------------------------------
+Invoke-Stage -Name "Enriqueciendo predicciones (modelo + odds + flags + calibracion)" -FailExit $Cfg.ExitCodes.Enrich -Action {
+    Invoke-Native $ModelPython @($Enrich, "--run-dir", $RunDir) "Enriquecimiento predicciones" | Out-Null
+}
 
-$n++
-Step $n $total "Analizando calibracion por contexto HLTV"
-Invoke-Native $ModelPython @($ContextCalibration) "Analisis calibracion contexto"
+# --- Etapa 6: calibracion por contexto (read-only; antes del ingest final) ---
+Invoke-Stage -Name "Analizando calibracion por contexto HLTV" -FailExit $Cfg.ExitCodes.Context -Action {
+    Invoke-Native $ModelPython @($ContextCalibration) "Analisis calibracion contexto" | Out-Null
+}
 
+# --- Etapa 7: ingest final (predicciones) + export master --------------------
 if (-not $NoDb) {
-    $n++
-    Step $n $total "Ingest final a BBDD viva (predicciones) + export master JSON compat"
-    Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir) "Ingest incremental BBDD"
-    Invoke-Native $ModelPython @($ExportMaster) "Export master JSON compat"
+    Invoke-Stage -Name "Ingest final a BBDD viva (predicciones) + export master JSON compat" -FailExit $Cfg.ExitCodes.DbPost -Action {
+        Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir) "Ingest incremental BBDD" | Out-Null
+        Invoke-Native $ModelPython @($ExportMaster) "Export master JSON compat" | Out-Null
+    }
 
-    $n++
-    Step $n $total "Monitorizando drift causal (log loss rodante + CLV)"
-    Invoke-Native $ModelPython @($DriftMonitor) "Monitor drift"
+    # --- Etapa 8: monitor drift (read-only) ----------------------------------
+    Invoke-Stage -Name "Monitorizando drift causal (log loss rodante + CLV)" -FailExit $Cfg.ExitCodes.Drift -Action {
+        Invoke-Native $ModelPython @($DriftMonitor) "Monitor drift" | Out-Null
+    }
 }
 
-# --- BLACKBOX: export de respaldo con la BBDD ya consolidada -----------------
+# --- Fase P: BLACKBOX export de respaldo -------------------------------------
 if ($BackupBlackbox -and (-not $NoDb)) {
-    Write-Host "[BLACKBOX] Export de respaldo portatil (-BackupBlackbox)" -ForegroundColor Cyan
-    Invoke-Native $ModelPython @($Blackbox, "export", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX export"
+    Invoke-Stage -Auxiliary -Name "Export de respaldo portatil (-BackupBlackbox)" -FailExit $Cfg.ExitCodes.Blackbox -Action {
+        Invoke-Native $ModelPython @($Blackbox, "export", "--db", $DbPath, "--blackbox", $BlackboxDir) "BLACKBOX export" | Out-Null
+    }
 }
 
-$n++
-Step $n $total "Generando WEB\data.js compartido"
-Invoke-Native $ModelPython @($BuildWeb, "--sport-root", $Root, "--run-dir", $RunDir) "Generacion web"
+# --- Etapa 9: web ------------------------------------------------------------
+Invoke-Stage -Name "Generando WEB\data.js compartido" -FailExit $Cfg.ExitCodes.Web -Action {
+    Invoke-Native $ModelPython @($BuildWeb, "--sport-root", $Root, "--run-dir", $RunDir) "Generacion web" | Out-Null
+}
+
+# --- Resumen + tabla de tiempos ----------------------------------------------
+$totalSeconds = ($script:StageTimings | Measure-Object -Property seconds -Sum).Sum
+try {
+    ($script:StageTimings | ConvertTo-Json -Depth 4) | Out-File -LiteralPath $TimingJson -Encoding utf8
+} catch { }
 
 Write-Host ""
-Write-Host "Pipeline online completa." -ForegroundColor Green
+if ($script:DryRun) {
+    Write-Log "DRY-RUN completado: ninguna etapa se ejecuto." -Level WARN
+} else {
+    Write-Log "Pipeline online completa." -Level INFO -Color Green
+}
+Write-Host ""
+Write-Host ("  Tiempos por etapa (total {0}s):" -f [math]::Round([double]$totalSeconds, 1)) -ForegroundColor Green
+$script:StageTimings | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 Write-Host ("  Run:       " + $RunDir)
 Write-Host ("  Dashboard: " + (Join-Path $WebRoot "index.html"))
 Write-Host ("  Contexto:  " + (Join-Path $Root "MODEL\results\CONTEXT_CALIBRATION.md"))
@@ -502,9 +353,11 @@ Write-Host ("  Abrir:     start " + (Join-Path $WebRoot "index.html"))
 if ($BackupBlackbox -and (-not $NoDb)) {
     Write-Host ("  Blackbox:  " + $BlackboxDir + "  (copiala a USB/nube)")
 }
+Write-Host ("  Tiempos:   " + $TimingJson)
 Write-Host ("  Log:       " + $script:StartPs1Log)
 
+$script:ExitCode = 0
 if ($script:TranscriptStarted) {
-    Stop-Transcript | Out-Null
-    $script:TranscriptStarted = $false
+    try { Stop-Transcript | Out-Null; $script:TranscriptStarted = $false } catch { }
 }
+exit 0
