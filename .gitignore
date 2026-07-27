@@ -38,6 +38,15 @@ CS2/BBDD/*.db-shm
 CS2/BBDD/cs2_dump.sql
 CS2/BBDD/backups/
 CS2-Predictor-Backups/
+
+# BLACKBOX: se versionan el codigo (blackbox.py), el README y el restaurador
+# standalone; los DATOS generados (sqlite/sql comprimidos + manifest) NO.
+CS2/BBDD/BLACKBOX/data/
+CS2/BBDD/BLACKBOX/manifest.json
+CS2/BBDD/BLACKBOX/schema.sql
+CS2/BBDD/BLACKBOX/.staging/
+CS2/BBDD/BLACKBOX/.prev/
+CS2/BBDD/BLACKBOX/.verify_tmp.sqlite
 CS2/MODEL/artifacts/*.pkl
 CS2/MODEL/artifacts/registry/
 CS2/MODEL/results/*.json
