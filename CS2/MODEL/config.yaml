@@ -12,6 +12,21 @@ training:
   optuna_retune_weeks: 26
   final_calibration_fraction: 0.18
 
+# Harness de evaluacion honesto (MODEL/evaluate.py + cs2model/evaluation.py).
+# El bucle externo estima rendimiento; el interno decide (hiperparam/familias/
+# calibracion) solo con datos pasados. Gap = embargo temporal.
+evaluation:
+  warmup_periods: 10
+  gap_periods: 1
+  outer_step: 4            # ancho del bloque de test externo (semanas); 4 ~= mensual
+  inner_step: 4
+  inner_warmup: 8
+  window: expanding        # expanding | sliding (el CLI puede correr ambos con --window both)
+  train_width: 52          # ancho de la ventana deslizante (periodos)
+  l2_grid: [0.25, 1.0, 4.0]
+  calibration_methods: [identity, platt, isotonic]
+  recency_half_life: 0.0   # 0 = sin ponderado por recencia
+
 feature_thresholds:
   map_box_scores: 200
   event_history: 200

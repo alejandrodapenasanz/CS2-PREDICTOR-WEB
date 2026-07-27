@@ -1,9 +1,11 @@
-numpy>=1.26
-pandas>=2.2
-scikit-learn>=1.7
+# Criticas para recargar MODEL/artifacts/model.pkl y reproducir metricas:
+# rango acotado (evita drift silencioso entre majors sin sobre-restringir).
+numpy>=1.26,<3
+pandas>=2.2,<3
+scikit-learn>=1.7,<2
 scipy>=1.13
 matplotlib>=3.8
-lightgbm>=4.5
+lightgbm>=4.5,<5
 xgboost>=2.1
 shap>=0.46
 optuna>=4.5

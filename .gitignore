@@ -57,6 +57,10 @@ CS2/MODEL/results/full_train_catboost_*/
 CS2/MODEL/results/empirical_*/
 CS2/MODEL/results/WALKFORWARD_FAILURE_AUDIT.md
 CS2/MODEL/results/walkforward_failure_*.png
+# Artefactos generados por el harness de evaluacion (MODEL/evaluate.py)
+CS2/MODEL/results/EVAL_REPORT.md
+CS2/MODEL/results/reliability_curve.png
+CS2/MODEL/results/experiments.jsonl
 context_calibration.json
 professional_training_output*.md
 WEB/data.js
