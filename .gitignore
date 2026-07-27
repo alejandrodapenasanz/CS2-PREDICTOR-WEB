@@ -61,6 +61,7 @@ CS2/MODEL/results/walkforward_failure_*.png
 CS2/MODEL/results/EVAL_REPORT.md
 CS2/MODEL/results/reliability_curve.png
 CS2/MODEL/results/experiments.jsonl
+CS2/MODEL/results/MODEL_COMPARISON.md
 context_calibration.json
 professional_training_output*.md
 WEB/data.js
