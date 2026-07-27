@@ -98,7 +98,7 @@ python MODEL\train.py
 python ..\WEB\build_web.py --sport-root .
 ```
 `build_db.py` siembra la BBDD desde el JSON **solo si `matches` está vacía**
-([build_db.py:18-20](../CS2/BBDD/build_db.py#L18-L20)).
+([build_db.py:18-20](../BBDD/build_db.py#L18-L20)).
 
 ### 4.3. No tengo NINGÚN dato (solo el clon de git)
 

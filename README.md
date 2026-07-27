@@ -12,6 +12,10 @@ mezclar datos, modelos ni pipelines.
 
 La documentacion tecnica de CS2 vive en `CS2/README.md` y `CS2/PROJECT.md`.
 
+> **¿Retomas el proyecto (IA o humano)? Empieza por
+> [`CS2/DOCS/PROMPT.md`](CS2/DOCS/PROMPT.md)**: resume todos los cambios recientes y
+> da el contexto completo. La documentacion tecnica reciente vive en `CS2/DOCS/`.
+
 El comando habitual sigue siendo compatible desde la raiz:
 
 ```powershell

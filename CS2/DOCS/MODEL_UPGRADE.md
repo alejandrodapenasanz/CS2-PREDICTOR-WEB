@@ -1,14 +1,14 @@
 # MODEL UPGRADE — zoo de algoritmos + block-wise + calibración (Model A)
 
-Construido sobre el harness anidado de [docs/EVALUATION.md](EVALUATION.md)
+Construido sobre el harness anidado de [EVALUATION.md](EVALUATION.md)
 (walk-forward anidado, selección por **log loss**). Objetivo (acordado): **bajar
 log loss, mejorar calibración y CLV**, no perseguir accuracy bruta. Model A sigue
 **sin odds** (el mercado es baseline).
 
-- Zoo: [`cs2model/model_zoo.py`](../CS2/MODEL/cs2model/model_zoo.py)
-- Calibración: [`cs2model/calibration_suite.py`](../CS2/MODEL/cs2model/calibration_suite.py)
-- Block-wise + activación + driver: [`cs2model/blockwise.py`](../CS2/MODEL/cs2model/blockwise.py)
-- CLI/reporte: [`MODEL/compare_models.py`](../CS2/MODEL/compare_models.py)
+- Zoo: [`cs2model/model_zoo.py`](../MODEL/cs2model/model_zoo.py)
+- Calibración: [`cs2model/calibration_suite.py`](../MODEL/cs2model/calibration_suite.py)
+- Block-wise + activación + driver: [`cs2model/blockwise.py`](../MODEL/cs2model/blockwise.py)
+- CLI/reporte: [`MODEL/compare_models.py`](../MODEL/compare_models.py)
 
 ## A. Zoo de algoritmos
 Interfaz común `ZooModel` (`.fit/.predict_proba`) con **política de missing** por

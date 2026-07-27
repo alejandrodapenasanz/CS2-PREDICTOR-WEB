@@ -6,7 +6,7 @@
 >
 > **Nota sobre rutas:** el enunciado apuntaba a `C:/Users/aleja/.../CS2-Predictor/CS2/`.
 > El repositorio auditado es el clon local en `CS2-PREDICTOR-WEB/`, cuyo dominio CS2 vive en
-> [`CS2/`](../CS2/). Todas las citas `fichero:línea` son relativas a la raíz del repo.
+> [`CS2/`](../). Todas las citas `fichero:línea` son relativas a la raíz del repo.
 >
 > **Método:** lectura directa de código y documentación + un sub-agente de exploración para
 > el subárbol `SCRAPER/`. Todas las cifras se citan con su fuente; donde hay discrepancias
@@ -162,14 +162,14 @@ flowchart TD
 **Idea clave (bien ejecutada):** el **mismo motor de features** (`ChronologicalState` en
 `features.py`) se usa en backtest y en producción, así que lo que se entrena es lo que se
 predice. La carga de entrenamiento (`dataio.py:916`) solo selecciona partidos `completed`
-([dataio.py:948-951](../CS2/MODEL/cs2model/dataio.py#L948-L951)) y adjunta odds/analytics/stats
+([dataio.py:948-951](../MODEL/cs2model/dataio.py#L948-L951)) y adjunta odds/analytics/stats
 de jugador mediante *joins as-of* que descartan cualquier captura posterior a `datetime_utc`
 (filtro point-in-time de analytics en
-[dataio.py:1005-1009](../CS2/MODEL/cs2model/dataio.py#L1005-L1009)).
+[dataio.py:1005-1009](../MODEL/cs2model/dataio.py#L1005-L1009)).
 
 **Modo legacy:** `train.py` conserva un camino `--raw <results_all.json>`
-([dataio.py:1056-1081](../CS2/MODEL/cs2model/dataio.py#L1056-L1081)) para debug sin SQLite; la
-ruta por defecto `DEFAULT_RAW` ([train.py:106-109](../CS2/MODEL/train.py#L106-L109)) apunta a un
+([dataio.py:1056-1081](../MODEL/cs2model/dataio.py#L1056-L1081)) para debug sin SQLite; la
+ruta por defecto `DEFAULT_RAW` ([train.py:106-109](../MODEL/train.py#L106-L109)) apunta a un
 JSON histórico que está gitignored (no versionado). Ver §7 (código legacy).
 
 ---
@@ -179,7 +179,7 @@ JSON histórico que está gitignored (no versionado). Ver §7 (código legacy).
 `CS2/start.ps1` (478 líneas) es el entrypoint real; la raíz tiene un wrapper de 2 líneas
 ([start.ps1:1](../start.ps1#L1)) que hace `& CS2\start.ps1 @args`.
 
-### 3.1. Parámetros / flags ([start.ps1:39-59](../CS2/start.ps1#L39-L59))
+### 3.1. Parámetros / flags ([start.ps1:39-59](../start.ps1#L39-L59))
 
 | Flag | Tipo | Efecto |
 |---|---|---|
@@ -199,35 +199,35 @@ JSON histórico que está gitignored (no versionado). Ver §7 (código legacy).
 ### 3.2. Fase 0 — preparación (siempre, antes de contar etapas)
 
 1. Arranca un **transcript** completo en `PIPELINE/logs/start_<timestamp>.log`
-   ([start.ps1:70-78](../CS2/start.ps1#L70-L78)) + `trap` global que loguea y hace exit 1
-   ([start.ps1:80-94](../CS2/start.ps1#L80-L94)).
-2. `Ensure-ModelPython` ([start.ps1:265-276](../CS2/start.ps1#L265-L276)): resuelve el Python
+   ([start.ps1:70-78](../start.ps1#L70-L78)) + `trap` global que loguea y hace exit 1
+   ([start.ps1:80-94](../start.ps1#L80-L94)).
+2. `Ensure-ModelPython` ([start.ps1:265-276](../start.ps1#L265-L276)): resuelve el Python
    del sistema y verifica/instala `numpy pandas scikit-learn scipy matplotlib lightgbm shap`.
-3. Si va a scrapear: `Configure-ScrapeGuards` ([start.ps1:234-263](../CS2/start.ps1#L234-L263))
+3. Si va a scrapear: `Configure-ScrapeGuards` ([start.ps1:234-263](../start.ps1#L234-L263))
    fija ~30 variables `HLTV_*`/`BBDD_*` (rate limits, backoff, circuit breaker, cuarentena,
    TTLs, flags de Scrapling stealth). `Ensure-CaBundle` genera un CA bundle desde el trust
    store de Windows si detecta inspección TLS corporativa
-   ([start.ps1:166-220](../CS2/start.ps1#L166-L220)). `Ensure-ScraperPython`
-   ([start.ps1:278-335](../CS2/start.ps1#L278-L335)) crea/repara el venv del scraper con
+   ([start.ps1:166-220](../start.ps1#L166-L220)). `Ensure-ScraperPython`
+   ([start.ps1:278-335](../start.ps1#L278-L335)) crea/repara el venv del scraper con
    **Python 3.10-3.13** (Scrapling no soporta 3.14) e instala `scrapling[fetchers]`.
 
-`$total` de etapas se calcula dinámicamente ([start.ps1:376-379](../CS2/start.ps1#L376-L379)):
+`$total` de etapas se calcula dinámicamente ([start.ps1:376-379](../start.ps1#L376-L379)):
 base 4, +4 si hay BBDD (`-not -NoDb`), +1 si toca entrenar.
 
 ### 3.3. Etapas numeradas (helper `Invoke-Native`, aborta si exit≠0)
 
 | # | Etapa | Comando | Condición | Cita |
 |---|---|---|---|---|
-| 1 | Init/siembra BBDD | `python BBDD/build_db.py` | `-not -NoDb` | [382-386](../CS2/start.ps1#L382-L386) |
-| 2 | **Scrape** HLTV + pendientes | `<venv> PIPELINE/start.py --player-delay ... [flags]` | `-not -SkipScrape` | [388-419](../CS2/start.ps1#L388-L419) |
-| — | Valida `master/manifest.json` y resuelve `RunDir` | (lee `last_run_id`) | siempre | [421-428](../CS2/start.ps1#L421-L428) |
-| 3 | **Ingest pre-entreno** | `python BBDD/ingest.py --run-dir <RUN> --no-backup --no-mirror-backup` | `-not -NoDb` | [430-434](../CS2/start.ps1#L430-L434) |
-| 4 | **Entrenar** | `python MODEL/train.py [--verbose]` | `-Retrain` o falta `model.pkl` | [436-442](../CS2/start.ps1#L436-L442) |
-| 5 | **Enrich** predicciones | `python PIPELINE/enrich_predictions.py --run-dir <RUN>` | siempre | [444-446](../CS2/start.ps1#L444-L446) |
-| 6 | Calibración por contexto | `python MODEL/analyze_context_calibration.py` | siempre | [448-450](../CS2/start.ps1#L448-L450) |
-| 7 | **Ingest final** + export JSON | `ingest.py --run-dir <RUN>` + `export_master_json.py` | `-not -NoDb` | [452-456](../CS2/start.ps1#L452-L456) |
-| 8 | Monitor **drift** | `python MODEL/monitor_drift.py` | `-not -NoDb` | [458-461](../CS2/start.ps1#L458-L461) |
-| 9 | Generar web | `python WEB/build_web.py --sport-root <CS2> --run-dir <RUN>` | siempre | [463-465](../CS2/start.ps1#L463-L465) |
+| 1 | Init/siembra BBDD | `python BBDD/build_db.py` | `-not -NoDb` | [382-386](../start.ps1#L382-L386) |
+| 2 | **Scrape** HLTV + pendientes | `<venv> PIPELINE/start.py --player-delay ... [flags]` | `-not -SkipScrape` | [388-419](../start.ps1#L388-L419) |
+| — | Valida `master/manifest.json` y resuelve `RunDir` | (lee `last_run_id`) | siempre | [421-428](../start.ps1#L421-L428) |
+| 3 | **Ingest pre-entreno** | `python BBDD/ingest.py --run-dir <RUN> --no-backup --no-mirror-backup` | `-not -NoDb` | [430-434](../start.ps1#L430-L434) |
+| 4 | **Entrenar** | `python MODEL/train.py [--verbose]` | `-Retrain` o falta `model.pkl` | [436-442](../start.ps1#L436-L442) |
+| 5 | **Enrich** predicciones | `python PIPELINE/enrich_predictions.py --run-dir <RUN>` | siempre | [444-446](../start.ps1#L444-L446) |
+| 6 | Calibración por contexto | `python MODEL/analyze_context_calibration.py` | siempre | [448-450](../start.ps1#L448-L450) |
+| 7 | **Ingest final** + export JSON | `ingest.py --run-dir <RUN>` + `export_master_json.py` | `-not -NoDb` | [452-456](../start.ps1#L452-L456) |
+| 8 | Monitor **drift** | `python MODEL/monitor_drift.py` | `-not -NoDb` | [458-461](../start.ps1#L458-L461) |
+| 9 | Generar web | `python WEB/build_web.py --sport-root <CS2> --run-dir <RUN>` | siempre | [463-465](../start.ps1#L463-L465) |
 
 **Dependencias entre etapas:** 1→2 (BBDD lista antes de que el scrape consulte `fetch_state`/
 pendientes) · 2→3 (el ingest necesita el run) · 3→4 (el trainer lee la BBDD ya actualizada) ·
@@ -246,29 +246,29 @@ manual con `run_professional_training.py` para revalidar CatBoost/half-life/gap.
 
 - **Objetivo:** `prob_team1` = probabilidad calibrada de que el equipo 1 gane la **serie Bo3**,
   *antes* del partido. Es la única probabilidad "académica"; **nunca** se toca con odds
-  ([PROJECT.md §6.5.1](../CS2/PROJECT.md), tabla de 3 capas).
+  ([PROJECT.md §6.5.1](../PROJECT.md), tabla de 3 capas).
 - **Entrenamiento:** clasificación binaria supervisada, objetivo **log loss**, validación
   walk-forward. Candidatos: baselines (base-rate, Elo, Glicko-2), logística, LightGBM, CatBoost,
   XGBoost, Random Forest, y un **Super Learner** con pesos convexos aprendidos de OOS pasado
-  ([train.py:150-166](../CS2/MODEL/train.py#L150-L166)). Se elige producción por **menor log loss**;
-  hoy: `super_learner_cal` ([REPORT.md:52-54](../CS2/MODEL/results/REPORT.md#L52-L54)).
-- **Augmentación A↔B** ([train.py:297-308](../CS2/MODEL/train.py#L297-L308)): duplica el dataset
+  ([train.py:150-166](../MODEL/train.py#L150-L166)). Se elige producción por **menor log loss**;
+  hoy: `super_learner_cal` ([REPORT.md:52-54](../MODEL/results/REPORT.md#L52-L54)).
+- **Augmentación A↔B** ([train.py:297-308](../MODEL/train.py#L297-L308)): duplica el dataset
   negando las columnas DIFF e invirtiendo `y`, para una frontera antisimétrica sin sesgo de lado.
 - **Restricciones monótonas** en los GBDT sobre features de "ventaja de team1"
-  ([train.py:314+](../CS2/MODEL/train.py#L314)).
+  ([train.py:314+](../MODEL/train.py#L314)).
 - **Bo3 composicional** (opcional, `OFF` por cobertura): `P(serie)=p1·p2+p1(1-p2)p3+(1-p1)p2p3`
   desde Analytics pre-match (`compositional_bo3.py`).
 
 ### 4.2. Model B — stats + odds de apertura (evaluación separada)
 
-- Añade 3 columnas de odds **solo de apertura** ([train.py:113-118](../CS2/MODEL/train.py#L113-L118)):
+- Añade 3 columnas de odds **solo de apertura** ([train.py:113-118](../MODEL/train.py#L113-L118)):
   `opening_odds_prob_centered`, `opening_odds_confidence`, `opening_bookmaker_count_log`.
   La cuota de **cierre** se guarda pero **queda excluida del entrenamiento** (evita fuga de
   información de último minuto).
 - **No contamina el Model A**: es una evaluación walk-forward aparte, activada con ≥120 partidos
   cerrados con odds. Hoy es ilustrativo (n pequeño: 37 eval en REPORT).
 - **Hallazgo honesto del propio proyecto:** el mercado bate al modelo (log loss 0.605 vs 0.647
-  sobre los partidos con odds, [REPORT.md:152-159](../CS2/MODEL/results/REPORT.md#L152-L159)); las
+  sobre los partidos con odds, [REPORT.md:152-159](../MODEL/results/REPORT.md#L152-L159)); las
   odds se usan como **benchmark a batir** y como *blend* operativo en la web, no como feature única.
 
 ### 4.3. Capa operativa (no es "el modelo")
@@ -280,8 +280,8 @@ flags de fiabilidad, staking Kelly fraccional y Best Opportunity. **No modifica 
 ### 4.4. Familias de features y dónde se calculan
 
 Todas las familias se definen como listas `*_FEATURE_COLUMNS` en
-[`features.py`](../CS2/MODEL/cs2model/features.py) y se computan en la clase `ChronologicalState`
-(`observe`/`emit_features`, [features.py:810-1563](../CS2/MODEL/cs2model/features.py#L810-L1563)),
+[`features.py`](../MODEL/cs2model/features.py) y se computan en la clase `ChronologicalState`
+(`observe`/`emit_features`, [features.py:810-1563](../MODEL/cs2model/features.py#L810-L1563)),
 salvo los sistemas de rating que viven en módulos propios:
 
 | Familia (nombre interno) | Dónde se calcula | Columna de disponibilidad | Umbral |
@@ -322,27 +322,27 @@ Familias auxiliares: `rich_targets.py` (target multiclase 0-2/1-2/2-1/2-0), `cal
 ### 5.1. Dónde está (la línea 218 del enunciado)
 
 - La función que decide qué familias entran es **`select_feature_columns`** en
-  **[train.py:218-294](../CS2/MODEL/train.py#L218-L294)** (la "línea 218" del enunciado es su
+  **[train.py:218-294](../MODEL/train.py#L218-L294)** (la "línea 218" del enunciado es su
   cabecera).
 - El catálogo de familias auto-gated es la tupla **`AUTO_FEATURE_FAMILIES`**
-  ([train.py:168-196](../CS2/MODEL/train.py#L168-L196)): cada entrada es
+  ([train.py:168-196](../MODEL/train.py#L168-L196)): cada entrada es
   `(nombre, columnas, columna_de_disponibilidad, umbral)`.
-- El bucle de activación ([train.py:254-275](../CS2/MODEL/train.py#L254-L275)) cuenta, para cada
+- El bucle de activación ([train.py:254-275](../MODEL/train.py#L254-L275)) cuenta, para cada
   familia, cuántas filas de entrenamiento tienen su flag de disponibilidad ≥ 0.5
   (`available_rows`) y activa la familia **si `available_rows >= min_rows`**. La decisión y las
   columnas activas se registran en `policies` → `artifact.metadata["feature_policies"]` y en
   `REPORT.md`. **No hay switch manual.**
 - **Contexto** tiene una regla compuesta especial
-  ([train.py:228-236](../CS2/MODEL/train.py#L228-L236) y [276-293](../CS2/MODEL/train.py#L276-L293)):
+  ([train.py:228-236](../MODEL/train.py#L228-L236) y [276-293](../MODEL/train.py#L276-L293)):
   exige `context_rows ≥ 200` **Y** `lan_rows ≥ 50` **Y** `online_rows ≥ 50`. Por eso el contexto
   sigue `OFF` aunque el total supere 200: falta cobertura LAN.
 
 ### 5.2. De dónde salen los umbrales (154, 200, 50 LAN, …)
 
 Los umbrales **no están hardcodeados en `train.py`**: se leen de
-**[`MODEL/config.yaml`](../CS2/MODEL/config.yaml) → `feature_thresholds`**
-([config.yaml:15-36](../CS2/MODEL/config.yaml#L15-L36)) vía las constantes de
-[train.py:121-149](../CS2/MODEL/train.py#L121-L149), con un *default* de respaldo si la clave no
+**[`MODEL/config.yaml`](../MODEL/config.yaml) → `feature_thresholds`**
+([config.yaml:15-36](../MODEL/config.yaml#L15-L36)) vía las constantes de
+[train.py:121-149](../MODEL/train.py#L121-L149), con un *default* de respaldo si la clave no
 existe. Valores actuales:
 
 ```yaml
@@ -355,7 +355,7 @@ rich_target_total: 2000  rich_target_per_class: 300
 ```
 
 > ⚠️ **Aclaración importante sobre "154":** el 154 **no es un umbral**. En
-> [REPORT.md:13](../CS2/MODEL/results/REPORT.md#L13) el `154` es la **cobertura actual** de la
+> [REPORT.md:13](../MODEL/results/REPORT.md#L13) el `154` es la **cobertura actual** de la
 > familia `analytics` (154 partidos con Analytics point-in-time), frente a su **umbral de 120**
 > (por eso figura `ON`). Es fácil confundir la columna *Cobertura* con la columna *Umbral* en esa
 > tabla. Los umbrales reales son los de `config.yaml`. El `50 LAN` sí es umbral real:
@@ -366,7 +366,7 @@ rich_target_total: 2000  rich_target_per_class: 300
 **Parcialmente justificados, con racional documentado, pero calibrados "a ojo" (heurísticos).**
 
 - **Racional cualitativo sólido y explícito** (comentarios en
-  [train.py:123-144](../CS2/MODEL/train.py#L123-L144) + PROJECT §6): familias con muchas
+  [train.py:123-144](../MODEL/train.py#L123-L144) + PROJECT §6): familias con muchas
   variables correlacionadas o que solo aportan *contexto de calibración* (announced_lineups,
   event_metadata=300) exigen más muestra antes de dejar que muevan producción; ratings
   reconstruibles de todo el histórico (MOV, TrueSkill, SoS, BT, Kalman = 800) tienen umbral alto
@@ -390,31 +390,31 @@ El "65 %" es una cifra **redondeada/de referencia**. Los números exactos, con s
 
 | Valor | Qué es | Fichero:línea |
 |---|---|---|
-| **0.6443** | Accuracy del favorito, **total walk-forward OOS** (n=7267), modelo de producción | [REPORT.md:150](../CS2/MODEL/results/REPORT.md#L150) y [REPORT.md:52](../CS2/MODEL/results/REPORT.md#L52) |
-| 0.6553 | Accuracy **de la banda 60-70 %** (la que "parece" el 65 %) | [REPORT.md:145](../CS2/MODEL/results/REPORT.md#L145) |
-| 0.644 | Accuracy del ensemble de producción (tabla README) | [README.md:173](../CS2/README.md#L173) |
-| 0.6441 | Total por bandas en README (n=7056, run anterior) | [README.md:193](../CS2/README.md#L193) |
-| "~65 %" | **Baseline "elige al favorito"** — el propio proyecto dice que ya da ~65 % | [PROJECT.md:608](../CS2/PROJECT.md#L608) |
+| **0.6443** | Accuracy del favorito, **total walk-forward OOS** (n=7267), modelo de producción | [REPORT.md:150](../MODEL/results/REPORT.md#L150) y [REPORT.md:52](../MODEL/results/REPORT.md#L52) |
+| 0.6553 | Accuracy **de la banda 60-70 %** (la que "parece" el 65 %) | [REPORT.md:145](../MODEL/results/REPORT.md#L145) |
+| 0.644 | Accuracy del ensemble de producción (tabla README) | [README.md:173](../README.md#L173) |
+| 0.6441 | Total por bandas en README (n=7056, run anterior) | [README.md:193](../README.md#L193) |
+| "~65 %" | **Baseline "elige al favorito"** — el propio proyecto dice que ya da ~65 % | [PROJECT.md:608](../PROJECT.md#L608) |
 
 ### 6.2. Cómo se calcula (código)
 
 - **Métrica:** accuracy del **favorito puro del modelo**, `(prob_team1 >= 0.5) == actual`,
   agregada en franjas de 10 puntos por `favorite_accuracy_bands()`
-  **[train.py:1120-1173](../CS2/MODEL/train.py#L1120-L1173)** (criterio en
-  [train.py:1142](../CS2/MODEL/train.py#L1142); total en
-  [train.py:1170](../CS2/MODEL/train.py#L1170)). Las odds **no** cambian el equipo elegido.
+  **[train.py:1120-1173](../MODEL/train.py#L1120-L1173)** (criterio en
+  [train.py:1142](../MODEL/train.py#L1142); total en
+  [train.py:1170](../MODEL/train.py#L1170)). Las odds **no** cambian el equipo elegido.
 - **Sobre qué conjunto:** las **predicciones walk-forward fuera de muestra** del modelo promovido
-  (`preds[best_name]`, [train.py:1714](../CS2/MODEL/train.py#L1714)).
-- **Split:** `walk_forward()` **[train.py:840](../CS2/MODEL/train.py#L840)**, ventana **expansiva
+  (`preds[best_name]`, [train.py:1714](../MODEL/train.py#L1714)).
+- **Split:** `walk_forward()` **[train.py:840](../MODEL/train.py#L840)**, ventana **expansiva
   semanal**: `train_mask = periods < (period - gap)`, `test_mask = periods == period`
-  ([train.py:884-885](../CS2/MODEL/train.py#L884-L885)). Se entrena solo con el pasado; `gap`
+  ([train.py:884-885](../MODEL/train.py#L884-L885)). Se entrena solo con el pasado; `gap`
   añade embargo opcional (hoy `walk_forward_gap_periods: 0` en config). Warmup de 10 semanas
-  descartado ([train.py:866](../CS2/MODEL/train.py#L866)).
+  descartado ([train.py:866](../MODEL/train.py#L866)).
 
 ### 6.3. Interpretación honesta (lo que el auditor añade)
 
 **El 64.4 % de accuracy es prácticamente idéntico al baseline.** El baseline Elo/Glicko da
-0.601–0.608 ([REPORT.md:39-40](../CS2/MODEL/results/REPORT.md#L39-L40)) y el "elige al favorito"
+0.601–0.608 ([REPORT.md:39-40](../MODEL/results/REPORT.md#L39-L40)) y el "elige al favorito"
 ronda el 63-65 %. **La accuracy no es donde el modelo gana**; el modelo gana en **log loss
 (0.628 vs 0.659), Brier y AUC (0.689 vs 0.649)** y en **calibración**. Esto está declarado
 abiertamente por el proyecto (README §4.4, PROJECT §8.1) y es metodológicamente correcto: en
@@ -428,7 +428,7 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
 ✅ **A favor (fuerte):**
 - Split estrictamente cronológico, nunca k-fold aleatorio.
 - Features point-in-time verificadas por test: `test_leakage_audit.py`
-  ([test_leakage_audit.py:47-68](../CS2/TESTS/test_leakage_audit.py#L47-L68)) reconstruye el
+  ([test_leakage_audit.py:47-68](../TESTS/test_leakage_audit.py#L47-L68)) reconstruye el
   estado con `rows[:i]` y comprueba que las features emitidas coinciden bit a bit — si algo
   dependiera del futuro, diferirían.
 - Odds: solo apertura; cierre excluido del entrenamiento (`test_odds_point_in_time.py`).
@@ -453,11 +453,11 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
 
 | # | Observación | Ubicación | Severidad |
 |---|---|---|---|
-| L1 | Selección de modelo por log loss sobre el mismo OOS que se reporta (sesgo optimista). | [train.py:1714](../CS2/MODEL/train.py#L1714) + selección en `main()` | Media |
-| L2 | Test de fuga solo cubre el núcleo rolling sintético; familias enriquecidas y joins as-of de `dataio.py` sin test dedicado de no-fuga. | [test_leakage_audit.py:23-68](../CS2/TESTS/test_leakage_audit.py#L23-L68) | Media |
-| L3 | Calibración Platt sobre **holdout aleatorio dentro del fold** (no temporal). | [REPORT.md:230](../CS2/MODEL/results/REPORT.md#L230) | Baja |
-| L4 | Super Learner aprende pesos de OOS (≥500); documentado como causal, pero conviene un test que lo garantice. | [train.py:166](../CS2/MODEL/train.py#L166) | Baja |
-| L5 | Drift en estado **`warning`** (Page-Hinkley sobre log loss) en el último REPORT. | [REPORT.md:213-216](../CS2/MODEL/results/REPORT.md#L213-L216) | Vigilar |
+| L1 | Selección de modelo por log loss sobre el mismo OOS que se reporta (sesgo optimista). | [train.py:1714](../MODEL/train.py#L1714) + selección en `main()` | Media |
+| L2 | Test de fuga solo cubre el núcleo rolling sintético; familias enriquecidas y joins as-of de `dataio.py` sin test dedicado de no-fuga. | [test_leakage_audit.py:23-68](../TESTS/test_leakage_audit.py#L23-L68) | Media |
+| L3 | Calibración Platt sobre **holdout aleatorio dentro del fold** (no temporal). | [REPORT.md:230](../MODEL/results/REPORT.md#L230) | Baja |
+| L4 | Super Learner aprende pesos de OOS (≥500); documentado como causal, pero conviene un test que lo garantice. | [train.py:166](../MODEL/train.py#L166) | Baja |
+| L5 | Drift en estado **`warning`** (Page-Hinkley sobre log loss) en el último REPORT. | [REPORT.md:213-216](../MODEL/results/REPORT.md#L213-L216) | Vigilar |
 
 ### 7.2. Código muerto / duplicado (candidatos — NO borrados)
 
@@ -467,12 +467,12 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
   circuit breaker y cuarentena que también existen en `SCRAPER/hltv-scraper-api`; el scraper Scrapy
   queda como *fallback*. Gran parte de los ~35 parsers y 15 spiders del scraper podrían no
   ejercitarse en la ruta principal (el pipeline importa `ParsersFactory` directamente).
-- **Ruta legacy `--raw`:** `DEFAULT_RAW` ([train.py:106-109](../CS2/MODEL/train.py#L106-L109))
+- **Ruta legacy `--raw`:** `DEFAULT_RAW` ([train.py:106-109](../MODEL/train.py#L106-L109))
   apunta a `history_10000_2026-06-28/results_all.json` (gitignored); `load_training_rows` y
   `load_daily_completed` son camino legacy/debug.
 - **`select_feature_columns` default `feature_profile="error-aware"`**
-  ([train.py:220](../CS2/MODEL/train.py#L220)) mientras `config.yaml` usa `core`
-  ([config.yaml:9](../CS2/MODEL/config.yaml#L9)): el default de la firma no coincide con el de
+  ([train.py:220](../MODEL/train.py#L220)) mientras `config.yaml` usa `core`
+  ([config.yaml:9](../MODEL/config.yaml#L9)): el default de la firma no coincide con el de
   producción (no es bug si la CLI/config siempre lo fija, pero es una trampa latente).
 - **Scripts de análisis solapados:** `analyze_failures.py` vs `analyze_walkforward_errors.py`
   (documentado como intencionalmente separado), `backtest_all_available.py` vs el backtest de
@@ -484,20 +484,20 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
   `pandas>=2.2`, `scikit-learn>=1.7`, `lightgbm>=4.5`, `shap>=0.46`, `optuna>=4.5`…). Un modelo
   serializado con scikit-learn/LightGBM es sensible a la versión → `model.pkl` puede no recargar
   entre versiones. Solo el bloque scraper está exact-pinned (`Scrapy==2.14.2`,
-  `cloudscraper==1.2.71`, etc.). ([requirements.txt:1-31](../CS2/requirements.txt#L1-L31))
+  `cloudscraper==1.2.71`, etc.). ([requirements.txt:1-31](../requirements.txt#L1-L31))
 - **CI instala versiones libres:** `pip install numpy pandas scikit-learn ... shap optuna` sin pins
   ([ci.yml:26](../.github/workflows/ci.yml#L26)) → el CI no es reproducible en el tiempo.
 - **No hay lockfile** (`requirements.lock`/`poetry.lock`) en ninguno de los dos árboles.
 - **Contradicción de reproducibilidad:** el proyecto presume de manifiestos con SHA-256 de datos y
-  versiones de dependencias ([PROJECT.md §10.6, §13](../CS2/PROJECT.md)), pero las dependencias no
+  versiones de dependencias ([PROJECT.md §10.6, §13](../PROJECT.md)), pero las dependencias no
   están fijadas para *reconstruir* ese entorno. El manifiesto **registra** versiones; no las **fija**.
 - `scrapling[fetchers]` requiere Python 3.10-3.13 + descarga de navegador post-install → build
   frágil fuera de ese rango (ya mitigado con degradación a requests/cloudscraper).
 
 ### 7.4. Tests — inventario (existen, y son extensos)
 
-- **107 funciones de test en 19 ficheros** en [`CS2/TESTS/`](../CS2/TESTS/), más los tests del
-  scraper ([`SCRAPER/.../tests/`](../CS2/SCRAPER/hltv-scraper-api/tests/): `test_routes.py`
+- **107 funciones de test en 19 ficheros** en [`CS2/TESTS/`](../TESTS/), más los tests del
+  scraper ([`SCRAPER/.../tests/`](../SCRAPER/hltv-scraper-api/tests/): `test_routes.py`
   mockeado + `test_integration_real.py` live).
 - Destacan por relevancia de auditoría: `test_leakage_audit.py` (C16, fuga),
   `test_odds_point_in_time.py` (odds PIT), `test_training_methodology.py`,
@@ -505,7 +505,7 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
   `test_roster_change_90d.py`, `test_walkforward_error_audit.py`, `test_bbdd_live_pipeline.py`
   (19 tests).
 - **CI real** ([ci.yml](../.github/workflows/ci.yml)): `ruff` + `mypy` (solo 6 módulos de
-  infraestructura, [pyproject.toml:20-28](../CS2/pyproject.toml#L20-L28)) + `pytest TESTS/ -q` +
+  infraestructura, [pyproject.toml:20-28](../pyproject.toml#L20-L28)) + `pytest TESTS/ -q` +
   smoke determinista, en push/PR a `main/dev/pre-dev`.
 - **Huecos de cobertura:** (a) fuga no probada en familias enriquecidas (L2); (b) `mypy` cubre
   solo 6 ficheros, no `train.py`/`features.py`/`dataio.py` (los grandes); (c) `ruff` solo
@@ -534,7 +534,7 @@ runs, backups).
 
 ## 8. SCRAPER — resumen (subárbol `SCRAPER/hltv-scraper-api/`)
 
-Scraper de HLTV empaquetado como **API Flask** ([app.py](../CS2/SCRAPER/hltv-scraper-api/app.py),
+Scraper de HLTV empaquetado como **API Flask** ([app.py](../SCRAPER/hltv-scraper-api/app.py),
 `0.0.0.0:8000`, `debug=True`) sobre un **proyecto Scrapy** (15 spiders, ~35 parsers con
 `ParsersFactory`) + dos scripts batch (`collect_hltv_data.py`, `collect_player_compare_stats.py`
 de 1211 líneas con backoff/circuit-breaker/checkpointing).

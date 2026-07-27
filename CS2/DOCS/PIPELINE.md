@@ -1,9 +1,9 @@
 # PIPELINE — `start.ps1` documentada (refactor `feature/pipeline-refactor`)
 
 Orquestador de una sola orden para el dominio CS2. Windows/PowerShell (5.1 y 7).
-Entrada real: [`CS2/start.ps1`](../CS2/start.ps1); wrapper compatible en la raíz.
-Config: [`CS2/PIPELINE/pipeline.config.psd1`](../CS2/PIPELINE/pipeline.config.psd1).
-Helpers: [`CS2/PIPELINE/pipeline.helpers.ps1`](../CS2/PIPELINE/pipeline.helpers.ps1).
+Entrada real: [`CS2/start.ps1`](../start.ps1); wrapper compatible en la raíz.
+Config: [`CS2/PIPELINE/pipeline.config.psd1`](../PIPELINE/pipeline.config.psd1).
+Helpers: [`CS2/PIPELINE/pipeline.helpers.ps1`](../PIPELINE/pipeline.helpers.ps1).
 
 > **Comportamiento preservado.** `.\start.ps1` (entrena solo si falta el
 > artefacto) y `.\start.ps1 -Retrain` (fuerza entrenamiento) se comportan
@@ -53,7 +53,7 @@ flowchart TD
 
 **Ruta crítica:** `build_db → scrape → ingest → (train) → enrich → ingest → {drift, web}`.
 El ingest aparece **dos veces a propósito**: el pre-entreno mete *hechos* que
-`enrich_predictions.py` lee de `cs2.db` ([enrich_predictions.py:74](../CS2/PIPELINE/enrich_predictions.py#L74)),
+`enrich_predictions.py` lee de `cs2.db` ([enrich_predictions.py:74](../PIPELINE/enrich_predictions.py#L74)),
 y el final persiste las *predicciones* + backup + export master. No es duplicado.
 
 ---
@@ -105,13 +105,13 @@ La fase **P** corre **antes de la etapa 1 (build_db)**, solo con `-not NoDb`:
 - si no, y sin `-SkipAutoHeal` → `blackbox.py autoheal`: si `cs2.db`
   falta/vacía/corrupta y hay un BLACKBOX válido, la restaura antes de seguir;
   si está sana, no hace nada. Nunca aborta la pipeline. Ver
-  [docs/RECOVERY.md](RECOVERY.md) y [CS2/BBDD/BLACKBOX/README.md](../CS2/BBDD/BLACKBOX/README.md).
+  [RECOVERY.md](RECOVERY.md) y [CS2/BBDD/BLACKBOX/README.md](../BBDD/BLACKBOX/README.md).
 
 ---
 
 ## 5. Config-driven
 
-[`pipeline.config.psd1`](../CS2/PIPELINE/pipeline.config.psd1) centraliza lo que
+[`pipeline.config.psd1`](../PIPELINE/pipeline.config.psd1) centraliza lo que
 antes estaba hardcodeado en `start.ps1`:
 - `ScrapeGuards` — ~26 variables `HLTV_*`/`BBDD_*` (rate limit, backoff, circuit
   breaker, cuarentena, TTLs, stealth). Se publican con `Set-DefaultEnv` (no pisan

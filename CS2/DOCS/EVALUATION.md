@@ -1,14 +1,14 @@
 # EVALUATION — harness de medición honesta (walk-forward anidado)
 
 Este paso **no busca subir accuracy**: busca **medirla honestamente**. Arregla el
-sesgo L1 de [docs/AUDIT.md](AUDIT.md): hoy el modelo de producción se selecciona
+sesgo L1 de [AUDIT.md](AUDIT.md): hoy el modelo de producción se selecciona
 sobre el **mismo** conjunto OOS que luego se reporta. El harness anidado separa
 *decidir* de *medir*.
 
-- Motor: [`CS2/MODEL/cs2model/evaluation.py`](../CS2/MODEL/cs2model/evaluation.py) (numpy puro, fitter enchufable).
-- CLI: [`CS2/MODEL/evaluate.py`](../CS2/MODEL/evaluate.py).
-- Config: sección `evaluation:` en [`CS2/MODEL/config.yaml`](../CS2/MODEL/config.yaml).
-- Tests: [`CS2/TESTS/test_eval_framework.py`](../CS2/TESTS/test_eval_framework.py).
+- Motor: [`CS2/MODEL/cs2model/evaluation.py`](../MODEL/cs2model/evaluation.py) (numpy puro, fitter enchufable).
+- CLI: [`CS2/MODEL/evaluate.py`](../MODEL/evaluate.py).
+- Config: sección `evaluation:` en [`CS2/MODEL/config.yaml`](../MODEL/config.yaml).
+- Tests: [`CS2/TESTS/test_eval_framework.py`](../TESTS/test_eval_framework.py).
 - No toca `train.py` (producción intacta). Es una capa de medición aparte.
 
 ---

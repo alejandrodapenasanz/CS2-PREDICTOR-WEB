@@ -1,5 +1,18 @@
 # Changelog / registro de decisiones
 
+## 2026-07-27 - Consolidacion de documentacion + handoff PROMPT.md
+
+- La documentacion tecnica reciente se movio de `/docs` (raiz) a `CS2/DOCS/`
+  (AUDIT, RECOVERY, PIPELINE, EVALUATION, MODEL_UPGRADE); todo el trabajo toca
+  solo `CS2/`. Se elimino la carpeta `/docs` de la raiz.
+- Nuevo `CS2/DOCS/PROMPT.md`: handoff para una IA/humano que retoma el proyecto;
+  resume las 5 lineas de trabajo (auditoria, BLACKBOX, refactor pipeline, harness
+  de evaluacion anidado, upgrade de modelo), la topologia de ramas y la receta
+  honesta para "el mejor modelo" en `-Retrain`. Punteros anadidos en los README.
+- Se documenta que `-Retrain` (train.py) ya selecciona por log loss; el harness
+  nuevo (compare_models.py) mide sin sesgo L1 y se usa para certificar/elegir el
+  Model A. Cablear el ganador a produccion queda como paso pendiente.
+
 ## 2026-07-27 - BLACKBOX: caja negra portatil de la fuente de verdad
 
 - Nueva herramienta `BBDD/blackbox.py` (solo stdlib) con cuatro mecanismos:
