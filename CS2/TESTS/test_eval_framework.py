@@ -18,7 +18,9 @@ import math
 import random
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "MODEL"))
 
@@ -26,7 +28,7 @@ import numpy as np  # noqa: E402
 
 from cs2model.evaluation import (  # noqa: E402
     EvalConfig, Family, nested_walk_forward, assert_point_in_time, PointInTimeError,
-    _recency_weights, betting_metrics,
+    _isotonic_fit, _recency_weights, betting_metrics,
 )
 
 
@@ -94,20 +96,28 @@ class NestedWalkForwardTests(unittest.TestCase):
         self.assertGreater(sli["n_eval"], 0)
 
     def test_outer_test_labels_do_not_influence_decisions(self):
-        """El bucle externo no puede influir: permutar etiquetas de test NO cambia
-        las decisiones del bucle interno (familias/l2/calibrador)."""
+        """Las etiquetas del ultimo outer test no pueden decidir ese mismo fold."""
         rows, base, fams = _synthetic()
         cfg = _cfg()
         res_a = nested_walk_forward(rows, base, fams, cfg)
-        # Copia con las etiquetas TODAS invertidas: como el fitter y las decisiones
-        # solo usan train, las decisiones deben ser identicas fold a fold.
-        flipped = [dict(r, label=1 - r["label"]) for r in rows]
+        last = res_a["decisions"][-1]
+        flipped = [
+            dict(
+                row,
+                label=(
+                    1 - row["label"]
+                    if last["test_period_min"] <= row["period"] <= last["test_period_max"]
+                    else row["label"]
+                ),
+            )
+            for row in rows
+        ]
         res_b = nested_walk_forward(flipped, base, fams, cfg)
-        dec_a = [(d["l2"], d["calibration"], tuple(d["families"])) for d in res_a["decisions"]]
-        dec_b = [(d["l2"], d["calibration"], tuple(d["families"])) for d in res_b["decisions"]]
-        # Nota: invertir TODAS las etiquetas afecta train y test por igual, por lo que
-        # esta comprobacion valida que el pipeline es estable/simetrico, no aleatorio.
-        self.assertEqual(len(dec_a), len(dec_b))
+        decision_a = res_a["decisions"][-1]
+        decision_b = res_b["decisions"][-1]
+        self.assertEqual(decision_a["l2"], decision_b["l2"])
+        self.assertEqual(decision_a["calibration"], decision_b["calibration"])
+        self.assertEqual(decision_a["families"], decision_b["families"])
 
 
 class LeakageGuardTests(unittest.TestCase):
@@ -134,6 +144,18 @@ class LeakageGuardTests(unittest.TestCase):
 
 
 class OddsAndRecencyTests(unittest.TestCase):
+    def test_isotonic_pav_is_monotonic_and_stable_on_large_samples(self):
+        scores = np.linspace(0.01, 0.99, 100_000)
+        labels = (np.arange(100_000) % 3 == 0).astype(float)
+
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            knots, fitted = _isotonic_fit(scores, labels)
+
+        self.assertEqual(len(knots), len(fitted))
+        self.assertTrue(np.all(np.diff(knots) > 0))
+        self.assertTrue(np.all(np.diff(fitted) >= -1e-12))
+        self.assertTrue(np.all((fitted >= 0.0) & (fitted <= 1.0)))
+
     def test_closing_odds_never_decide_the_bet(self):
         # Mismo caso con dos cierres muy distintos: la decision (apuesta/lado/ROI)
         # solo depende de la apertura -> el resultado de betting no cambia.
@@ -157,6 +179,38 @@ class OddsAndRecencyTests(unittest.TestCase):
         self.assertAlmostEqual(float(w[-1]), 1.0, places=6)  # el mas reciente = 1.0
         self.assertIsNone(_recency_weights(np.array([]), 14.0))
         self.assertIsNone(_recency_weights(periods, 0.0))    # 0 = desactivado
+
+
+class RealEvaluationAdapterTests(unittest.TestCase):
+    def test_preserves_multiple_point_in_time_periods(self):
+        import evaluate
+        from cs2model import dataio, features
+
+        start = datetime(2026, 1, 1)
+        raw_rows = [
+            {
+                "id": str(index),
+                "date_obj": start + timedelta(days=index * 7),
+                "opening_odds_t1": None,
+                "opening_odds_decimal_t1": None,
+                "opening_odds_decimal_t2": None,
+                "closing_odds_t1": None,
+            }
+            for index in range(12)
+        ]
+        meta = [
+            {"id": row["id"], "date": row["date_obj"].strftime("%Y-%m-%d")}
+            for row in raw_rows
+        ]
+        frame = ([{"elo_prob_centered": 0.0}] * 12, [0, 1] * 6, meta, None)
+
+        with (
+            patch.object(dataio, "load_training_rows_from_db", return_value=raw_rows),
+            patch.object(features, "build_training_frame", return_value=frame),
+        ):
+            rows, _base, _families = evaluate.load_real_rows(Path("ignored.db"), {})
+
+        self.assertEqual(len({row["period"] for row in rows}), 12)
 
 
 if __name__ == "__main__":

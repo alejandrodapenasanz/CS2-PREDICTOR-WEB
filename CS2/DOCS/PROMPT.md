@@ -113,30 +113,32 @@ Radiografía completa del proyecto. Hallazgos clave que condicionan todo lo dem�
 
 ## 4. Cómo asegurar "el mejor modelo" al hacer `start.ps1 -Retrain`
 
-**Qué hace hoy `-Retrain`:** ejecuta `MODEL/train.py`, que **ya** hace walk-forward
-temporal, **selecciona por menor log loss**, entrena `super_learner_cal` con
-calibración y Optuna purgado, y versiona el artefacto. Es un modelo **sólido y
-seleccionado por log loss** — el "mejor" según el pipeline de producción **actual**.
-Además ahora arranca con **auto-heal de BLACKBOX** (restaura `cs2.db` si falta) y deja
-`timing.json`.
+**Qué hace hoy `-Retrain`:** ejecuta `MODEL/train.py`, que hace walk-forward
+temporal y publica como métrica primaria `nested_model_policy`: cada semana elige
+el candidato por menor log loss usando únicamente predicciones OOS de semanas
+anteriores. Después selecciona con todo el OOS ya cerrado el `production_model`
+que se ajustará para predecir el periodo siguiente. Entrena, calibra, versiona el
+artefacto y deja la evidencia en `MODEL/results/REPORT.md`. También arranca con
+**auto-heal de BLACKBOX** y deja `timing.json`.
 
-**Matiz honesto (no lo ocultes):** la selección de `train.py` mira el mismo OOS que
-reporta (sesgo **L1**). El harness nuevo (`MODEL/evaluate.py` anidado y
-`MODEL/compare_models.py` con el zoo) mide **sin** ese sesgo y puede elegir un Model A
-mejor calibrado, pero **todavía NO está cableado a `-Retrain`** (decisión deferida a
-propósito: no se recablea producción sobre evidencia sintética).
+**Matiz honesto (no lo ocultes):** el resultado de `nested_model_policy` estima
+la política causal de selección; la métrica retrospectiva de un candidato fijo
+solo es diagnóstica. El harness independiente (`MODEL/evaluate.py` anidado y
+`MODEL/compare_models.py` con el zoo) aplica la misma disciplina y certifica si
+otro Model A o assembly merece ser integrado.
 
 **Receta recomendada (empírica) para tener de verdad el mejor modelo:**
-1. `.\start.ps1 -Retrain` → artefacto de producción actual (super_learner por log
-   loss). Suficiente para operar la web.
+1. `.\start.ps1 -Retrain` → artefacto de producción elegido causalmente por log
+   loss. Suficiente para operar la web.
 2. `python MODEL\compare_models.py --window both --n-trials 40` sobre tu `cs2.db` →
    comparativa honesta (zoo × block-wise, nested). Mira `MODEL_COMPARISON.md`.
-3. Si el `best_combo` del reporte **bate a `train.py` en log loss nested**, ese es el
-   candidato a promocionar → *follow-up*: cablear ese ganador en `train.py`
-   (pendiente; ver §6).
+3. Compara `nested_policy` con `nested_model_policy`. `diagnostic_best_combo` sirve
+   para investigar, pero no se promociona por su propia métrica retrospectiva.
+   Si la política nested del zoo bate de forma estable a producción, se integra
+   su fitter y se vuelve a certificar antes de sustituir el artefacto.
 4. Decide por **log loss/calibración/CLV**, no por accuracy.
 
-> Resumen: `-Retrain` ya te da un modelo bien seleccionado por log loss; para
+> Resumen: `-Retrain` ya te da un modelo seleccionado causalmente por log loss; para
 > **certificar** que es el mejor, contrástalo con `compare_models.py` sobre datos
 > reales. No promociones nada a ciegas por resultados sintéticos.
 
@@ -152,12 +154,14 @@ upgrade de modelo + esta documentación. Trabaja sobre `pre-dev`.
 ---
 
 ## 6. Decisiones abiertas / próximos pasos
-- **Reconciliar producción con el harness anidado** (arreglar L1 en `train.py`):
-  cablear el `best_combo` de `compare_models.py` como Model A de producción una vez el
-  CV real lo confirme. Es el paso pendiente más importante para "el mejor modelo".
-- **Ampliar tests de fuga (L2)** a las familias enriquecidas sobre `cs2.db` real.
-- **Pins de deps**: hechas las críticas (numpy/pandas/scikit-learn/lightgbm en
-  `requirements.txt`); falta lockfile completo si se quiere reproducibilidad total.
+- **L1 producción: HECHO.** `nested_model_policy` mide la politica causal y
+  `production_model` identifica el candidato ajustado para el siguiente periodo.
+- **L1 zoo/block-wise: HECHO.** `nested_policy` se decide dentro de cada
+  `outer_train`; `diagnostic_best_combo` no se promociona desde su propio OOS.
+- **L2 enriquecido real: HECHO.** `test_leakage_audit.py` reconstruye prefijos de
+  `cs2.db` y prueba los selectores as-of.
+- **Lock de deps: HECHO.** `requirements.lock.txt` es el grafo resuelto para
+  Python 3.12 y CI lo instala.
 - **Cifras únicas**: `MODEL/results/REPORT.md` es la fuente viva; PROJECT/README
   tienen tablas ilustrativas con fecha.
 - Familias `two_stage`/GBDT/nivel-de-mapa: reevaluar cuando crezca la cobertura.
@@ -186,6 +190,36 @@ El resto de la suite (`pytest TESTS/`) y `ruff`/`mypy`/smoke corren en el CI
 - Git avisa de CRLF/LF en Windows; es inofensivo.
 - El modelo de producción (`model.pkl`) es sensible a versiones: usa las deps
   pineadas para recargarlo.
+
+---
+
+## 9. Ejecución de este handoff (2026-07-27)
+
+Trabajo aplicado y verificado en la maquina con `cs2.db`:
+
+1. Se ejecuto el pipeline productivo completo con reentreno y BLACKBOX.
+2. Se corrigio el refit por fila de `profiles`; ahora ajusta una vez por perfil.
+3. Se cerro L1 tanto en `train.py` como en `compare_models.py`.
+4. Se separo temporalmente ajuste y seleccion del calibrador.
+5. Se amplio L2 a todas las columnas enriquecidas y fuentes reales as-of.
+6. Se alinearon las familias del harness con las familias auto-gated de produccion.
+7. Se genero `requirements.lock.txt` y CI instala el lock.
+8. Se añadieron tests adversariales de etiquetas outer y determinismo SAGA.
+9. Se ejecutó `start.ps1 -Retrain` completo sobre 9.726 series: la política
+   causal productiva obtuvo accuracy `0,6412` y log loss `0,6318`; el refit
+   futuro sigue siendo `super_learner_cal`.
+10. Se ejecutaron los comandos reales de `evaluate.py` y `compare_models.py`
+    (`40` trials). El zoo causal quedó en log loss `0,6338`, por lo que no
+    sustituye a producción.
+11. Se corrigieron dos fallos encontrados solo con la BBDD real: fechas del
+    adaptador de evaluación colapsadas al periodo cero y overflow del PAV
+    isotónico.
+12. La alineación anunciada 5v5 del partido es autoritativa en la web y para el
+    denominador de cobertura; el perfil general del equipo queda como fallback.
+
+Las cifras numericas vigentes se escriben en `MODEL/results/REPORT.md`,
+`EVAL_REPORT.md` y `MODEL_COMPARISON.md`; esos artefactos son la evidencia viva y
+prevalecen sobre las tablas sinteticas historicas de este handoff.
 
 *Fin del handoff. Con esto tienes el contexto completo; profundiza en el doc concreto
 de `CS2/DOCS/` según la tarea.*

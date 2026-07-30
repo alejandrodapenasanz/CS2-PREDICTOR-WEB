@@ -19,6 +19,7 @@ from cs2model.features import (  # noqa: E402
     ChronologicalState,
 )
 from train import (  # noqa: E402
+    causal_candidate_policy,
     candidate_specs,
     chronological_holdout_indices,
     optimize_convex_weights,
@@ -45,6 +46,50 @@ def match(idx: int, team1_win: bool) -> dict:
 
 
 class TrainingMethodologyTests(unittest.TestCase):
+    def test_causal_candidate_policy_cannot_see_current_period_labels(self) -> None:
+        predictions = {"candidate_a": [], "candidate_b": []}
+        for period in range(6):
+            for index in range(20):
+                actual = (period + index) % 2
+                common = {
+                    "match_id": f"{period}-{index}",
+                    "date": f"2026-02-{period + 1:02d}",
+                    "period": period,
+                    "actual": actual,
+                }
+                predictions["candidate_a"].append(
+                    {**common, "prob_team1": 0.75 if actual else 0.25}
+                )
+                predictions["candidate_b"].append(
+                    {**common, "prob_team1": 0.25 if actual else 0.75}
+                )
+
+        _rows_a, report_a = causal_candidate_policy(
+            predictions, ("candidate_a", "candidate_b"), min_history=20
+        )
+        changed = {
+            name: [dict(row) for row in rows]
+            for name, rows in predictions.items()
+        }
+        target_period = 4
+        for rows in changed.values():
+            for row in rows:
+                if row["period"] == target_period:
+                    row["actual"] = 1 - row["actual"]
+        _rows_b, report_b = causal_candidate_policy(
+            changed, ("candidate_a", "candidate_b"), min_history=20
+        )
+
+        decision_a = {
+            row["period"]: row["selected_candidate"]
+            for row in report_a["decisions"]
+        }
+        decision_b = {
+            row["period"]: row["selected_candidate"]
+            for row in report_b["decisions"]
+        }
+        self.assertEqual(decision_a[target_period], decision_b[target_period])
+
     def test_chronological_holdout_never_mixes_future_rows_into_training(self) -> None:
         y = np.array(([0, 1] * 30), dtype=int)
         train_idx, holdout_idx = chronological_holdout_indices(y, 0.2)

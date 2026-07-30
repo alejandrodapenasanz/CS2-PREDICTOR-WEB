@@ -25,6 +25,14 @@ CREATE TABLE teams (
     hltv_id     INTEGER UNIQUE          -- id en HLTV, para deduplicar al scrapear
 );
 
+CREATE TABLE team_aliases (
+    alias_key   TEXT PRIMARY KEY,
+    alias_name  TEXT NOT NULL,
+    team_id     INTEGER NOT NULL REFERENCES teams(team_id),
+    source      TEXT NOT NULL DEFAULT 'ingest',
+    created_at_utc TEXT NOT NULL
+);
+
 CREATE TABLE players (
     player_id   INTEGER PRIMARY KEY,
     nick        TEXT NOT NULL,
@@ -41,6 +49,8 @@ CREATE TABLE events (
     is_lan      INTEGER NOT NULL DEFAULT 0 CHECK (is_lan IN (0,1)),
     region      TEXT,
     prize_pool  INTEGER,
+    prize_pool_raw TEXT,
+    tier_source TEXT,
     teams_competing INTEGER,
     start_date  TEXT,                   -- ISO-8601
     end_date    TEXT,
@@ -77,6 +87,8 @@ CREATE TABLE matches (
     hltv_match_id   TEXT UNIQUE,                         -- id estable de HLTV
     event_id        INTEGER NOT NULL REFERENCES events(event_id),
     datetime_utc    TEXT NOT NULL,                       -- inicio de la serie, UTC
+    datetime_precision TEXT NOT NULL DEFAULT 'exact'
+                       CHECK (datetime_precision IN ('exact','date_only')),
     team1_id        INTEGER NOT NULL REFERENCES teams(team_id),
     team2_id        INTEGER NOT NULL REFERENCES teams(team_id),
     best_of         INTEGER NOT NULL CHECK (best_of IN (1,2,3,5)),
@@ -286,6 +298,11 @@ CREATE TABLE odds (
     overround       REAL,
     run_id          TEXT,
     source_file     TEXT,
+    quality         TEXT NOT NULL DEFAULT 'observed'
+                       CHECK (quality IN ('observed','closing_observed','proxy','legacy_proxy')),
+    seconds_to_start INTEGER,
+    is_observed_closing INTEGER NOT NULL DEFAULT 0
+                       CHECK (is_observed_closing IN (0,1)),
     UNIQUE (match_id, bookmaker, captured_at_utc, market_type)
 );
 
@@ -495,6 +512,49 @@ CREATE TABLE predictions (
     UNIQUE (hltv_match_id, model_version)
 );
 
+-- Una prediccion operativa por partido. Se permite sustituirla por una
+-- observacion mas reciente solamente mientras siga siendo pre-partido.
+CREATE TABLE prediction_ledger (
+    ledger_id       INTEGER PRIMARY KEY,
+    match_id        INTEGER NOT NULL UNIQUE REFERENCES matches(match_id),
+    hltv_match_id   TEXT NOT NULL UNIQUE,
+    team1_id        INTEGER NOT NULL REFERENCES teams(team_id),
+    team2_id        INTEGER NOT NULL REFERENCES teams(team_id),
+    kickoff_utc     TEXT NOT NULL,
+    predicted_at_utc TEXT NOT NULL,
+    model_version   TEXT NOT NULL,
+    artifact_sha256 TEXT,
+    config_sha256   TEXT,
+    feature_policy_sha256 TEXT,
+    prob_team1      REAL NOT NULL CHECK (prob_team1 > 0 AND prob_team1 < 1),
+    decision_prob_team1 REAL CHECK (
+        decision_prob_team1 IS NULL OR
+        (decision_prob_team1 > 0 AND decision_prob_team1 < 1)
+    ),
+    reliability_score REAL,
+    prediction_json TEXT NOT NULL,
+    features_json   TEXT,
+    data_quality_json TEXT,
+    ledger_status   TEXT NOT NULL DEFAULT 'open'
+                       CHECK (ledger_status IN ('open','frozen','evaluated','invalid')),
+    invalid_reason  TEXT,
+    result_filled_at_utc TEXT,
+    actual_team1_win INTEGER CHECK (actual_team1_win IN (0,1)),
+    prediction_correct INTEGER CHECK (prediction_correct IN (0,1)),
+    realized_log_loss REAL,
+    realized_brier REAL,
+    created_at_utc TEXT NOT NULL,
+    updated_at_utc TEXT NOT NULL
+);
+
+CREATE TABLE health_gate_runs (
+    health_gate_run_id INTEGER PRIMARY KEY,
+    checked_at_utc TEXT NOT NULL,
+    phase          TEXT NOT NULL,
+    status         TEXT NOT NULL CHECK (status IN ('pass','warning','fail')),
+    report_json    TEXT NOT NULL
+);
+
 -- Estado de frescura por entidad compartida. El scraper consulta esta tabla
 -- antes de pedir perfiles, stats, rankings, assets o analytics a HLTV.
 CREATE TABLE fetch_state (
@@ -556,7 +616,10 @@ CREATE INDEX idx_predictions_version  ON predictions(model_version);
 CREATE INDEX idx_predictions_context  ON predictions(context_environment, context_stage);
 CREATE INDEX idx_predictions_opportunity
     ON predictions(model_version, opportunity_eligible, opportunity_rank);
+CREATE INDEX idx_prediction_ledger_status
+    ON prediction_ledger(ledger_status, kickoff_utc);
 CREATE INDEX idx_teams_name           ON teams(name);
+CREATE INDEX idx_team_aliases_team    ON team_aliases(team_id);
 CREATE INDEX idx_events_name          ON events(name);
 CREATE INDEX idx_events_hltv          ON events(hltv_event_id);
 CREATE INDEX idx_raw_snapshots_run    ON raw_snapshots(run_id, kind);

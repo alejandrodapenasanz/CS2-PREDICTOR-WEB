@@ -131,29 +131,36 @@ def _isotonic_fit(p: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]
     order = np.argsort(p, kind="mergesort")
     x = np.asarray(p, dtype=float)[order]
     yv = np.asarray(y, dtype=float)[order]
-    w = np.ones_like(yv)
-    # PAV
-    ys = yv.copy()
-    i = 0
-    n = len(ys)
-    while i < n - 1:
-        if ys[i] > ys[i + 1] + 1e-12:
-            new = (w[i] * ys[i] + w[i + 1] * ys[i + 1]) / (w[i] + w[i + 1])
-            ys[i] = new
-            ys[i + 1] = new
-            w[i] += w[i + 1]
-            # colapsa hacia atras para mantener monotonia
-            j = i
-            while j > 0 and ys[j - 1] > ys[j] + 1e-12:
-                new = (w[j - 1] * ys[j - 1] + w[j] * ys[j]) / (w[j - 1] + w[j])
-                ys[j - 1] = new
-                ys[j] = new
-                w[j - 1] += w[j]
-                j -= 1
-            i = max(j - 1, 0)
-        else:
-            i += 1
-    return x, ys
+    if x.size == 0:
+        return x, yv
+
+    # Aggregate equal scores first, then maintain genuinely collapsed PAV
+    # blocks. Repeatedly adding a block's weight without deleting it causes
+    # exponential weight growth and overflows on real histories.
+    unique_x, inverse, counts = np.unique(x, return_inverse=True, return_counts=True)
+    sums = np.bincount(inverse, weights=yv).astype(float)
+    weights = counts.astype(float)
+    blocks: list[list[float | int]] = []
+    for index, (weight, total) in enumerate(zip(weights, sums, strict=True)):
+        blocks.append([index, index, weight, total])
+        while len(blocks) >= 2:
+            previous = blocks[-2]
+            current = blocks[-1]
+            previous_mean = float(previous[3]) / float(previous[2])
+            current_mean = float(current[3]) / float(current[2])
+            if previous_mean <= current_mean + 1e-12:
+                break
+            blocks[-2:] = [[
+                int(previous[0]),
+                int(current[1]),
+                float(previous[2]) + float(current[2]),
+                float(previous[3]) + float(current[3]),
+            ]]
+
+    fitted = np.empty(len(unique_x), dtype=float)
+    for start, end, weight, total in blocks:
+        fitted[int(start):int(end) + 1] = float(total) / float(weight)
+    return unique_x, fitted
 
 
 @dataclass
@@ -319,7 +326,13 @@ def _inner_select(
     X_all = _matrix(train_rows, cols)
     per = np.asarray(train_periods)
 
-    best = {"log_loss": np.inf, "l2": cfg.l2_grid[0], "calibration": "identity"}
+    best = {
+        "log_loss": np.inf,
+        "l2": cfg.l2_grid[0],
+        "calibration": "identity",
+        "_calibration_p": np.array([], dtype=float),
+        "_calibration_y": np.array([], dtype=int),
+    }
     if not inner:
         return {"columns": cols, "families": [f.name for f in active], **best}
 
@@ -340,11 +353,24 @@ def _inner_select(
             continue
         pa = np.array(oos_p)
         ya = np.array(oos_y)
+        cut = max(10, int(len(pa) * 0.7))
+        if (
+            cut >= len(pa) - 5
+            or len(np.unique(ya[:cut])) < 2
+            or len(np.unique(ya[cut:])) < 2
+        ):
+            continue
         for method in cfg.calibration_methods:
-            cal = fit_calibrator(method, pa, ya)
-            ll = metric_dict(ya, cal.apply(pa))["log_loss"]
+            cal = fit_calibrator(method, pa[:cut], ya[:cut])
+            ll = metric_dict(ya[cut:], cal.apply(pa[cut:]))["log_loss"]
             if ll < best["log_loss"]:
-                best = {"log_loss": float(ll), "l2": float(l2), "calibration": method}
+                best = {
+                    "log_loss": float(ll),
+                    "l2": float(l2),
+                    "calibration": method,
+                    "_calibration_p": pa,
+                    "_calibration_y": ya,
+                }
 
     best["columns"] = cols
     best["families"] = [f.name for f in active]
@@ -391,7 +417,9 @@ def nested_walk_forward(
         cols = sel["columns"]
         decisions.append({
             "fold": fold_i, "train_rows": int(tr.sum()), "test_rows": int(te.sum()),
-            "train_period_max": int(periods[tr].max()), "test_period_min": int(periods[te].min()),
+            "train_period_max": int(periods[tr].max()),
+            "test_period_min": int(periods[te].min()),
+            "test_period_max": int(periods[te].max()),
             "l2": sel["l2"], "calibration": sel["calibration"], "families": sel["families"],
         })
 
@@ -400,8 +428,12 @@ def nested_walk_forward(
         X_te = _matrix(test_rows, cols)
         sw = _recency_weights(periods[tr], cfg.recency_half_life)
         model = fitter(X_tr, y_all[tr], cols, l2=sel["l2"], sample_weight=sw)
-        p_tr = model.predict_proba(X_tr)
-        cal = fit_calibrator(sel["calibration"], p_tr, y_all[tr])  # calibrador SOLO con train
+        calibration_p = np.asarray(sel.get("_calibration_p"), dtype=float)
+        calibration_y = np.asarray(sel.get("_calibration_y"), dtype=int)
+        if len(calibration_p) >= 20 and len(np.unique(calibration_y)) >= 2:
+            cal = fit_calibrator(sel["calibration"], calibration_p, calibration_y)
+        else:
+            cal = fit_calibrator("identity", np.array([0.5]), np.array([0]))
         p_te = cal.apply(model.predict_proba(X_te))
 
         # --- Baselines apples-to-apples sobre el mismo test ---

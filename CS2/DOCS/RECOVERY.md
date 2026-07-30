@@ -26,9 +26,12 @@ todo lo derivado (ratings, features, predicciones, artefacto del modelo, web) se
 | **Informes generados** | `MODEL/results/*.json/*.csv`, `WEB/data.js` | ❌ No | Se regeneran solos |
 | **Secretos** | `cf_session.json`, `corp_ca_bundle.pem` | ❌ No (correcto) | Se regeneran en runtime |
 
-**Backups existentes** (según PROJECT.md §8): cada `ingest` deja copia en `BBDD/backups/` y espejo
-en `../CS2-Predictor-Backups/` (variable `CS2_BACKUP_MIRROR_DIR`). **Esos backups son tu red de
-seguridad real** — cópialos a un sitio duradero (nube/disco externo).
+**Backups existentes** (según PROJECT.md §8): cada `ingest` deja una copia en
+`BBDD/backups/`. El espejo está desactivado por defecto para no guardar dos
+copias en el mismo disco. Si quieres redundancia real, define
+`CS2_BACKUP_MIRROR_DIR` con una ruta de otro disco o almacenamiento
+sincronizado. **Esos backups son tu red de seguridad real**: conserva al menos
+una copia fuera del equipo.
 
 ---
 

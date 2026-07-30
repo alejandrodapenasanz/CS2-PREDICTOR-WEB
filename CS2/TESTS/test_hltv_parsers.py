@@ -124,6 +124,53 @@ class HltvParserTests(unittest.TestCase):
         self.assertEqual(filtered[0]["profile"]["squad"], [{"id": "102", "name": "Due"}])
         self.assertEqual(len(profiles[0]["profile"]["squad"]), 2)
 
+    def test_player_stat_candidates_include_match_lineup_missing_from_team_profile(self) -> None:
+        profiles = [{
+            "id": "13613",
+            "profile": {
+                "name": "Bebop",
+                "squad": [
+                    {"id": "14273", "name": "iDISBALANCE"},
+                    {"id": "20197", "name": "faydett"},
+                    {"id": "20948", "name": "lov1kus"},
+                ],
+            },
+        }]
+        snapshots = [{
+            "prematch_lineups": {
+                "team1": {
+                    "hltv_team_id": "13613",
+                    "team_name": "Bebop",
+                    "players": [
+                        {"hltv_player_id": "14273", "nickname": "iDISBALANCE"},
+                        {"hltv_player_id": "20197", "nickname": "faydett"},
+                        {"hltv_player_id": "20948", "nickname": "lov1kus"},
+                        {"hltv_player_id": "24726", "nickname": "z3ndeR"},
+                        {"hltv_player_id": "25111", "nickname": "redzed"},
+                    ],
+                },
+                "team2": {
+                    "hltv_team_id": "999",
+                    "team_name": "Synthetic",
+                    "players": [{"hltv_player_id": "30000", "nickname": "new"}],
+                },
+            },
+        }]
+
+        expanded, report = start.player_stats_profiles_with_announced_lineups(
+            profiles,
+            snapshots,
+        )
+        player_ids = start.player_ids_from_team_profiles_payload(expanded)
+
+        self.assertEqual(
+            player_ids,
+            {"14273", "20197", "20948", "24726", "25111", "30000"},
+        )
+        self.assertEqual(report["lineup_players_added"], 3)
+        self.assertEqual(report["synthetic_teams_added"], 1)
+        self.assertEqual(len(profiles[0]["profile"]["squad"]), 3)
+
     def test_player_payload_merge_prefers_online_refresh_and_keeps_fresh_cache(self) -> None:
         cached = {
             "101": {"id": "101", "maps": 20, "fetch_origin": "cache", "stats": {"KPR": 0.60}},
@@ -328,7 +375,15 @@ class HltvParserTests(unittest.TestCase):
         <table class="analytics-handicap-table team2"><thead><tr><th><span class="team-name">Beta</span><span class="match-map-count">15 matches, 36 maps.</span></th></tr></thead><tbody><tr><td>2 - 0 wins</td><td class="handicap-data">20%</td></tr><tr><td>2 - 1 wins</td><td class="handicap-data">20%</td></tr><tr><td>Overtimes</td><td class="handicap-data">10%</td></tr></tbody></table>
         """
         parsed = start.parse_analytics_html(html, "123", "/matches/123/alpha-vs-beta", ["Alpha", "Beta"])
-        self.assertEqual(parsed["event_metadata"], {"name": "Test event", "prize_pool": 50000, "teams_competing": 16})
+        self.assertEqual(
+            parsed["event_metadata"],
+            {
+                "name": "Test event",
+                "prize_pool": 50000,
+                "prize_pool_raw": "$50,000",
+                "teams_competing": 16,
+            },
+        )
         self.assertEqual(len(parsed["map_stats"]), 2)
         self.assertEqual(parsed["core_lineup"]["Beta"]["matches_lt"], 5)
         self.assertEqual(parsed["standins"]["Beta"], ["StandIn"])

@@ -1,4 +1,4 @@
-version: 1
+version: 3
 random_seed: 42
 
 training:
@@ -11,6 +11,22 @@ training:
   optuna_trials: 8
   optuna_retune_weeks: 26
   final_calibration_fraction: 0.18
+  model_selection_min_history: 200
+
+feature_selection:
+  validation_periods: 8
+  retune_periods: 13
+  min_log_loss_gain: 0.0005
+  min_validation_rows: 80
+  min_validation_available_rows: 20
+
+health_gates:
+  max_completed_placeholders: 0
+  max_foreign_key_errors: 0
+  max_evaluation_metric_delta: 1.0e-8
+  max_log_loss_vs_glicko: 0.0
+  min_recent_coverage_ratio: 0.5
+  min_coverage_sample: 20
 
 # Harness de evaluacion honesto (MODEL/evaluate.py + cs2model/evaluation.py).
 # El bucle externo estima rendimiento; el interno decide (hiperparam/familias/

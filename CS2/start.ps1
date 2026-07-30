@@ -179,7 +179,10 @@ $ContextCalibration = Join-Path $Root "MODEL\analyze_context_calibration.py"
 $DriftMonitor = Join-Path $Root "MODEL\monitor_drift.py"
 $BuildDb = Join-Path $Root "BBDD\build_db.py"
 $IngestDb = Join-Path $Root "BBDD\ingest.py"
+$RepairIntegrity = Join-Path $Root "BBDD\repair_integrity.py"
 $ExportMaster = Join-Path $Root "BBDD\export_master_json.py"
+$HealthGates = Join-Path $Root "MODEL\health_gates.py"
+$EvaluateLiveLedger = Join-Path $Root "MODEL\evaluate_live_ledger.py"
 $Artifact = Join-Path $Root "MODEL\artifacts\model.pkl"
 $MasterMani = Join-Path $Root "PIPELINE\master\manifest.json"
 $Blackbox = Join-Path $Root "BBDD\blackbox.py"
@@ -207,7 +210,7 @@ if ($ScraperPython) {
 # --- Total de etapas numeradas (identico al comportamiento previo) -----------
 $needTrain = $Retrain -or (-not (Test-Path $Artifact))
 $script:StageTotal = 4                       # scrape + enrich + context + web
-if (-not $NoDb) { $script:StageTotal += 4 }  # build_db + ingest-pre + ingest-final + drift
+if (-not $NoDb) { $script:StageTotal += 7 }  # DB + repair + gates + ledger + drift
 if ($needTrain) { $script:StageTotal += 1 }
 
 # --- Fase P: BLACKBOX restore explicito / auto-heal (antes de tocar BBDD) -----
@@ -285,6 +288,12 @@ if (-not $NoDb) {
     Invoke-Stage -Name "Ingest pre-entreno a BBDD viva (hechos, odds, assets, snapshots)" -FailExit $Cfg.ExitCodes.IngestPre -Action {
         Invoke-Native $ModelPython @($IngestDb, "--run-dir", $RunDir, "--no-backup", "--no-mirror-backup") "Ingest pre-entreno BBDD" | Out-Null
     }
+    Invoke-Stage -Name "Reparando integridad core y reconstruyendo ratings point-in-time" -FailExit $Cfg.ExitCodes.IngestPre -Action {
+        Invoke-Native $ModelPython @($RepairIntegrity) "Reparacion integridad BBDD" | Out-Null
+    }
+    Invoke-Stage -Name "Health gate de datos antes del entrenamiento" -FailExit $Cfg.ExitCodes.Train -Action {
+        Invoke-Native $ModelPython @($HealthGates, "--phase", "data") "Health gate datos" | Out-Null
+    }
 }
 
 # --- Etapa 4: entrenamiento (solo si -Retrain o falta el artefacto) ----------
@@ -316,6 +325,10 @@ if (-not $NoDb) {
     # --- Etapa 8: monitor drift (read-only) ----------------------------------
     Invoke-Stage -Name "Monitorizando drift causal (log loss rodante + CLV)" -FailExit $Cfg.ExitCodes.Drift -Action {
         Invoke-Native $ModelPython @($DriftMonitor) "Monitor drift" | Out-Null
+    }
+    Invoke-Stage -Name "Evaluando ledger congelado y health gate operativo" -FailExit $Cfg.ExitCodes.Drift -Action {
+        Invoke-Native $ModelPython @($EvaluateLiveLedger) "Evaluacion ledger produccion" | Out-Null
+        Invoke-Native $ModelPython @($HealthGates, "--phase", "live") "Health gate ledger" | Out-Null
     }
 }
 

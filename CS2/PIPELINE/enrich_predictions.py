@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import math
 import re
@@ -27,6 +28,8 @@ ROOT = Path(__file__).resolve().parents[1]
 MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
+from cs2model.identity import resolved_team
+
 try:
     from cs2model import dataio as cs2_dataio
     from cs2model.features import (
@@ -77,10 +80,10 @@ COMPLETE_LINEUP_SIZE = 5
 
 try:
     from PIPELINE.match_context import parse_match_context_meta
-    from PIPELINE.opportunity import annotate_opportunities
+    from PIPELINE.opportunity import annotate_opportunities, roster_confirmation
 except Exception:  # pragma: no cover - direct script execution
     from match_context import parse_match_context_meta
-    from opportunity import annotate_opportunities
+    from opportunity import annotate_opportunities, roster_confirmation
 DEFAULT_HISTORY = (
     ROOT
     / "SCRAPER"
@@ -131,6 +134,21 @@ def read_json(path: Path, default: Any) -> Any:
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def sha256_file(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sha256_json(value: Any) -> str:
+    payload = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def clean_team(name: str | None) -> str:
@@ -203,6 +221,13 @@ def is_snapshot_publishable(snapshot: dict[str, Any], run_started_local: datetim
     detail = snapshot.get("detail") or {}
     if isinstance(detail, dict) and detail_has_completed_score(detail):
         return False, "completed_detail"
+    match = detail.get("match") if isinstance(detail, dict) else {}
+    match = match if isinstance(match, dict) else {}
+    upcoming = snapshot.get("upcoming_row") or {}
+    team1 = match.get("team1") or upcoming.get("team1")
+    team2 = match.get("team2") or upcoming.get("team2")
+    if not resolved_team(team1) or not resolved_team(team2):
+        return False, "participants_unconfirmed"
     match_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
     if match_dt and match_dt < run_started_local - timedelta(minutes=grace_minutes):
         return False, "already_started"
@@ -525,22 +550,148 @@ def roster_metric(roster: dict[str, Any], metric: str, field: str, default: floa
     return (((roster.get("distribution") or {}).get("metrics") or {}).get(metric) or {}).get(field, default)
 
 
-def roster_summary(team_id: str | None, profiles: dict[str, Any], player_stats: dict[str, Any]) -> dict[str, Any]:
-    if not team_id or team_id not in profiles:
-        return {"coverage": 0.0, "players": [], "avg": {}, "windows": {}, "distribution": {}}
-    roster = profiles[team_id].get("squad") or []
+def _announced_player_display_snapshot(player: dict[str, Any]) -> dict[str, Any] | None:
+    """Expose match-page stats in the UI without treating them as a full stored window."""
+    source_fields = {
+        "rating": "Rating 3.0",
+        "kpr": "KPR",
+        "dpr": "DPR",
+        "apr": "APR",
+        "kast": "KAST",
+        "adr": "ADR",
+        "multi_kill_rating": "Multi-kill rating",
+        "round_swing": "Round Swing",
+    }
+    stats = {
+        target: value
+        for source, target in source_fields.items()
+        if (value := numeric_stat(player.get(source))) is not None
+    }
+    if not stats:
+        return None
+    return {
+        "id": str(player.get("id") or ""),
+        "name": player.get("name"),
+        "maps": 0,
+        "stats": stats,
+        "time_filter": "past3months",
+        "source": "HLTV.match_prematch_lineup",
+        "sample_size_known": False,
+    }
+
+
+def roster_summary(
+    team_id: str | None,
+    profiles: dict[str, Any],
+    player_stats: dict[str, Any],
+    announced_lineup: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    profile_roster = ((profiles.get(str(team_id or "")) or {}).get("squad") or [])
+    announced_lineup = announced_lineup or {}
+    announced_roster = announced_lineup.get("players") or []
+    player_details = announced_lineup.get("player_details") or {}
+    enriched_announced = [
+        {
+            **(player_details.get(str(player.get("id") or "")) or {}),
+            **player,
+        }
+        for player in announced_roster
+    ]
+    if announced_lineup.get("complete"):
+        roster = enriched_announced
+        roster_source = "prematch_announced_lineup"
+    elif enriched_announced:
+        # Never discard a player explicitly announced on the match page. A team
+        # profile may lag behind, so it is only a labelled fallback for missing
+        # slots and cannot make the lineup "confirmed".
+        roster = list(enriched_announced)
+        seen_ids = {str(player.get("id") or "") for player in roster}
+        for player in profile_roster:
+            player_id = str(player.get("id") or "")
+            if not player_id or player_id in seen_ids:
+                continue
+            roster.append(player)
+            seen_ids.add(player_id)
+            if len(roster) >= COMPLETE_LINEUP_SIZE:
+                break
+        roster_source = (
+            "partial_prematch_announced_lineup+team_profile"
+            if len(roster) > len(enriched_announced)
+            else "partial_prematch_announced_lineup"
+        )
+    elif profile_roster:
+        roster = profile_roster
+        roster_source = "team_profile"
+    else:
+        roster = []
+        roster_source = "unavailable"
+
+    announced_ids = {
+        str(player.get("id") or "")
+        for player in announced_roster
+        if player.get("id")
+    }
+    rendered_ids = {
+        str(player.get("id") or "")
+        for player in roster
+        if player.get("id")
+    }
+    announced_complete = bool(announced_lineup.get("complete"))
+    announced_matches_rendered = (
+        len(rendered_ids) == COMPLETE_LINEUP_SIZE
+        and announced_ids == rendered_ids
+        if announced_complete
+        else None
+    )
+    if announced_complete and announced_matches_rendered:
+        integrity_status = "confirmed"
+    elif announced_complete:
+        integrity_status = "mismatch"
+    elif announced_ids:
+        integrity_status = "announced_incomplete"
+    else:
+        integrity_status = "announced_unavailable"
+    integrity = {
+        "status": integrity_status,
+        "expected_players": COMPLETE_LINEUP_SIZE,
+        "announced_players": len(announced_ids),
+        "rendered_players": len(rendered_ids),
+        "announced_complete": announced_complete,
+        "announced_matches_rendered": announced_matches_rendered,
+    }
+
+    if not roster:
+        return {
+            "coverage": 0.0,
+            "players": [],
+            "avg": {},
+            "windows": {},
+            "distribution": {},
+            "roster_source": roster_source,
+            "announced_lineup_complete": False,
+            "expected_roster_size": COMPLETE_LINEUP_SIZE,
+            "integrity": integrity,
+        }
+
     players = []
     for player in roster:
         bundle = player_stats.get(str(player.get("id"))) or {}
         preferred = bundle.get("preferred") if isinstance(bundle, dict) else bundle
         windows = bundle.get("windows", {}) if isinstance(bundle, dict) else {}
+        display_stats = preferred or _announced_player_display_snapshot(player)
         players.append(
             {
                 "id": player.get("id"),
                 "name": player.get("name"),
-                "stats": preferred,
+                "stats": display_stats,
                 "stats_by_window": windows,
                 "preferred_time_filter": bundle.get("preferred_time_filter") if isinstance(bundle, dict) else None,
+                "is_standin": bool(player.get("is_standin")),
+                "stats_source": (
+                    "player_stat_snapshot"
+                    if preferred
+                    else (display_stats or {}).get("source")
+                ),
             }
         )
     summary = {
@@ -550,6 +701,10 @@ def roster_summary(team_id: str | None, profiles: dict[str, Any], player_stats: 
         "windows": {},
         "distribution": {},
         "preferred_time_filter": None,
+        "roster_source": roster_source,
+        "announced_lineup_complete": announced_complete,
+        "expected_roster_size": COMPLETE_LINEUP_SIZE,
+        "integrity": integrity,
     }
     available_windows = sorted({window for p in players for window in (p.get("stats_by_window") or {})})
     for window in [*PLAYER_TIME_FILTER_PRIORITY, *[w for w in available_windows if w not in PLAYER_TIME_FILTER_PRIORITY]]:
@@ -577,13 +732,70 @@ def roster_summary(team_id: str | None, profiles: dict[str, Any], player_stats: 
         summary["distribution"] = summary["windows"][summary["preferred_time_filter"]]
     else:
         summary["distribution"] = aggregate_player_stats(players)
-    summary["coverage"] = summary["distribution"]["covered_players"] / max(len(players), 1)
+    summary["coverage"] = min(
+        1.0,
+        summary["distribution"]["covered_players"] / COMPLETE_LINEUP_SIZE,
+    )
     for metric, values in summary["distribution"].get("metrics", {}).items():
         summary["avg"][metric] = values.get("avg")
         legacy = PLAYER_LEGACY_NAMES.get(metric)
         if legacy:
             summary["avg"][legacy] = values.get("avg")
     return summary
+
+
+def roster_integrity_report(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Audit the invariant between announced and rendered pre-match lineups."""
+    rows = []
+    violations = []
+    both_confirmed = 0
+    for entry in entries:
+        confirmed, reasons = roster_confirmation(entry)
+        if confirmed:
+            both_confirmed += 1
+        side_statuses = {
+            side: ((entry.get("rosters") or {}).get(side) or {}).get("integrity", {}).get(
+                "status",
+                "unknown",
+            )
+            for side in ("team1", "team2")
+        }
+        hard_reasons = [
+            f"{side}_announced_lineup_mismatch"
+            for side, status in side_statuses.items()
+            if status == "mismatch"
+        ]
+        prediction = entry.get("prediction") or {}
+        if prediction.get("opportunity_eligible") and not confirmed:
+            hard_reasons.append("unconfirmed_roster_marked_opportunity_eligible")
+        if hard_reasons:
+            violations.append(
+                {
+                    "match_id": str(entry.get("id") or ""),
+                    "team1": (entry.get("team1") or {}).get("name"),
+                    "team2": (entry.get("team2") or {}).get("name"),
+                    "reasons": hard_reasons,
+                }
+            )
+        rows.append(
+            {
+                "match_id": str(entry.get("id") or ""),
+                "team1": (entry.get("team1") or {}).get("name"),
+                "team2": (entry.get("team2") or {}).get("name"),
+                "confirmed_5v5": confirmed,
+                "reasons": reasons,
+                "side_statuses": side_statuses,
+                "opportunity_eligible": bool(prediction.get("opportunity_eligible")),
+            }
+        )
+    return {
+        "matches": len(entries),
+        "confirmed_5v5": both_confirmed,
+        "not_confirmed_5v5": len(entries) - both_confirmed,
+        "hard_violation_count": len(violations),
+        "hard_violations": violations,
+        "rows": rows,
+    }
 
 
 def load_model_engine(history_path: Path) -> dict[str, Any] | None:
@@ -979,9 +1191,18 @@ def reliability_score(entry: dict[str, Any], features: dict[str, Any]) -> float:
             break
     if not (entry.get("data_quality") or {}).get("real_pre_match_snapshot", True):
         score *= 0.85
-    coverage = min(features.get("player_coverage_team1") or 1, features.get("player_coverage_team2") or 1)
+    coverage = min(
+        features.get("player_coverage_team1")
+        if features.get("player_coverage_team1") is not None else 1,
+        features.get("player_coverage_team2")
+        if features.get("player_coverage_team2") is not None else 1,
+    )
     if coverage < 0.6:
-        score *= 0.92
+        score *= 0.75
+    elif coverage < 0.8:
+        score *= 0.90
+    elif coverage < 1.0:
+        score *= 0.96
     return clamp(score, 0.05, 1.0)
 
 
@@ -1635,6 +1856,7 @@ def _announced_lineup(
         )
 
     players: dict[str, dict[str, Any]] = {}
+    player_details: dict[str, dict[str, Any]] = {}
     for player in candidate.get("players") or []:
         player_id = str(player.get("hltv_player_id") or "")
         if not player_id:
@@ -1644,6 +1866,7 @@ def _announced_lineup(
             "name": str(player.get("nickname") or player_id),
             "is_standin": bool(player.get("is_standin")),
         }
+        player_details[player_id] = dict(player)
     team_matches = bool(expected) and str(candidate.get("hltv_team_id") or "") == expected
     return {
         "available": bool(candidate),
@@ -1651,6 +1874,7 @@ def _announced_lineup(
         "team_matches": team_matches,
         "team_id": expected or None,
         "players": list(players.values()),
+        "player_details": player_details,
         "player_ids": frozenset(players),
         "complete": team_matches and len(players) == COMPLETE_LINEUP_SIZE,
         "standins": [player for player in players.values() if player["is_standin"]],
@@ -2337,8 +2561,29 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
     elif features["event_volatility_label"] == "unknown_event_history":
         flags.append({"level": "info", "code": "UNKNOWN_EVENT", "message": "Poco historico para este torneo."})
 
-    if min(features["player_coverage_team1"], features["player_coverage_team2"]) < 0.6:
+    if min(features["player_coverage_team1"], features["player_coverage_team2"]) < 0.8:
         flags.append({"level": "warning", "code": "LOW_PLAYER_STATS", "message": "Baja cobertura de stats de jugadores."})
+
+    roster_integrities = [
+        ((entry.get("rosters") or {}).get(side) or {}).get("integrity") or {}
+        for side in ("team1", "team2")
+    ]
+    if any(integrity.get("status") == "mismatch" for integrity in roster_integrities):
+        flags.append(
+            {
+                "level": "danger",
+                "code": "ROSTER_LINEUP_MISMATCH",
+                "message": "La alineacion 5v5 anunciada no coincide con el roster mostrado; publicacion bloqueada.",
+            }
+        )
+    elif any(integrity.get("status") != "confirmed" for integrity in roster_integrities):
+        flags.append(
+            {
+                "level": "warning",
+                "code": "PREMATCH_LINEUP_INCOMPLETE",
+                "message": "HLTV no ha confirmado aun una alineacion pre-match 5v5 para ambos equipos.",
+            }
+        )
 
     if map_pool.get("status") == "low_data":
         flags.append({"level": "info", "code": "LOW_MAP_POOL_DATA", "message": "Poco dato real para estimar pool de mapas pre-partido."})
@@ -2391,6 +2636,9 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         )
     elif any(
         (roster.get(side) or {}).get("standin_risk")
+        for side in ("team1", "team2")
+    ) and not all(
+        (entry.get("rosters", {}).get(side) or {}).get("announced_lineup_complete")
         for side in ("team1", "team2")
     ):
         flags.append(
@@ -2484,6 +2732,23 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         + (engine["artifact"].metadata.get("production_model", "?") if engine else "NO (fallback logístico)")
     )
     model_metadata = engine["artifact"].metadata if engine else {}
+    artifact_path = ROOT / "MODEL" / "artifacts" / "model.pkl"
+    model_trace = {
+        "model_version": (
+            f"{model_metadata.get('production_model', 'model')}@"
+            f"{model_metadata.get('trained_at', 'unknown')}"
+            if engine else "logistic_fallback"
+        ),
+        "artifact_sha256": sha256_file(artifact_path) if engine else None,
+        "config_sha256": model_metadata.get("config_sha256") if engine else None,
+        "feature_policy_sha256": (
+            sha256_json(model_metadata.get("feature_policies") or {})
+            if engine else None
+        ),
+        "production_model": model_metadata.get("production_model") if engine else None,
+        "trained_at": model_metadata.get("trained_at") if engine else None,
+        "is_fallback": not bool(engine),
+    }
     external_feature_store = (
         cs2_dataio.load_external_feature_store(LIVE_DB)
         if _CS2_OK and LIVE_DB.exists() else {"rankings": {}, "rosters": {}}
@@ -2537,8 +2802,10 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         event = snapshot.get("event") or ""
         event1 = state["event_stats"][(t1, event)]
         event2 = state["event_stats"][(t2, event)]
-        roster1 = roster_summary(team1.get("id"), profiles, player_stats)
-        roster2 = roster_summary(team2.get("id"), profiles, player_stats)
+        announced1 = _announced_lineup(snapshot, "team1", team1.get("id"))
+        announced2 = _announced_lineup(snapshot, "team2", team2.get("id"))
+        roster1 = roster_summary(team1.get("id"), profiles, player_stats, announced1)
+        roster2 = roster_summary(team2.get("id"), profiles, player_stats, announced2)
         player_form1 = player_form_summary(roster1, player_forms)
         player_form2 = player_form_summary(roster2, player_forms)
         map_pool = map_pool_estimate(team1.get("name") or t1, team2.get("name") or t2, map_state)
@@ -2883,6 +3150,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "rosters": {"team1": roster1, "team2": roster2},
             "prediction": prediction,
             "controls": controls,
+            "model_trace": model_trace,
         }
         staking = staking_recommendation(entry, features, prediction, market, model_metadata)
         entry["staking"] = staking
@@ -2892,6 +3160,13 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         entry["flags"] = flag_match(entry, features, prediction)
         enriched.append(entry)
     annotate_opportunities(enriched)
+    integrity_report = roster_integrity_report(enriched)
+    write_json(run_dir / "roster_integrity_report.json", integrity_report)
+    if integrity_report["hard_violation_count"]:
+        raise RuntimeError(
+            "Roster integrity check failed; see "
+            f"{run_dir / 'roster_integrity_report.json'}"
+        )
     write_json(run_dir / "predictions_enriched.json", enriched)
     if skipped_unpublishable:
         write_json(

@@ -10,7 +10,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "MODEL"))
 
-from PIPELINE.enrich_predictions import aggregate_player_stats, roster_summary
+from PIPELINE.enrich_predictions import (
+    _announced_lineup,
+    aggregate_player_stats,
+    reliability_score,
+    roster_summary,
+)
 from cs2model.dataio import _team_player_snapshot_summary
 from cs2model.features import (
     ANNOUNCED_LINEUP_FEATURE_COLUMNS,
@@ -112,6 +117,128 @@ class PlayerRosterAggregationTests(unittest.TestCase):
         self.assertEqual(result["distribution"]["covered_players"], 5)
         self.assertEqual(result["distribution"]["maps_min"], 12)
         self.assertAlmostEqual(result["avg"]["Rating 3.0"], 1.03)
+
+    def test_complete_match_lineup_overrides_incomplete_team_profile(self) -> None:
+        profiles = {
+            "13613": {
+                "squad": [
+                    {"id": "14273", "name": "iDISBALANCE"},
+                    {"id": "20197", "name": "faydett"},
+                    {"id": "20948", "name": "lov1kus"},
+                ]
+            }
+        }
+        player_stats = {
+            player_id: {
+                "windows": {"past3months": _snapshot(rating, 20)},
+                "preferred": _snapshot(rating, 20),
+                "preferred_time_filter": "past3months",
+            }
+            for player_id, rating in (
+                ("14273", 0.96),
+                ("20197", 1.02),
+                ("20948", 1.05),
+            )
+        }
+        snapshot = {
+            "prematch_lineups": {
+                "team1": {
+                    "hltv_team_id": "13613",
+                    "players": [
+                        {"hltv_player_id": "14273", "nickname": "iDISBALANCE"},
+                        {"hltv_player_id": "20197", "nickname": "faydett"},
+                        {"hltv_player_id": "20948", "nickname": "lov1kus"},
+                        {
+                            "hltv_player_id": "24726",
+                            "nickname": "z3ndeR",
+                            "rating": None,
+                            "kast": None,
+                        },
+                        {
+                            "hltv_player_id": "25111",
+                            "nickname": "redzed",
+                            "rating": 1.0,
+                            "kast": 70.7,
+                        },
+                    ],
+                }
+            }
+        }
+
+        announced = _announced_lineup(snapshot, "team1", "13613")
+        result = roster_summary("13613", profiles, player_stats, announced)
+        players = {player["id"]: player for player in result["players"]}
+
+        self.assertEqual(result["roster_source"], "prematch_announced_lineup")
+        self.assertTrue(result["announced_lineup_complete"])
+        self.assertEqual(set(players), {"14273", "20197", "20948", "24726", "25111"})
+        self.assertAlmostEqual(result["coverage"], 3 / 5)
+        self.assertEqual(result["distribution"]["covered_players"], 3)
+        self.assertIsNone(players["24726"]["stats"])
+        self.assertEqual(players["25111"]["stats"]["stats"]["Rating 3.0"], 1.0)
+        self.assertEqual(players["25111"]["stats_source"], "HLTV.match_prematch_lineup")
+        self.assertEqual(result["integrity"]["status"], "confirmed")
+        self.assertTrue(result["integrity"]["announced_matches_rendered"])
+
+    def test_partial_announced_lineup_is_not_lost_or_counted_as_full_coverage(self) -> None:
+        profiles = {
+            "200": {
+                "squad": [
+                    {"id": "1", "name": "one"},
+                    {"id": "2", "name": "two"},
+                    {"id": "3", "name": "three"},
+                ]
+            }
+        }
+        player_stats = {
+            str(player_id): {
+                "windows": {"past3months": _snapshot(1.0, 20)},
+                "preferred": _snapshot(1.0, 20),
+                "preferred_time_filter": "past3months",
+            }
+            for player_id in range(1, 5)
+        }
+        snapshot = {
+            "prematch_lineups": {
+                "team1": {
+                    "hltv_team_id": "200",
+                    "players": [
+                        {"hltv_player_id": str(player_id), "nickname": f"p{player_id}"}
+                        for player_id in range(1, 5)
+                    ],
+                }
+            }
+        }
+
+        announced = _announced_lineup(snapshot, "team1", "200")
+        result = roster_summary("200", profiles, player_stats, announced)
+
+        self.assertEqual({player["id"] for player in result["players"]}, {"1", "2", "3", "4"})
+        self.assertEqual(result["coverage"], 4 / 5)
+        self.assertFalse(result["announced_lineup_complete"])
+        self.assertEqual(result["integrity"]["status"], "announced_incomplete")
+        self.assertEqual(result["integrity"]["announced_players"], 4)
+
+    def test_reliability_penalizes_three_of_five_player_coverage(self) -> None:
+        entry = {
+            "format": "bo3",
+            "data_quality": {"real_pre_match_snapshot": True},
+            "team1": {"name": "Bebop"},
+            "team2": {"name": "Falcons Force"},
+        }
+        base = {
+            "matches_team1": 30,
+            "matches_team2": 30,
+            "glicko_rd_team1": 80,
+            "glicko_rd_team2": 80,
+            "player_coverage_team2": 1.0,
+        }
+
+        complete = reliability_score(entry, {**base, "player_coverage_team1": 1.0})
+        incomplete = reliability_score(entry, {**base, "player_coverage_team1": 0.6})
+
+        self.assertEqual(complete, 1.0)
+        self.assertEqual(incomplete, 0.9)
 
     def test_database_join_uses_the_same_common_window_point_in_time(self) -> None:
         conn = sqlite3.connect(":memory:")

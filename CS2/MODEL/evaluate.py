@@ -89,7 +89,10 @@ def load_real_rows(db_path: Path, thresholds: dict[str, int]) -> tuple[list[dict
         odds = odds_by_id.get(m.get("id"), {})
         row = dict(feats)
         row["label"] = int(y[i])
-        row["period"] = int(_period_index(m.get("date_obj")))
+        # ``build_training_frame`` exposes the printable date in ``meta`` but
+        # keeps the parsed datetime on the normalized source row. Using the
+        # absent ``meta["date_obj"]`` collapses every match into period zero.
+        row["period"] = int(_period_index(odds.get("date_obj")))
         row["opening_prob_t1"] = odds.get("opening_odds_t1")
         row["opening_odds_t1"] = odds.get("opening_odds_decimal_t1")
         row["opening_odds_t2"] = odds.get("opening_odds_decimal_t2")
@@ -103,12 +106,44 @@ def load_real_rows(db_path: Path, thresholds: dict[str, int]) -> tuple[list[dict
 def _families_from_config(F: Any, thresholds: dict[str, int]) -> list[Family]:
     """Mapea las familias auto-activables a la definicion del harness."""
     table = [
+        ("map_box_scores", F.MAP_ASSET_FEATURE_COLUMNS, "asset_available", 200),
+        ("event_history", F.EVENT_HISTORY_FEATURE_COLUMNS, "event_history_available", 200),
         ("analytics", F.ANALYTICS_FEATURE_COLUMNS, "analytics_available", 120),
+        (
+            "analytics_extended",
+            F.ANALYTICS_EXTENDED_FEATURE_COLUMNS,
+            "analytics_extended_available",
+            200,
+        ),
+        (
+            "announced_lineups",
+            F.ANNOUNCED_LINEUP_FEATURE_COLUMNS,
+            "announced_lineup_available",
+            200,
+        ),
+        ("event_metadata", F.EVENT_METADATA_FEATURE_COLUMNS, "event_metadata_available", 300),
         ("player_snapshots", F.PLAYER_FEATURE_COLUMNS, "player_snapshot_available", 200),
         ("rankings", F.RANKING_FEATURE_COLUMNS, "ranking_available", 200),
         ("roster", F.ROSTER_FEATURE_COLUMNS, "roster_available", 200),
-        ("map_box_scores", F.MAP_ASSET_FEATURE_COLUMNS, "asset_available", 200),
-        ("event_history", F.EVENT_HISTORY_FEATURE_COLUMNS, "event_history_available", 200),
+        ("mov_rating", F.MOV_FEATURE_COLUMNS, "mov_available", 800),
+        ("team_trueskill", F.TRUESKILL_FEATURE_COLUMNS, "trueskill_available", 800),
+        ("player_rating", F.PLAYER_RATING_FEATURE_COLUMNS, "player_skill_available", 200),
+        ("strength_of_schedule", F.SOS_FEATURE_COLUMNS, "sos_available", 800),
+        (
+            "bayesian_bradley_terry",
+            F.BAYES_BT_FEATURE_COLUMNS,
+            "bayesian_bt_available",
+            800,
+        ),
+        ("kalman_state_space", F.KALMAN_FEATURE_COLUMNS, "kalman_available", 800),
+        (
+            "bo3_map_compositional",
+            F.BO3_COMPOSITIONAL_FEATURE_COLUMNS,
+            "bo3_compositional_available",
+            500,
+        ),
+        ("regime", F.REGIME_FEATURE_COLUMNS, "regime_available", 200),
+        ("context", F.CONTEXT_FEATURE_COLUMNS, "context_available", 200),
     ]
     out = []
     for name, cols, avail, default in table:
@@ -168,8 +203,14 @@ def _dataset_hash(rows: list[dict[str, Any]]) -> str:
 def run_manifest(rows: list[dict[str, Any]], cfg: EvalConfig, args: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
     summary = {}
     for window, res in results.items():
-        mm = res.get("models", {}).get("model", {})
+        primary_name = (
+            "model"
+            if "model" in res.get("models", {})
+            else res.get("best_combo")
+        )
+        mm = res.get("models", {}).get(primary_name, {})
         summary[window] = {
+            "primary_model": primary_name,
             "n_eval": res.get("n_eval"),
             "log_loss": mm.get("log_loss"),
             "brier": mm.get("brier"),

@@ -1,15 +1,30 @@
 # EVALUATION — harness de medición honesta (walk-forward anidado)
 
-Este paso **no busca subir accuracy**: busca **medirla honestamente**. Arregla el
-sesgo L1 de [AUDIT.md](AUDIT.md): hoy el modelo de producción se selecciona
-sobre el **mismo** conjunto OOS que luego se reporta. El harness anidado separa
-*decidir* de *medir*.
+Este paso **no busca subir accuracy**: busca **medirla honestamente**. El sesgo
+L1 detectado en [AUDIT.md](AUDIT.md) ya está cerrado: tanto producción como el
+harness anidado separan *decidir* de *medir* y ninguna etiqueta elige el modelo
+que la predice.
 
 - Motor: [`CS2/MODEL/cs2model/evaluation.py`](../MODEL/cs2model/evaluation.py) (numpy puro, fitter enchufable).
 - CLI: [`CS2/MODEL/evaluate.py`](../MODEL/evaluate.py).
 - Config: sección `evaluation:` en [`CS2/MODEL/config.yaml`](../MODEL/config.yaml).
 - Tests: [`CS2/TESTS/test_eval_framework.py`](../TESTS/test_eval_framework.py).
-- No toca `train.py` (producción intacta). Es una capa de medición aparte.
+- Produccion: `train.py` usa desde 2026-07-27 la misma disciplina causal para
+  seleccionar candidatos; el harness sigue siendo la certificacion independiente.
+
+## Estado actual (2026-07-27)
+
+- **L1 cerrado en produccion:** `nested_model_policy` elige el candidato de cada
+  semana usando solo OOS de semanas anteriores. La metrica publicada pertenece a
+  esa politica; `production_model` es el candidato elegido con todo el OOS ya
+  cerrado para ajustar el siguiente periodo.
+- **L1 cerrado en el zoo:** `nested_policy` decide modelo y assembly dentro de
+  cada `outer_train`. `diagnostic_best_combo` nunca se presenta como evidencia
+  promocionable sobre el mismo outer test.
+- **Calibracion sin in-sample:** se ajusta sobre OOS interno y el metodo se elige
+  en una cola temporal separada.
+- **L2 real:** `TESTS/test_leakage_audit.py` reconstruye todas las columnas
+  enriquecidas por prefijos de `cs2.db` y audita los selectores as-of.
 
 ---
 
@@ -84,6 +99,8 @@ feature mira al futuro, difieren → `PointInTimeError`. Tests incluidos:
 - **recencia causal**: los pesos dependen solo de fechas ≤ t y son monótonos.
 - **gap respetado**: `train_period_max ≤ test_period_min − gap` en cada fold.
 - **el test externo no influye**: las decisiones internas no dependen del OOS externo.
+- **snapshots reales enriquecidos**: odds de apertura, Analytics, lineups y stats
+  de jugador elegidos por los loaders nunca cruzan el inicio del partido.
 
 > Límite honesto: la reconstrucción detecta features que usan partidos **futuros**.
 > El uso del **propio resultado** del partido se previene por diseño (la BBDD es
@@ -96,29 +113,34 @@ feature mira al futuro, difieren → `PointInTimeError`. Tests incluidos:
 - Config versionada (`evaluation:` en `config.yaml`; overrides por CLI `--gap/--outer-step`).
 - **Run manifest** por evaluación (commit git, SHA-256 del dataset, params, versiones,
   métricas) → línea en `experiments.jsonl`.
-- Deps críticas **pineadas** en `requirements.txt` (`numpy<3`, `pandas<3`,
-  `scikit-learn<2`, `lightgbm<5`) para poder recargar `model.pkl` y reproducir números.
+- `requirements.txt` conserva rangos; `requirements.lock.txt` fija el grafo
+  completo resuelto con Python 3.12 y es el fichero instalado por CI.
 
 ## 7. Números del baseline (estado)
 
-**No es posible recomputar el baseline REAL en el entorno de desarrollo** (sin
-`cs2.db`, sin red, sin stack ML completo). Lo que sí está **validado ejecutando** el
-harness aquí es el propio motor, sobre **datos sintéticos deterministas** (seed 42):
+Recomputado sobre la BBDD real el 27-07-2026. El adaptador conserva 47 periodos
+semanales distintos; una prueba de regresión impide volver a colapsar las fechas
+en un único periodo. PAV/isotónica también se valida con 100.000 observaciones
+para evitar overflow en históricos grandes.
 
 | Ventana | n_eval | log_loss (modelo) | ROC-AUC | fav_acc recomputada |
 |---|---:|---:|---:|---:|
-| expandido (sintético) | 700 | ~0.624 | ~0.72 | ~0.654 |
-| deslizante (sintético) | 700 | ~0.623 | ~0.72 | ~0.656 |
+| expanding (real) | 7.290 | 0,6689 | 0,6179 | 59,30% |
+| sliding (real) | 7.290 | 0,6689 | 0,6179 | 59,30% |
 
-> Son números **sintéticos** que solo demuestran que el harness corre, reporta
-> baselines y reproduce el patrón "~65% de acierto del favorito". El baseline
-> **real** (recomputo honesto del 64.4% de `REPORT.md`, que se espera **≤** por
-> quitar el sesgo de selección L1) se obtiene con `python MODEL\evaluate.py --window both`
-> sobre tu `cs2.db`. Si me pasas la BBDD, lo recomputo y actualizo esta tabla.
+Este CLI usa el fitter logístico NumPy mínimo y actúa como control independiente
+del protocolo; no es el candidato productivo. Elo obtiene log loss `0,6578`.
+La evaluación del zoo con fitters reales está en `MODEL_COMPARISON.md`: su
+`nested_policy` logra `0,6338`, mientras producción logra `0,6318`.
 
-Los tests (`pytest TESTS/test_eval_framework.py`) pasan (8/8) con numpy puro.
+Expanding y sliding son iguales mientras los conjuntos train/test de todos los
+folds coincidan (47 semanas frente a `train_width=52`). `compare_models.py`
+comprueba los conjuntos exactos y reutiliza el resultado equivalente; cuando el
+histórico supere la ventana, volverá a ejecutar ambos.
+
+Los tests (`pytest TESTS/test_eval_framework.py`) pasan (10/10).
 
 ---
 
-*Rama `feature/eval-framework`. Mide, no optimiza. Producción (`train.py`) sin cambios;
-en un PR posterior se alineará su selección a este protocolo anidado.*
+*La medicion independiente y la seleccion productiva comparten la misma regla:
+ninguna etiqueta puede decidir el modelo que la predice.*

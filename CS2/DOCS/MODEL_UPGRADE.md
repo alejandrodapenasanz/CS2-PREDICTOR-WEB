@@ -10,6 +10,23 @@ log loss, mejorar calibración y CLV**, no perseguir accuracy bruta. Model A sig
 - Block-wise + activación + driver: [`cs2model/blockwise.py`](../MODEL/cs2model/blockwise.py)
 - CLI/reporte: [`MODEL/compare_models.py`](../MODEL/compare_models.py)
 
+## Estado metodologico actual (2026-07-27)
+
+El reporte separa dos conceptos:
+
+- `nested_policy`: metrica primaria. En cada outer fold elige modelo y assembly
+  con una cola temporal de `outer_train`, antes de observar el test.
+- `diagnostic_best_combo`: mejor combo fijo al mirar todo el outer OOS. Sirve
+  para investigar, pero no se promociona usando esa misma cifra.
+
+El adaptador real expone todas las familias auto-gated de produccion. Una familia
+solo entra en el forward selection cuando alcanza su cobertura dentro del train
+del fold; despues debe demostrar mejora de log loss OOS. El modo `profiles`
+agrupa por patron y ajusta una vez por grupo, no una vez por fila.
+Optuna y el forward selection se recalculan cada seis folds externos
+(`--retune-folds`, unas 24 semanas con `outer_step=4`); entre medias se reutiliza
+exclusivamente la ultima decision causal.
+
 ## A. Zoo de algoritmos
 Interfaz común `ZooModel` (`.fit/.predict_proba`) con **política de missing** por
 modelo. Disponibles según entorno (`available_models()`):
@@ -34,10 +51,10 @@ Tres estrategias comparadas por log loss WF (`assembly`):
 - **(iii) two_stage** — base con features siempre disponibles + enriquecido que solo
   actúa donde esas features existen (gating por cobertura).
 
-**Activación de familias DATA-DRIVEN**: forward-greedy que añade una familia **solo
-si baja el log loss OOS** en la CV interna (con embargo). Sustituye los umbrales
-fijos (analytics 154, rankings 209, snapshots 200, 50 LAN…). La respuesta a
-"¿es el híbrido lo mejor?" está en §Veredicto.
+**Activación de familias DATA-DRIVEN**: primero aplica un minimo de cobertura
+causal dentro de `outer_train`; luego un forward-greedy añade una familia **solo
+si baja el log loss OOS** en la CV interna (con embargo). El umbral evita decidir
+con unas pocas filas; no sustituye la prueba empirica de mejora.
 
 ## D. Calibración
 Suite en split **temporal** separado: **Platt, isotónica, Beta (Kull), Venn-Abers
@@ -72,13 +89,29 @@ python MODEL\compare_models.py --window both --n-trials 40         # REAL (cs2.d
 python MODEL\compare_models.py --models logistic_en,lightgbm,hist_gb,random_forest,extra_trees --assemblies indicators,profiles,two_stage
 ```
 Salida: `MODEL/results/MODEL_COMPARISON.md` + `model_comparison.json` + línea en
-`experiments.jsonl`. El **Model A de producción** es el `best_combo` por log loss.
+`experiments.jsonl`. `best_combo=nested_policy` es la estimacion insesgada de la
+politica; el mejor combo fijo se registra aparte como diagnostico.
 
-## Validación en el entorno de desarrollo
-numpy/scipy/scikit-learn/optuna/**LightGBM** instalados → el zoo (menos xgb/cat),
-Optuna, la suite de calibración y los 3 assemblies se **ejecutan y testean aquí**
-sobre datos sintéticos con estructura block-missing. Tests: `pytest TESTS/test_model_zoo.py`.
-xgboost/catboost/TabPFN quedan import-guarded (se validan en tu máquina).
+## Validación real (27-07-2026)
+
+El comando exacto `python MODEL\compare_models.py --window both --n-trials 40
+--verbose` se ejecutó sobre 9.726 filas (`n_eval=7.290`). Esta certificación
+comparó `logistic_en` y `lightgbm` en los tres assemblies; el artefacto productivo
+ya evalúa además CatBoost, XGBoost y Random Forest como miembros del Super Learner.
+
+| Estimación causal | Accuracy | Log loss | Brier | AUC | ECE |
+|---|---:|---:|---:|---:|---:|
+| Zoo `nested_policy` | 0,6379 | 0,6338 | 0,2215 | 0,6837 | 0,0223 |
+| Producción `nested_model_policy` | **0,6412** | **0,6318** | **0,2209** | **0,6858** | **0,0099** |
+
+El mejor combo fijo retrospectivo fue `logistic_en|indicators` (`log loss
+0,6325`), pero no es promocionable con el mismo OOS usado para identificarlo.
+Conclusión: **se mantiene `super_learner_cal` como ajuste de producción**; la
+política causal productiva supera al zoo en log loss y calibración.
+
+Los modelos instalados y detectados son logistic_en, Random Forest, ExtraTrees,
+HistGB, LightGBM, XGBoost y CatBoost. Las dependencias opcionales siguen
+import-guarded para otros entornos.
 
 ---
 
@@ -135,6 +168,6 @@ enrutar/mezclar submodelos ruidosos).
 
 > Veredicto **provisional-empírico** (sintético + coberturas reales + teoría, las
 > tres apuntan igual). El definitivo se recomputa en tu máquina:
-> `python MODEL\compare_models.py --window both --n-trials 40` sobre `cs2.db`;
-> el `best_combo` del reporte es el Model A de producción. Si me pasas la BBDD, lo
-> recomputo y fijo esta tabla con datos reales.
+> `python MODEL\compare_models.py --window both --n-trials 40` sobre `cs2.db`.
+> Compara `nested_policy` con produccion; `diagnostic_best_combo` no se promociona
+> por si solo porque fue elegido mirando el mismo outer OOS.

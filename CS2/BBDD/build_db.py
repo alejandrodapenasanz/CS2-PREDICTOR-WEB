@@ -59,7 +59,10 @@ DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
 DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
 DEFAULT_ROSTER_HISTORY = ROOT / "PIPELINE" / "master" / "roster_history.json"
 DEFAULT_BACKUP_DIR = ROOT / "BBDD" / "backups"
-DEFAULT_MIRROR_BACKUP_DIR = Path(os.environ.get("CS2_BACKUP_MIRROR_DIR", ROOT.parent / "CS2-Predictor-Backups"))
+_MIRROR_BACKUP_ENV = os.environ.get("CS2_BACKUP_MIRROR_DIR", "").strip()
+DEFAULT_MIRROR_BACKUP_DIR: Path | None = (
+    Path(_MIRROR_BACKUP_ENV).expanduser() if _MIRROR_BACKUP_ENV else None
+)
 
 
 def utcnow() -> str:
@@ -72,6 +75,7 @@ def create_schema(conn: sqlite3.Connection) -> None:
 
 MATCH_LIVE_COLUMNS: dict[str, str] = {
     "hltv_match_id": "TEXT",
+    "datetime_precision": "TEXT NOT NULL DEFAULT 'exact' CHECK (datetime_precision IN ('exact','date_only'))",
     "status": "TEXT NOT NULL DEFAULT 'completed' CHECK (status IN ('scheduled','pending_result','completed'))",
     "data_tier": "TEXT NOT NULL DEFAULT 'historical_seed' CHECK (data_tier IN ('historical_seed','prematch_captured','completed'))",
     "prematch_captured_at_utc": "TEXT",
@@ -87,9 +91,22 @@ MATCH_LIVE_COLUMNS: dict[str, str] = {
 
 EVENT_LIVE_COLUMNS: dict[str, str] = {
     "hltv_event_id": "TEXT",
+    "prize_pool_raw": "TEXT",
+    "tier_source": "TEXT",
     "teams_competing": "INTEGER",
     "source_captured_at_utc": "TEXT",
     "source_file": "TEXT",
+}
+
+ODDS_LIVE_COLUMNS: dict[str, str] = {
+    "quality": (
+        "TEXT NOT NULL DEFAULT 'observed' "
+        "CHECK (quality IN ('observed','closing_observed','proxy','legacy_proxy'))"
+    ),
+    "seconds_to_start": "INTEGER",
+    "is_observed_closing": (
+        "INTEGER NOT NULL DEFAULT 0 CHECK (is_observed_closing IN (0,1))"
+    ),
 }
 
 PREDICTION_LIVE_COLUMNS: dict[str, str] = {
@@ -199,6 +216,11 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
         if column not in event_columns:
             conn.execute(f"ALTER TABLE events ADD COLUMN {column} {ddl}")
 
+    odds_columns = table_columns(conn, "odds")
+    for column, ddl in ODDS_LIVE_COLUMNS.items():
+        if column not in odds_columns:
+            conn.execute(f"ALTER TABLE odds ADD COLUMN {column} {ddl}")
+
     prediction_columns = table_columns(conn, "predictions")
     opportunity_schema_changed = False
     for column, ddl in PREDICTION_LIVE_COLUMNS.items():
@@ -208,6 +230,13 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
 
     conn.executescript(
         """
+        CREATE TABLE IF NOT EXISTS team_aliases (
+            alias_key   TEXT PRIMARY KEY,
+            alias_name  TEXT NOT NULL,
+            team_id     INTEGER NOT NULL REFERENCES teams(team_id),
+            source      TEXT NOT NULL DEFAULT 'ingest',
+            created_at_utc TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS fetch_state (
             entity_type   TEXT NOT NULL CHECK (entity_type IN
                             ('team_profile','player_stats','ranking_hltv','ranking_valve',
@@ -285,6 +314,45 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
             avg_rounds_won_in_losses REAL,
             PRIMARY KEY (analytics_snapshot_id, team_name, map_name)
         );
+        CREATE TABLE IF NOT EXISTS prediction_ledger (
+            ledger_id       INTEGER PRIMARY KEY,
+            match_id        INTEGER NOT NULL UNIQUE REFERENCES matches(match_id),
+            hltv_match_id   TEXT NOT NULL UNIQUE,
+            team1_id        INTEGER NOT NULL REFERENCES teams(team_id),
+            team2_id        INTEGER NOT NULL REFERENCES teams(team_id),
+            kickoff_utc     TEXT NOT NULL,
+            predicted_at_utc TEXT NOT NULL,
+            model_version   TEXT NOT NULL,
+            artifact_sha256 TEXT,
+            config_sha256   TEXT,
+            feature_policy_sha256 TEXT,
+            prob_team1      REAL NOT NULL CHECK (prob_team1 > 0 AND prob_team1 < 1),
+            decision_prob_team1 REAL CHECK (
+                decision_prob_team1 IS NULL OR
+                (decision_prob_team1 > 0 AND decision_prob_team1 < 1)
+            ),
+            reliability_score REAL,
+            prediction_json TEXT NOT NULL,
+            features_json   TEXT,
+            data_quality_json TEXT,
+            ledger_status   TEXT NOT NULL DEFAULT 'open'
+                                CHECK (ledger_status IN ('open','frozen','evaluated','invalid')),
+            invalid_reason  TEXT,
+            result_filled_at_utc TEXT,
+            actual_team1_win INTEGER CHECK (actual_team1_win IN (0,1)),
+            prediction_correct INTEGER CHECK (prediction_correct IN (0,1)),
+            realized_log_loss REAL,
+            realized_brier REAL,
+            created_at_utc TEXT NOT NULL,
+            updated_at_utc TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS health_gate_runs (
+            health_gate_run_id INTEGER PRIMARY KEY,
+            checked_at_utc TEXT NOT NULL,
+            phase          TEXT NOT NULL,
+            status         TEXT NOT NULL CHECK (status IN ('pass','warning','fail')),
+            report_json    TEXT NOT NULL
+        );
         CREATE UNIQUE INDEX IF NOT EXISTS idx_matches_hltv ON matches(hltv_match_id);
         CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status);
         CREATE INDEX IF NOT EXISTS idx_matches_tier ON matches(data_tier);
@@ -295,6 +363,23 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_analytics_map_stats_snapshot ON match_analytics_map_stats(analytics_snapshot_id, map_name);
         CREATE INDEX IF NOT EXISTS idx_predictions_opportunity
             ON predictions(model_version, opportunity_eligible, opportunity_rank);
+        CREATE INDEX IF NOT EXISTS idx_prediction_ledger_status
+            ON prediction_ledger(ledger_status, kickoff_utc);
+        CREATE INDEX IF NOT EXISTS idx_team_aliases_team ON team_aliases(team_id);
+        """
+    )
+    conn.execute(
+        """
+        UPDATE matches
+        SET datetime_precision = CASE
+            WHEN data_tier='historical_seed' AND instr(datetime_utc, 'T')=0
+                THEN 'date_only'
+            ELSE 'exact'
+        END
+        WHERE datetime_precision IS NULL
+           OR datetime_precision NOT IN ('exact','date_only')
+           OR (data_tier='historical_seed' AND instr(datetime_utc, 'T')=0
+               AND datetime_precision <> 'date_only')
         """
     )
     if opportunity_schema_changed:
@@ -347,6 +432,20 @@ def parse_int(value) -> int | None:
     return int(match.group(0)) if match else None
 
 
+def parse_money_amount(value) -> int | None:
+    """Parse HLTV amounts without turning "$5K" into 5."""
+    if value is None:
+        return None
+    text = str(value).strip().upper().replace(",", "")
+    match = re.search(r"(\d+(?:\.\d+)?)\s*([KMB])?", text)
+    if not match:
+        return None
+    multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(
+        match.group(2) or "", 1
+    )
+    return int(round(float(match.group(1)) * multiplier))
+
+
 def load_master(master_path: Path | None) -> dict:
     if not master_path or not master_path.exists():
         return {}
@@ -368,6 +467,13 @@ def iter_odds_rows(point: dict, market_type: str):
     captured_at = point.get("captured_at")
     if not captured_at:
         return
+    is_observed_closing = bool(
+        market_type == "closing" and point.get("is_observed_closing")
+    )
+    quality = point.get("quality") or (
+        "closing_observed" if is_observed_closing else "observed"
+    )
+    seconds_to_start = safe_float(point.get("seconds_to_start"))
     providers = point.get("providers") or []
     if providers:
         for provider in providers:
@@ -382,6 +488,9 @@ def iter_odds_rows(point: dict, market_type: str):
                 "overround": safe_float(provider.get("overround")),
                 "run_id": point.get("run_id"),
                 "source_file": point.get("source_file"),
+                "quality": quality,
+                "seconds_to_start": seconds_to_start,
+                "is_observed_closing": int(is_observed_closing),
             }
         return
     yield {
@@ -395,6 +504,9 @@ def iter_odds_rows(point: dict, market_type: str):
         "overround": safe_float(point.get("overround")),
         "run_id": point.get("run_id"),
         "source_file": point.get("source_file"),
+        "quality": quality,
+        "seconds_to_start": seconds_to_start,
+        "is_observed_closing": int(is_observed_closing),
     }
 
 
@@ -409,7 +521,7 @@ def insert_odds(cur: sqlite3.Cursor, master: dict, match_id_map: dict[str, int])
         closing = record.get("closing_odds") or {}
         if opening:
             points.append(("opening", opening))
-        if closing:
+        if closing and closing.get("is_observed_closing"):
             points.append(("closing", closing))
         seen_live: set[tuple[str, str]] = set()
         for point in record.get("odds_history") or []:
@@ -423,8 +535,9 @@ def insert_odds(cur: sqlite3.Cursor, master: dict, match_id_map: dict[str, int])
             for row in iter_odds_rows(point, market_type):
                 cur.execute(
                     "INSERT OR IGNORE INTO odds(match_id, bookmaker, captured_at_utc, market_type, "
-                    "odds_t1, odds_t2, prob_t1, prob_t2, overround, run_id, source_file) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    "odds_t1, odds_t2, prob_t1, prob_t2, overround, run_id, source_file, "
+                    "quality, seconds_to_start, is_observed_closing) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         mid,
                         row["bookmaker"],
@@ -437,6 +550,9 @@ def insert_odds(cur: sqlite3.Cursor, master: dict, match_id_map: dict[str, int])
                         row["overround"],
                         row["run_id"],
                         row["source_file"],
+                        row["quality"],
+                        row["seconds_to_start"],
+                        row["is_observed_closing"],
                     ),
                 )
                 inserted += cur.rowcount
@@ -1367,13 +1483,17 @@ def _event_id_for(
             row = cur.execute("SELECT event_id FROM events WHERE name = ?", (event_name,)).fetchone()
         if row is None:
             cur.execute(
-                "INSERT INTO events(name, hltv_event_id, is_lan, prize_pool, teams_competing, source_captured_at_utc, source_file) "
-                "VALUES (?,?,?,?,?,?,?)",
+                "INSERT INTO events(name, hltv_event_id, is_lan, prize_pool, prize_pool_raw, "
+                "tier, tier_source, teams_competing, source_captured_at_utc, source_file) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (
                     event_name,
                     hltv_event_id,
                     0,
-                    parse_int(metadata.get("prize_pool")),
+                    parse_money_amount(metadata.get("prize_pool")),
+                    metadata.get("prize_pool_raw"),
+                    metadata.get("tier"),
+                    metadata.get("tier_source"),
                     parse_int(metadata.get("teams_competing")),
                     metadata.get("captured_at"),
                     metadata.get("source_file"),
@@ -1389,6 +1509,9 @@ def _event_id_for(
         UPDATE events
         SET hltv_event_id=COALESCE(hltv_event_id, ?),
             prize_pool=COALESCE(?, prize_pool),
+            prize_pool_raw=COALESCE(?, prize_pool_raw),
+            tier=COALESCE(?, tier),
+            tier_source=COALESCE(?, tier_source),
             teams_competing=COALESCE(?, teams_competing),
             source_captured_at_utc=CASE WHEN ? IS NOT NULL THEN ? ELSE source_captured_at_utc END,
             source_file=CASE WHEN ? IS NOT NULL THEN ? ELSE source_file END
@@ -1396,7 +1519,10 @@ def _event_id_for(
         """,
         (
             hltv_event_id,
-            parse_int(metadata.get("prize_pool")),
+            parse_money_amount(metadata.get("prize_pool")),
+            metadata.get("prize_pool_raw"),
+            metadata.get("tier"),
+            metadata.get("tier_source"),
             parse_int(metadata.get("teams_competing")),
             metadata.get("captured_at"),
             metadata.get("captured_at"),
@@ -1422,10 +1548,37 @@ def _team_id_for(
 ) -> int:
     hltv_key = str(hltv_id or "").strip()
     if hltv_key and hltv_key in team_hltv_cache:
-        return team_hltv_cache[hltv_key]
+        team_id = team_hltv_cache[hltv_key]
+        alias_key = dataio.clean_team(name)
+        if alias_key:
+            cur.execute(
+                "INSERT OR IGNORE INTO team_aliases(alias_key, alias_name, team_id, source, created_at_utc) "
+                "VALUES (?,?,?,?,?)",
+                (alias_key, name, team_id, "hltv_id", utcnow()),
+            )
+        return team_id
     key = dataio.clean_team(name)
     if key in team_cache:
-        return team_cache[key]
+        team_id = team_cache[key]
+        if hltv_key.isdigit():
+            current = cur.execute(
+                "SELECT hltv_id FROM teams WHERE team_id=?", (team_id,)
+            ).fetchone()
+            existing_for_hltv = cur.execute(
+                "SELECT team_id FROM teams WHERE hltv_id=?", (int(hltv_key),)
+            ).fetchone()
+            if current and current[0] is None and existing_for_hltv is None:
+                cur.execute(
+                    "UPDATE teams SET hltv_id=? WHERE team_id=?",
+                    (int(hltv_key), team_id),
+                )
+                team_hltv_cache[hltv_key] = team_id
+        cur.execute(
+            "INSERT OR IGNORE INTO team_aliases(alias_key, alias_name, team_id, source, created_at_utc) "
+            "VALUES (?,?,?,?,?)",
+            (key, name, team_id, "canonical_name", utcnow()),
+        )
+        return team_id
     hltv_int = int(hltv_key) if hltv_key.isdigit() else None
     cur.execute(
         "INSERT OR IGNORE INTO teams(name, hltv_id) VALUES (?,?)",
@@ -1441,6 +1594,11 @@ def _team_id_for(
     team_cache[key] = team_id
     if hltv_key:
         team_hltv_cache[hltv_key] = team_id
+    cur.execute(
+        "INSERT OR IGNORE INTO team_aliases(alias_key, alias_name, team_id, source, created_at_utc) "
+        "VALUES (?,?,?,?,?)",
+        (key, name, team_id, "created", utcnow()),
+    )
     return team_id
 
 
@@ -1481,16 +1639,17 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
     state = ChronologicalState()
     n_ratings = 0
     n_features = 0
-    for row in rows:
+    def write_before(row: dict[str, Any]) -> None:
+        nonlocal n_ratings, n_features
         match_id = int(row["db_match_id"]) if row.get("db_match_id") else None
         if match_id is None:
             hltv_id = str(row.get("id") or "")
             match_id = _match_id_for_hltv(conn, hltv_id)
         if match_id is None:
-            continue
+            return
         team_ids = match_team_ids.get(match_id)
         if team_ids is None:
-            continue
+            return
         date_obj = row.get("date_obj")
         period = _period_index(date_obj)
         state._advance_to(period)
@@ -1518,7 +1677,24 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
                 ),
             )
             n_features += 1
-        state.observe(row)
+
+    index = 0
+    while index < len(rows):
+        day = str(rows[index].get("date") or "")[:10]
+        end = index + 1
+        while end < len(rows) and str(rows[end].get("date") or "")[:10] == day:
+            end += 1
+        day_rows = rows[index:end]
+        if any(row.get("datetime_precision") == "date_only" for row in day_rows):
+            for row in day_rows:
+                write_before(row)
+            for row in day_rows:
+                state.observe(row)
+        else:
+            for row in day_rows:
+                write_before(row)
+                state.observe(row)
+        index = end
     return {"ratings_history_rows": n_ratings, "match_features_rows": n_features}
 
 
@@ -1570,16 +1746,17 @@ def seed_database_once(
         bracket = context.get("bracket") if context and context.get("bracket") in {"upper", "lower"} else None
         winner_team_id = team1_id if row["team1_win"] else team2_id
         cur.execute(
-            "INSERT INTO matches(hltv_match_id, event_id, datetime_utc, team1_id, team2_id, best_of, "
+            "INSERT INTO matches(hltv_match_id, event_id, datetime_utc, datetime_precision, team1_id, team2_id, best_of, "
             "stage, environment, stage_detail, incentive_label, high_stakes, opening_match, "
             "winner_advances, loser_eliminated, bracket, context_json, status, data_tier, "
             "prematch_captured_at_utc, result_filled_at_utc, has_context, winner_team_id, score_t1, score_t2) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(hltv_match_id) DO NOTHING",
             (
                 str(row["id"]),
                 event_id,
                 row["date"],
+                "date_only",
                 team1_id,
                 team2_id,
                 {"bo1": 1, "bo3": 3, "bo5": 5}.get(row["format"], 3),
@@ -1669,12 +1846,20 @@ def main() -> int:
     parser.add_argument("--db", default=str(DEFAULT_DB))
     parser.add_argument("--master", default=str(DEFAULT_MASTER))
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR))
-    parser.add_argument("--mirror-backup-dir", default=str(DEFAULT_MIRROR_BACKUP_DIR))
+    parser.add_argument(
+        "--mirror-backup-dir",
+        default=str(DEFAULT_MIRROR_BACKUP_DIR) if DEFAULT_MIRROR_BACKUP_DIR else "",
+        help="Espejo opcional; desactivado salvo ruta explicita o CS2_BACKUP_MIRROR_DIR.",
+    )
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--no-mirror-backup", action="store_true")
     args = parser.parse_args()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
-    mirror_dir = None if args.no_backup or args.no_mirror_backup else Path(args.mirror_backup_dir)
+    mirror_dir = (
+        None
+        if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir
+        else Path(args.mirror_backup_dir)
+    )
     stats = seed_database_once(
         Path(args.raw),
         Path(args.db),

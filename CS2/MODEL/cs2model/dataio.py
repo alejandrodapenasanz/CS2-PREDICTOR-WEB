@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .identity import is_provisional_team_name
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -212,13 +214,19 @@ def load_results(
         if floor and date_str and date_str < floor:
             continue
         name1, name2 = t1.get("name"), t2.get("name")
-        if not name1 or not name2:
+        if (
+            not name1
+            or not name2
+            or is_provisional_team_name(name1)
+            or is_provisional_team_name(name2)
+        ):
             continue
         rows.append(
             {
                 "id": str(item.get("id")),
                 "date": date_str,
                 "date_obj": parse_date(date_str),
+                "datetime_precision": "date_only",
                 "event": item.get("event") or "",
                 "link": item.get("link") or "",
                 "format": fmt,
@@ -366,22 +374,31 @@ def _latest_snapshot_by_match(conn: sqlite3.Connection, kind: str) -> dict[str, 
 def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict[str, Any]]:
     if market_type not in {"opening", "closing"}:
         raise ValueError("market_type must be opening or closing")
+    odds_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(odds)").fetchall()
+    }
+    observed_closing_clause = (
+        "AND (? <> 'closing' OR odds.is_observed_closing = 1)"
+        if "is_observed_closing" in odds_columns else ""
+    )
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT odds.match_id, odds.bookmaker, odds.captured_at_utc,
                    odds.odds_t1, odds.odds_t2, odds.prob_t1, odds.prob_t2
             FROM odds
             LEFT JOIN matches m ON m.match_id = odds.match_id
             WHERE odds.market_type = ?
               AND (odds.prob_t1 IS NOT NULL OR odds.odds_t1 IS NOT NULL)
+              {observed_closing_clause}
               -- Guard anti-fuga: descarta odds "opening" capturadas DESPUES del
               -- inicio del partido (no deberian existir, pero lo blinda).
               AND (odds.captured_at_utc IS NULL OR m.datetime_utc IS NULL
                    OR odds.captured_at_utc <= m.datetime_utc)
             ORDER BY odds.match_id, odds.captured_at_utc, odds.bookmaker
             """,
-            (market_type,),
+            (market_type, market_type)
+            if observed_closing_clause else (market_type,),
         ).fetchall()
     except sqlite3.Error:
         return {}
@@ -646,8 +663,18 @@ def _team_player_snapshot_summary(
         "maps_per_player_min": min((int(row["maps"] or 0) for row in selected), default=0),
         "time_filter": selected_window,
         "age_days_max": 0.0,
+        "captured_at_min": None,
+        "captured_at_max": None,
         "metrics": {},
     }
+    captured_values = sorted(
+        str(row["captured_at_utc"])
+        for row in selected
+        if row["captured_at_utc"]
+    )
+    if captured_values:
+        out["captured_at_min"] = captured_values[0]
+        out["captured_at_max"] = captured_values[-1]
     if match_dt:
         ages = []
         for row in selected:
@@ -931,10 +958,20 @@ def load_training_rows_from_db(
         odds_by_match = _opening_odds_by_match(conn)
         closing_odds_by_match = _closing_odds_by_match(conn)
         assets_by_hltv = _latest_snapshot_by_match(conn, "match_assets")
+        match_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
+        }
+        precision_select = (
+            "m.datetime_precision"
+            if "datetime_precision" in match_columns
+            else "CASE WHEN instr(m.datetime_utc, 'T')=0 THEN 'date_only' ELSE 'exact' END "
+                 "AS datetime_precision"
+        )
         rows = conn.execute(
-            """
-            SELECT
-                m.match_id, m.hltv_match_id, m.datetime_utc, m.team1_id, m.team2_id, m.best_of, m.stage,
+            f"""
+                SELECT
+                    m.match_id, m.hltv_match_id, m.datetime_utc, {precision_select},
+                m.team1_id, m.team2_id, m.best_of, m.stage,
                 m.environment, m.stage_detail, m.incentive_label, m.high_stakes,
                 m.opening_match, m.winner_advances, m.loser_eliminated, m.bracket,
                 m.context_json, m.score_t1, m.score_t2, m.winner_team_id,
@@ -988,6 +1025,11 @@ def load_training_rows_from_db(
         fmt = f"bo{bo}" if bo in (1, 3, 5) else "other"
         if fmt == "other":
             continue
+        if (
+            is_provisional_team_name(row["team1_name"])
+            or is_provisional_team_name(row["team2_name"])
+        ):
+            continue
         context_payload = _json_or_none(row["context_json"]) or {
             "environment": row["environment"],
             "stage": row["stage"],
@@ -1013,6 +1055,9 @@ def load_training_rows_from_db(
                 "db_match_id": match_id,
                 "date": date_text,
                 "date_obj": parse_date(str(row["datetime_utc"])),
+                "datetime_precision": row["datetime_precision"] or (
+                    "exact" if "T" in str(row["datetime_utc"] or "") else "date_only"
+                ),
                 "event": row["event_name"] or "",
                 "event_tier": row["event_tier"],
                 "link": f"https://www.hltv.org/matches/{hltv_match_id}/",

@@ -13,15 +13,26 @@ import random
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "MODEL"))
 
 import numpy as np  # noqa: E402
 
+import compare_models as comparison_cli  # noqa: E402
+import evaluate as evaluate_cli  # noqa: E402
+from train import AUTO_FEATURE_FAMILIES  # noqa: E402
+from cs2model import features as feature_module  # noqa: E402
 from cs2model.model_zoo import available_models, build_model  # noqa: E402
 from cs2model.calibration_suite import fit_calibrator, select_calibrator, ALL_METHODS  # noqa: E402
 from cs2model.evaluation import EvalConfig, Family  # noqa: E402
-from cs2model.blockwise import run_comparison, ComparisonConfig, select_families_cv, betting_clv  # noqa: E402
+from cs2model.blockwise import (  # noqa: E402
+    run_comparison,
+    ComparisonConfig,
+    select_families_cv,
+    betting_clv,
+    assembly_fit_predict,
+)
 
 _SMALL = {
     "random_forest": {"n_estimators": 40},
@@ -124,15 +135,115 @@ class BlockwiseTests(unittest.TestCase):
         self.assertIn("base_log_loss", log)
         self.assertIsInstance(active, list)  # puede entrar o no; la decision es por log loss OOS
 
+    def test_family_below_train_coverage_is_not_evaluated(self):
+        immature = [Family("extra", ("extra_feat",), "extra_available", 10_000)]
+        active, log = select_families_cv(
+            self.rows,
+            self.base,
+            immature,
+            "logistic_en",
+            self.cfg,
+        )
+        self.assertEqual(active, [])
+        self.assertEqual(log["eligible"], [])
+        self.assertEqual(log["skipped_below_coverage"], ["extra"])
+
+    def test_real_harness_exposes_every_production_auto_family(self):
+        harness = {
+            family.name
+            for family in evaluate_cli._families_from_config(feature_module, {})
+        }
+        production = {name for name, *_rest in AUTO_FEATURE_FAMILIES} | {"context"}
+        self.assertEqual(harness, production)
+
+    def test_equivalent_window_detection_compares_actual_fold_sets(self):
+        short_rows = [{"period": period} for period in range(30)]
+        long_rows = [{"period": period} for period in range(80)]
+        cfg = EvalConfig(
+            warmup_periods=8,
+            gap_periods=1,
+            outer_step=4,
+            train_width=52,
+        )
+
+        self.assertTrue(
+            comparison_cli._expanding_sliding_equivalent(short_rows, cfg)
+        )
+        self.assertFalse(
+            comparison_cli._expanding_sliding_equivalent(long_rows, cfg)
+        )
+
     def test_comparison_runs_and_picks_best(self):
         comp = ComparisonConfig(models=("logistic_en",), assemblies=("indicators", "two_stage"), n_trials=0)
         res = run_comparison(self.rows, self.base, self.fams, self.cfg, comp)
         self.assertGreater(res["n_eval"], 0)
-        self.assertIsNotNone(res["best_combo"])
+        self.assertEqual(res["best_combo"], "nested_policy")
+        self.assertIsNotNone(res["diagnostic_best_combo"])
         self.assertIn("elo", res["models"])
         self.assertIn("market", res["models"])
         for combo in ("logistic_en|indicators", "logistic_en|two_stage"):
             self.assertIn(combo, res["models"])
+        retuned = [
+            decision["logistic_en"]["retuned_this_fold"]
+            for decision in res["decisions"]
+        ]
+        self.assertTrue(retuned[0])
+        self.assertGreater(sum(retuned), 0)
+        self.assertLess(sum(retuned), len(retuned))
+
+    def test_last_outer_labels_cannot_change_its_combo_selection(self):
+        comp = ComparisonConfig(
+            models=("logistic_en",),
+            assemblies=("indicators", "two_stage"),
+            n_trials=0,
+        )
+        original = run_comparison(self.rows, self.base, self.fams, self.cfg, comp)
+        last = original["decisions"][-1]
+        changed = [
+            dict(
+                row,
+                label=(
+                    1 - row["label"]
+                    if last["test_period_min"] <= row["period"] <= last["test_period_max"]
+                    else row["label"]
+                ),
+            )
+            for row in self.rows
+        ]
+        altered = run_comparison(changed, self.base, self.fams, self.cfg, comp)
+        self.assertEqual(
+            original["decisions"][-1]["selected_combo"],
+            altered["decisions"][-1]["selected_combo"],
+        )
+        self.assertEqual(
+            original["decisions"][-1]["selection_scores"],
+            altered["decisions"][-1]["selection_scores"],
+        )
+
+    def test_profiles_batches_predictions_by_coverage_profile(self):
+        predict_rows = self.rows[-48:]
+        calls: list[int] = []
+
+        def fake_fit_predict(_model, _params, _recency, _train, predict, _cols):
+            calls.append(len(predict))
+            return np.full(len(predict), 0.5)
+
+        with patch("cs2model.blockwise._fit_predict", side_effect=fake_fit_predict):
+            predictions = assembly_fit_predict(
+                "profiles",
+                "logistic_en",
+                {},
+                0.0,
+                self.fams,
+                self.rows[:-48],
+                predict_rows,
+                self.base,
+                self.cfg,
+            )
+
+        self.assertEqual(predictions.shape, (len(predict_rows),))
+        self.assertLessEqual(len(calls), 2)
+        self.assertEqual(sum(calls), len(predict_rows))
 
     def test_betting_clv_uses_opening_not_closing(self):
         y = np.array([1, 0, 1])

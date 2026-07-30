@@ -134,7 +134,11 @@ La fórmula de rating de HLTV ha cambiado (2.0 → 2.1 → 3.0). La buena notici
 
 **Estado actual (2026-07-07):** `BBDD/cs2.db` es una fuente de verdad viva. `BBDD/build_db.py` crea/migra el esquema y siembra el historico solo si `matches` esta vacia; `BBDD/ingest.py` aplica cada run con upserts incrementales; `BBDD/export_master_json.py` genera el `master/matches.json` de compatibilidad desde SQLite. La ejecucion normal no borra ni reconstruye desde cero, para no perder odds, stats individuales ni snapshots que puedan cambiar en HLTV o en las casas.
 
-Definición: `BBDD/cs2_prediction_schema.sql`. Constructor reproducible: `BBDD/build_db.py`. BBDD física: `BBDD/cs2.db`, con backups en `BBDD/backups/` y espejo en `CS2-Predictor-Backups/`.
+Definición: `BBDD/cs2_prediction_schema.sql`. Constructor reproducible:
+`BBDD/build_db.py`. BBDD física: `BBDD/cs2.db`, con backups locales en
+`BBDD/backups/`. El espejo adicional está desactivado por defecto para no
+duplicar gigabytes en el mismo disco; se habilita solo apuntando
+`CS2_BACKUP_MIRROR_DIR` a otro disco o almacenamiento sincronizado.
 
 La BBDD separa tres cosas que no deben mezclarse:
 
@@ -238,6 +242,24 @@ Tablas clave y qué preservan:
 - `odds`: cuotas por bookmaker y timestamp, separando `opening`, `live` y `closing`. La apertura sirve para benchmark y EV; el cierre se guarda para auditoría, no como feature pre-partido.
 - `predictions`: congela la probabilidad pura (`prob_team1`), la probabilidad operativa (`decision_prob_team1`), fiabilidad, peso de mercado, política, favorito, cuota mínima de value (`decision_min_value_odds`, `team1_min_value_odds`, `team2_min_value_odds`), Best Opportunity point-in-time (`opportunity_score`, elegibilidad, ranking global/diario, `is_best_opportunity` y versión de política), contexto normalizado (`context_environment`, `context_stage`, `context_stage_detail`, `context_incentive_label`, `context_high_stakes`, `context_winner_advances`, `context_loser_eliminated`, `context_opening_match`, `context_bracket`, `context_json`) y los JSON completos de `prediction`, `features`, `odds`, `staking`, `controls`, `flags`, `data_quality` y `rosters`.
 
+Best Opportunity usa la política `best_opportunity_v2_confirmed_lineups`: además
+de los umbrales de confianza y fiabilidad, ambos lados deben tener una alineación
+pre-match de cinco IDs únicos confirmada por la página del partido. La cobertura
+individual siempre divide entre cinco, aunque el perfil de equipo o HLTV solo
+devuelva una parte. `PIPELINE/enrich_predictions.py` genera por run
+`roster_integrity_report.json` y detiene la publicación ante cualquier diferencia
+entre un 5v5 anunciado y el roster renderizado.
+
+La pestaña Modelo consume `MODEL/results/predictions_walkforward.csv`, generado
+en cada entrenamiento con una predicción causal por modelo y partido. La web
+filtra `nested_model_policy`, deduplica por `match_id` y construye la evolución
+temporal de la accuracy real: diaria para 7 días/1 mes, semanal para 3/6 meses y
+mensual para 1 año. Nunca usa el refit final para predecir partidos con los que
+ya fue entrenado. `favorite_accuracy_bands.json` se conserva para la auditoría
+de calibración por confianza. En la BBDD viva, la misma comprobación es posible
+uniendo `predictions.prob_team1` con `matches.winner_team_id`, conservando una
+sola versión point-in-time por partido cuando se evalúe producción.
+
 Flujo operativo de la BBDD viva:
 
 1. `start.ps1` inicializa/migra `BBDD/cs2.db` con `BBDD/build_db.py` antes del scrapeo.
@@ -248,6 +270,24 @@ Flujo operativo de la BBDD viva:
 6. `MODEL/train.py` entrena desde `BBDD/cs2.db` por defecto. `--raw <results_all.json>` queda como modo legacy/debug.
 
 Última BBDD viva validada (`2026-07-10`, tras consolidacion fisica): 9.527 partidos (`9.492` completados, `35` programados), 958 equipos, 753 jugadores, 647 filas de odds, 569 ventanas de roster, 5.127 snapshots de stats de jugador, 3.561 filas `map_player_stats`, 10.683 filas `map_player_side_stats`, 10.535 snapshots de ranking, 4.098 snapshots raw, 98 partidos con contexto HLTV, 153 con box score, 157 con veto, 90 predicciones persistentes y `0` filas con fuga temporal detectable (`match_features.data_up_to_utc > matches.datetime_utc`). La auditoria `BBDD/deduplicate_matches.py` devuelve `duplicate_pairs=0` y `PRAGMA foreign_key_check` devuelve cero filas.
+
+Estado de integridad validado el `2026-07-27`: 9.799 partidos, todos con
+`hltv_match_id` estable y sin duplicados fisicos. La reparacion recupero 9.327
+IDs historicos, arreglo 9 enlaces y 6 favoritos de predicciones, elimino 2
+equipos provisionales y consolido 1 partido duplicado tras corregir su formato
+imposible BO3 13-11 a BO1. El mart resultante contiene 19.450 estados
+point-in-time y el loader obtiene 9.725 series entrenables. El reentreno limpio
+evalua 7.289 predicciones OOS con `nested_model_policy`: 64,38% accuracy y log
+loss 0,6309. El artefacto promovido tiene SHA-256 `92772a32a58ddf1f`.
+
+`BBDD/repair_integrity.py` aplica esta politica de forma transaccional e
+idempotente y crea backup antes de cambiar la BBDD. Backfillea identidad desde
+la evidencia raw/master, repara referencias y purga filas provisionales que no
+representan un partido confirmado. No considera duplicado un encuentro solo
+por compartir fecha/equipos/marcador: si la fuente conserva IDs HLTV distintos,
+se preservan ambos como doble enfrentamiento legitimo. El health gate exige
+`duplicate_pairs=0`, `PRAGMA foreign_key_check=0`, cero IDs ausentes, cero
+participantes provisionales y cero predicciones huerfanas o incoherentes.
 
 Regla de oro: si HLTV no exponía un dato en el momento del scrapeo, la BBDD no lo inventa. Pero si lo exponía y el pipeline lo capturó, queda guardado físicamente en SQLite y/o en `payload_json` raw para poder reparsearlo más adelante sin volver a depender de la página actual.
 
@@ -501,7 +541,14 @@ Estado implementado (julio 2026):
 
 ### 6.5.2. Activacion automatica de extended features
 
-`MODEL/train.py` aplica la misma politica en cada reentrenamiento: reconstruye cada familia point-in-time, cuenta partidos cerrados con cobertura real y la incluye al superar su umbral. No existe un switch manual. La decision y las columnas activas quedan en `artifact.metadata["feature_policies"]` y en `MODEL/results/REPORT.md`. La validacion sigue siendo walk-forward y la seleccion del estimador se hace por log loss; accuracy es una metrica secundaria.
+`MODEL/train.py` reconstruye siempre cada familia point-in-time. El umbral de
+cobertura es solo la primera condicion: dentro de cada fold externo se reserva
+un holdout temporal usando exclusivamente el pasado de ese fold, y la familia
+entra unicamente si reduce el log loss al menos lo configurado en
+`feature_selection.min_log_loss_gain`. No existe switch manual. El detalle por
+fold, ganancias y motivos de exclusion queda en
+`MODEL/results/fold_local_feature_selection.json`,
+`artifact.metadata["feature_policies"]` y `MODEL/results/REPORT.md`.
 
 Estado medido en `BBDD/cs2.db` el 2026-07-10 tras deduplicar semilla+HLTV (9.492 series entrenables):
 
@@ -516,7 +563,25 @@ Estado medido en `BBDD/cs2.db` el 2026-07-10 tras deduplicar semilla+HLTV (9.492
 | Estabilidad de roster point-in-time | 61 | 200 | OFF, acumulando |
 | Model B con odds de apertura | 98 partidos unicos | 120 | OFF; evaluacion separada, nunca contamina el Modelo A puro |
 
-La BBDD fue consolidada fisicamente el 2026-07-10: se fusionaron 116 parejas `historical_seed + HLTV`, se conservaron las filas canonicas con `hltv_match_id` y sus datos hijos, y quedaron cero duplicados y cero violaciones de claves foraneas. Antes y despues se generaron backups. La vista de entrenamiento mantiene ademas una deduplicacion defensiva por fecha, evento, equipos, formato y marcador para impedir que una futura importacion vuelva a ponderar o apostar dos veces el mismo partido.
+La reparacion de integridad del 2026-07-27 corrigio 44 resultados con
+participantes provisionales, fusiono 182 identidades inequivocas y reconstruyo
+19.452 filas de ratings/features. Los historicos sin hora se marcan
+`datetime_precision='date_only'` y todos los partidos del mismo dia emiten sus
+features antes de actualizar el estado, evitando inventar un orden intradia.
+`BBDD/repair_integrity.py` es idempotente y `start.ps1` lo ejecuta antes del
+health gate de datos.
+
+Un partido online solo entra en las tablas normalizadas cuando los dos
+participantes tienen nombre no provisional e ID HLTV estable. Si la pagina aun
+contiene `TBD`, `TBA`, `winner/loser` o falta un ID, la respuesta se conserva en
+`raw_snapshots` para recuperarla en el siguiente run, pero no crea partido,
+rating, feature ni prediccion. `BBDD/repair_integrity.py` purga cualquier caso
+normalizado heredado sin borrar ese raw, y el gate
+`live_matches_have_two_confirmed_teams` bloquea la promocion si reaparece uno.
+Las fotos PRE-MATCH son append-only y fechadas: apertura, snapshots de jugador,
+ranking, Analytics, contexto y alineacion anunciada se seleccionan para entrenar
+solo cuando `captured_at_utc <= datetime_utc`; el RESULT posterior rellena
+ganador/marcador sin reescribir la evidencia previa.
 
 Formato BO1/BO3/BO5 y fatiga de calendario (`activity_2/7/14/30`, recencia e inactividad) son features nucleares reconstruibles para todo el historico y ya estan activas. Travel geografico, veto futuro/composicional, parches, liquidez de mercado y sanciones no se convierten en ceros falsos: permanecen fuera hasta disponer de una fuente point-in-time y un constructor verificable.
 
@@ -685,11 +750,25 @@ Se calculan point-in-time desde el estado actual de la base. No es reentrenar.
 
 ### 10.3. Modelo GBM/CatBoost → cadencia semanal de lunes
 - **Reajuste programado: cada lunes.** Primero se ejecuta `.\start.ps1` completo para actualizar snapshots, odds, Analytics, contexto, rosters y stats de jugador. Despues se ejecuta `python MODEL\run_professional_training.py --install-deps`.
-- **Extended features sin switches:** todos los comandos de entrenamiento llaman a la politica automatica de `MODEL/train.py`. Una familia que cruza su umbral entra sola en cada candidato y queda registrada como `ON`; por debajo queda `OFF` sin editar comandos.
+- **Extended features sin switches:** una familia debe superar cobertura y ganar
+  el holdout temporal fold-local por log loss. Cruzar el umbral ya no basta.
+  Player snapshots, rankings y Analytics quedan automaticamente `OFF` cuando
+  no demuestran mejora, aunque ya tengan la muestra minima.
 - **Accuracy por franjas automatica:** cada entreno calcula sobre las predicciones walk-forward del modelo promovido las bandas 50-60/60-70/70-80/80-90/90-100, guarda aciertos, muestra, accuracy, probabilidad media y gap en `MODEL/results/favorite_accuracy_bands.json` y en el artefacto. `../WEB/build_web.py` lo publica en la pestaña BBDD; `start.ps1 -Retrain` ejecuta ambas fases en orden.
 - **Que prueba el entrenamiento profesional:** Logistica calibrada, LightGBM, CatBoost, ensembles, calibracion Platt/isotonica/beta, `form_half_life` en `45,60,90,120,180` y `wf_gap` en `0,1`.
 - **Criterio de seleccion:** menor **log loss walk-forward**. La accuracy se reporta, pero no decide produccion si empeora la calidad probabilistica.
-- **Artefacto final actual (2026-07-13):** `super_learner_cal`, `n_eval=7.115`, accuracy `64,4413%`, log loss `0,629243`, Brier `0,219671`, ROC-AUC `0,690638` y ECE `0,013380`.
+- **Seleccion sin sesgo L1 (desde 2026-07-27):** la metrica primaria es
+  `nested_model_policy`. Antes de cada semana elige candidato usando solo el OOS
+  acumulado de semanas anteriores. Una vez cerrado todo el historico,
+  `production_model` indica el candidato ajustado para el siguiente periodo; su
+  score retrospectivo individual queda como diagnostico, no como estimacion
+  insesgada de la politica completa.
+- **Artefacto final actual (2026-07-27):** refit `super_learner_cal` sobre 9.726
+  series. La estimación primaria `nested_model_policy` usa `n_eval=7.290`:
+  accuracy `64,31%`, log loss `0,6308`, Brier `0,2203`, ROC-AUC `0,6886` y
+  ECE `0,0127`. Frente al artefacto anterior mejora `+0,20` puntos de accuracy y
+  `-0,00105` de log loss. Las familias finales aprobadas son
+  `team_trueskill` y `event_history`.
 - **Reajuste por evento (inmediato):** cambio de pool de mapas de Valve, parche gordo de jugabilidad, cambio de formula de rating de HLTV. Son cambios de distribucion.
 - **Reajuste por deriva (bajo demanda):** `MODEL/monitor_drift.py` se ejecuta automaticamente al final de `start.ps1`. Si Page-Hinkley o las ventanas de log loss/CLV superan los umbrales de `MODEL/config.yaml`, se revisa y reentrena aunque no sea lunes.
 
@@ -700,7 +779,22 @@ La calibración se desajusta antes que la capacidad de ranking. El sweep profesi
 Optuna purgado ajusta la regularizacion logistica de forma causal durante el walk-forward (8 trials, retune cada 26 semanas). El sweep amplio de algoritmos/half-life/gap sigue siendo trimestral o ante drift grande.
 
 ### 10.6. Monitorizacion
-Cada entrenamiento guarda `experiment_manifest.json` con SHA-256 del dataset y configuracion, semilla, commit/dirty state, argumentos y versiones. `drift_report.json` audita OOS walk-forward; `drift_live.json` usa exclusivamente predicciones pre-match congeladas que ya tienen resultado. La ventana, referencia, Page-Hinkley y alertas CLV estan versionadas en `MODEL/config.yaml`.
+Cada entrenamiento guarda `experiment_manifest.json` con SHA-256 del dataset y
+configuracion, semilla, commit/dirty state, argumentos y versiones. La promocion
+es atomica: primero se escribe `candidate_model.pkl`, se recalculan desde CSV las
+metricas publicadas y se comprueban placeholders, FK, duplicados, cobertura,
+log loss frente a Glicko y politica fold-local. El mismo archivo final vuelve a
+pasar el gate despues de anadir metadatos de registry; solo entonces reemplaza
+`MODEL/artifacts/model.pkl`.
+
+`prediction_ledger` conserva una unica prediccion operativa por partido con
+participantes, kickoff, timestamp, SHA-256 del artefacto/config/politica y
+probabilidad. Se puede actualizar solo antes del inicio; despues queda
+`frozen` y al llegar el resultado se calculan accuracy, log loss y Brier sobre
+esa misma fila. `MODEL/evaluate_live_ledger.py` agrupa los resultados por hash
+exacto. Las odds de cierre solo son `closing_observed` si fueron capturadas
+antes del kickoff y como maximo seis horas antes; el resto es `legacy_proxy` y
+no entra en CLV.
 
 ### 10.7. Política de mercado / odds
 

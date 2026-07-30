@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -53,14 +55,136 @@ def model_payload() -> dict:
         MODEL_ROOT / "results" / "favorite_accuracy_bands.json",
         seg.get("favorite_accuracy", {}),
     )
+    favorite_accuracy_timeline = build_favorite_accuracy_timeline(
+        MODEL_ROOT / "results" / "predictions_walkforward.csv",
+        str(favorite_accuracy.get("model") or "nested_model_policy"),
+    )
     return {
         "metrics": metrics,
         "shap_top": shap[:15] if isinstance(shap, list) else [],
         "segments": seg.get("segments", []),
         "favorite_accuracy": favorite_accuracy,
+        "favorite_accuracy_timeline": favorite_accuracy_timeline,
         "market": seg.get("market", {}),
         "production_model": _production_model(),
     }
+
+
+def _month_start(value: date) -> date:
+    return value.replace(day=1)
+
+
+def _next_month(value: date) -> date:
+    return (
+        value.replace(year=value.year + 1, month=1, day=1)
+        if value.month == 12
+        else value.replace(month=value.month + 1, day=1)
+    )
+
+
+def _bucket_start(value: date, bucket: str) -> date:
+    if bucket == "week":
+        return value - timedelta(days=value.weekday())
+    if bucket == "month":
+        return _month_start(value)
+    return value
+
+
+def _next_bucket(value: date, bucket: str) -> date:
+    if bucket == "week":
+        return value + timedelta(days=7)
+    if bucket == "month":
+        return _next_month(value)
+    return value + timedelta(days=1)
+
+
+def build_favorite_accuracy_timeline(path: Path, model: str) -> dict:
+    """Build deduplicated OOS favorite-accuracy series for the model dashboard."""
+    base = {
+        "source": "MODEL/results/predictions_walkforward.csv",
+        "method": "deduplicated_walk_forward_favorite_accuracy",
+        "model": model,
+        "available_start": None,
+        "available_end": None,
+        "windows": {},
+    }
+    if not path.exists():
+        return base
+
+    by_match: dict[str, dict] = {}
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if str(row.get("model") or "") != model:
+                continue
+            match_id = str(row.get("match_id") or "")
+            try:
+                played_on = date.fromisoformat(str(row.get("date") or "")[:10])
+                probability = float(row["prob_team1"])
+                actual = int(row["actual"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if not match_id or actual not in {0, 1} or not 0.0 <= probability <= 1.0:
+                continue
+            by_match[match_id] = {
+                "match_id": match_id,
+                "date": played_on,
+                "correct": int((probability >= 0.5) == bool(actual)),
+            }
+    rows = sorted(by_match.values(), key=lambda row: (row["date"], row["match_id"]))
+    if not rows:
+        return base
+
+    available_start = rows[0]["date"]
+    available_end = rows[-1]["date"]
+    base["available_start"] = available_start.isoformat()
+    base["available_end"] = available_end.isoformat()
+    definitions = {
+        "7d": {"label": "7 dias", "days": 7, "bucket": "day"},
+        "1m": {"label": "1 mes", "days": 30, "bucket": "day"},
+        "3m": {"label": "3 meses", "days": 90, "bucket": "week"},
+        "6m": {"label": "6 meses", "days": 180, "bucket": "week"},
+        "1y": {"label": "1 ano", "days": 365, "bucket": "month"},
+    }
+    for key, definition in definitions.items():
+        requested_start = available_end - timedelta(days=int(definition["days"]) - 1)
+        period_start = max(requested_start, available_start)
+        selected = [row for row in rows if period_start <= row["date"] <= available_end]
+        grouped: dict[date, list[dict]] = defaultdict(list)
+        bucket = str(definition["bucket"])
+        for row in selected:
+            grouped[_bucket_start(row["date"], bucket)].append(row)
+
+        points = []
+        cursor = _bucket_start(period_start, bucket)
+        while cursor <= available_end:
+            next_cursor = _next_bucket(cursor, bucket)
+            point_rows = grouped.get(cursor, [])
+            point_start = max(cursor, period_start)
+            point_end = min(next_cursor - timedelta(days=1), available_end)
+            correct = sum(int(row["correct"]) for row in point_rows)
+            n = len(point_rows)
+            points.append(
+                {
+                    "date": point_start.isoformat(),
+                    "end_date": point_end.isoformat(),
+                    "n": n,
+                    "correct": correct,
+                    "accuracy": correct / n if n else None,
+                }
+            )
+            cursor = next_cursor
+        total_correct = sum(int(row["correct"]) for row in selected)
+        total_n = len(selected)
+        base["windows"][key] = {
+            **definition,
+            "start": period_start.isoformat(),
+            "end": available_end.isoformat(),
+            "n": total_n,
+            "correct": total_correct,
+            "accuracy": total_correct / total_n if total_n else None,
+            "points": points,
+        }
+    return base
 
 
 def _production_model() -> str:

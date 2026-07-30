@@ -120,7 +120,7 @@ class ElasticNetLogit(ZooModel):
         Xt = self.prep.fit_transform(X)
         self.clf = LogisticRegression(
             penalty="elasticnet", solver="saga", l1_ratio=self.l1_ratio,
-            C=self.C, max_iter=2000, tol=1e-3,
+            C=self.C, max_iter=2000, tol=1e-3, random_state=42,
         )
         with warnings.catch_warnings():
             # sklearn>=1.8 depreca 'penalty' (elasticnet sigue funcional hasta 1.10);

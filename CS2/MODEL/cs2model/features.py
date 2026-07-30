@@ -1576,7 +1576,7 @@ def build_training_frame(
     X: list[dict[str, float]] = []
     y: list[int] = []
     meta: list[dict[str, Any]] = []
-    for m in rows:
+    def emit(m: dict[str, Any]) -> None:
         match_context = m.get("match_context") or {}
         feats = state.emit_features(
             m["team1_key"], m["team2_key"], m.get("date_obj"), m.get("event") or "", m.get("format") or "bo3"
@@ -1601,11 +1601,34 @@ def build_training_frame(
                 "stage": match_context.get("stage"),
                 "patch_version": m.get("patch_version") or match_context.get("patch_version"),
                 "map_pool_regime": state.map_pool_regime_label(m.get("date_obj")),
+                "datetime_precision": m.get("datetime_precision") or "exact",
                 "team1": m["team1"],
                 "team2": m["team2"],
                 "team1_key": m["team1_key"],
                 "team2_key": m["team2_key"],
             }
         )
-        state.observe(m)
+
+    index = 0
+    while index < len(rows):
+        day = str(rows[index].get("date") or "")[:10]
+        end = index + 1
+        while end < len(rows) and str(rows[end].get("date") or "")[:10] == day:
+            end += 1
+        day_rows = rows[index:end]
+        has_unknown_order = any(
+            row.get("datetime_precision") == "date_only" for row in day_rows
+        )
+        if has_unknown_order:
+            # No inventamos una hora para la semilla historica: todos los
+            # partidos del dia se predicen con el estado al inicio del dia.
+            for match in day_rows:
+                emit(match)
+            for match in day_rows:
+                state.observe(match)
+        else:
+            for match in day_rows:
+                emit(match)
+                state.observe(match)
+        index = end
     return X, y, meta, state

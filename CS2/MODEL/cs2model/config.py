@@ -26,6 +26,26 @@ class TrainingConfig:
     optuna_trials: int = 8
     optuna_retune_weeks: int = 26
     final_calibration_fraction: float = 0.18
+    model_selection_min_history: int = 200
+
+
+@dataclass(frozen=True)
+class FeatureSelectionConfig:
+    validation_periods: int = 8
+    retune_periods: int = 13
+    min_log_loss_gain: float = 0.0005
+    min_validation_rows: int = 80
+    min_validation_available_rows: int = 20
+
+
+@dataclass(frozen=True)
+class HealthGateConfig:
+    max_completed_placeholders: int = 0
+    max_foreign_key_errors: int = 0
+    max_evaluation_metric_delta: float = 1e-8
+    max_log_loss_vs_glicko: float = 0.0
+    min_recent_coverage_ratio: float = 0.5
+    min_coverage_sample: int = 20
 
 
 @dataclass(frozen=True)
@@ -57,9 +77,11 @@ class EconomicConfig:
 
 @dataclass(frozen=True)
 class ProjectConfig:
-    version: int = 1
+    version: int = 3
     random_seed: int = 42
     training: TrainingConfig = field(default_factory=TrainingConfig)
+    feature_selection: FeatureSelectionConfig = field(default_factory=FeatureSelectionConfig)
+    health_gates: HealthGateConfig = field(default_factory=HealthGateConfig)
     feature_thresholds: dict[str, int] = field(default_factory=dict)
     estimators: dict[str, dict[str, Any]] = field(default_factory=dict)
     drift: DriftConfig = field(default_factory=DriftConfig)
@@ -90,9 +112,15 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
     if not isinstance(raw, dict):
         raise ValueError("Top-level configuration must be a mapping")
     config = ProjectConfig(
-        version=int(raw.get("version", 1)),
+        version=int(raw.get("version", 3)),
         random_seed=int(raw.get("random_seed", 42)),
         training=TrainingConfig(**_mapping(raw.get("training"), "training")),
+        feature_selection=FeatureSelectionConfig(
+            **_mapping(raw.get("feature_selection"), "feature_selection")
+        ),
+        health_gates=HealthGateConfig(
+            **_mapping(raw.get("health_gates"), "health_gates")
+        ),
         feature_thresholds={
             str(key): int(value)
             for key, value in _mapping(raw.get("feature_thresholds"), "feature_thresholds").items()
@@ -121,6 +149,22 @@ def validate_config(config: ProjectConfig) -> None:
         raise ValueError("training.feature_profile must be core or error-aware")
     if not 0.0 < config.training.final_calibration_fraction < 0.5:
         raise ValueError("training.final_calibration_fraction must be in (0, 0.5)")
+    if config.training.model_selection_min_history < 20:
+        raise ValueError("training.model_selection_min_history must be >= 20")
+    selection = config.feature_selection
+    if selection.validation_periods < 2 or selection.retune_periods < 1:
+        raise ValueError("feature selection periods are invalid")
+    if selection.min_validation_rows < 20:
+        raise ValueError("feature selection min_validation_rows must be >= 20")
+    if selection.min_validation_available_rows < 1:
+        raise ValueError("feature selection availability minimum must be positive")
+    if selection.min_log_loss_gain < 0:
+        raise ValueError("feature selection min_log_loss_gain must be >= 0")
+    gates = config.health_gates
+    if gates.max_completed_placeholders < 0 or gates.max_foreign_key_errors < 0:
+        raise ValueError("health gate maxima must be >= 0")
+    if not 0 < gates.min_recent_coverage_ratio <= 1:
+        raise ValueError("health gate coverage ratio must be in (0, 1]")
     if any(value < 0 for value in config.feature_thresholds.values()):
         raise ValueError("feature thresholds must be >= 0")
     if config.drift.min_samples < 10 or config.drift.rolling_window < config.drift.min_samples:

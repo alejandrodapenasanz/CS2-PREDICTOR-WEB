@@ -14,12 +14,13 @@ linea en experiments.jsonl (manifest por run).
 from __future__ import annotations
 
 import argparse
+import copy
 import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
-from cs2model.evaluation import EvalConfig
+from cs2model.evaluation import EvalConfig, _blocks
 from cs2model.blockwise import run_comparison, ComparisonConfig
 from cs2model.model_zoo import available_models
 
@@ -29,15 +30,28 @@ ROOT = Path(__file__).resolve().parents[1]
 OUTPUT_DIR = ROOT / "MODEL" / "results"
 
 
+def _expanding_sliding_equivalent(rows: list[dict[str, Any]], cfg: EvalConfig) -> bool:
+    periods = sorted({int(row["period"]) for row in rows})
+    common = {
+        "warmup": cfg.warmup_periods,
+        "step": cfg.outer_step,
+        "gap": cfg.gap_periods,
+        "train_width": cfg.train_width,
+    }
+    expanding = _blocks(periods, window="expanding", **common)
+    sliding = _blocks(periods, window="sliding", **common)
+    return bool(expanding) and expanding == sliding
+
+
 def _table(res: dict[str, Any]) -> list[str]:
-    lines = ["| combo | log_loss | Brier | ECE | ROC-AUC | Accuracy |\n",
-             "|---|---:|---:|---:|---:|---:|\n"]
+    lines = ["| combo | N | log_loss | Brier | ECE | ROC-AUC | Accuracy |\n",
+             "|---|---:|---:|---:|---:|---:|---:|\n"]
     names = [n for n in res["models"] if res["models"][n].get("n")]
     names.sort(key=lambda n: res["models"][n]["log_loss"])
     for n in names:
         m = res["models"][n]
         tag = " **(BEST)**" if n == res.get("best_combo") else (" _(baseline)_" if n in ("elo", "market") else "")
-        lines.append(f"| {n}{tag} | {ev._fmt(m['log_loss'])} | {ev._fmt(m['brier'])} | "
+        lines.append(f"| {n}{tag} | {m['n']} | {ev._fmt(m['log_loss'])} | {ev._fmt(m['brier'])} | "
                      f"{ev._fmt(m['ece_10'])} | {ev._fmt(m['roc_auc'])} | {ev._fmt(m['accuracy'])} |\n")
     return lines
 
@@ -50,8 +64,19 @@ def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
            "> log loss es la metrica PRIMARIA (objetivo: calibracion y CLV, no accuracy bruta).\n"]
     for window, res in results.items():
         out.append(f"\n## Ventana {window} (n_eval={res['n_eval']}, folds={res['n_folds']})\n\n")
+        if res.get("reused_equivalent_window"):
+            out.append(
+                f"> Resultado reutilizado de `{res['reused_equivalent_window']}`: "
+                "los conjuntos train/test de todos los folds son exactamente iguales.\n\n"
+            )
         out += _table(res)
-        out.append(f"\n**Mejor combo (Model A de produccion): `{res.get('best_combo')}`**\n")
+        out.append(
+            f"\n**Estimacion primaria sin sesgo de seleccion: `{res.get('best_combo')}`**\n"
+        )
+        out.append(
+            "\nMejor combo fijo retrospectivo (solo diagnostico, no promocionable con "
+            f"este mismo outer test): `{res.get('diagnostic_best_combo')}`.\n"
+        )
         cc = res.get("calibrator_choice", {})
         if res.get("best_combo") in cc:
             out.append(f"\nCalibrador elegido en el mejor combo: {cc[res['best_combo']]}\n")
@@ -59,6 +84,13 @@ def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
         if b:
             out.append(f"\nApuestas (mejor combo): bets={b.get('bets')}, ROI={ev._fmt(b.get('roi_on_stake'))}, "
                        f"CLV vs cierre={ev._fmt(b.get('clv_vs_closing_mean'))} (n={b.get('clv_vs_closing_n')}).\n")
+        selected_counts: dict[str, int] = {}
+        for decision in res.get("decisions", []):
+            selected = decision.get("selected_combo")
+            if selected:
+                selected_counts[selected] = selected_counts.get(selected, 0) + 1
+        if selected_counts:
+            out.append(f"\nCombos elegidos causalmente por fold: {selected_counts}.\n")
         # resumen de activacion data-driven
         fams = {}
         for d in res["decisions"]:
@@ -83,6 +115,13 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--models", default="logistic_en,lightgbm")
     p.add_argument("--assemblies", default="indicators,profiles,two_stage")
     p.add_argument("--n-trials", type=int, default=8)
+    p.add_argument(
+        "--retune-folds",
+        type=int,
+        default=6,
+        help="Repite Optuna/forward selection cada N folds externos (6 ~= 24 semanas).",
+    )
+    p.add_argument("--verbose", action="store_true", help="Progreso por fold, modelo y tiempos.")
     p.add_argument("--output-dir", type=Path, default=OUTPUT_DIR)
     args = p.parse_args(argv)
 
@@ -104,11 +143,31 @@ def main(argv: list[str] | None = None) -> int:
         print("[compare] ningun modelo disponible.")
         return 2
     assemblies = tuple(a.strip() for a in args.assemblies.split(",") if a.strip())
-    comp = ComparisonConfig(models=models, assemblies=assemblies, n_trials=args.n_trials)
+    comp = ComparisonConfig(
+        models=models,
+        assemblies=assemblies,
+        n_trials=args.n_trials,
+        verbose=args.verbose,
+        retune_folds=max(1, args.retune_folds),
+    )
 
     windows = ["expanding", "sliding"] if args.window == "both" else [args.window]
     results: dict[str, Any] = {}
     for w in windows:
+        if (
+            w == "sliding"
+            and "expanding" in results
+            and _expanding_sliding_equivalent(rows, cfg)
+        ):
+            results[w] = copy.deepcopy(results["expanding"])
+            results[w]["window"] = "sliding"
+            results[w]["reused_equivalent_window"] = "expanding"
+            print(
+                "[compare] sliding: mismos bloques train/test que expanding; "
+                "reutilizando resultado exacto.",
+                flush=True,
+            )
+            continue
         print(f"[compare] {w}: modelos={models} assemblies={assemblies} n_trials={args.n_trials}...", flush=True)
         results[w] = run_comparison(rows, base_cols, families, dataclasses.replace(cfg, window=w), comp)
 
@@ -121,7 +180,10 @@ def main(argv: list[str] | None = None) -> int:
         fh.write(json.dumps(manifest, ensure_ascii=False, default=str) + "\n")
 
     for w, res in results.items():
-        print(f"[compare] {w}: best={res.get('best_combo')} n_eval={res['n_eval']}")
+        print(
+            f"[compare] {w}: policy={res.get('best_combo')} "
+            f"diagnostic_best={res.get('diagnostic_best_combo')} n_eval={res['n_eval']}"
+        )
     print(f"[compare] reporte en {args.output_dir / 'MODEL_COMPARISON.md'}")
     return 0
 

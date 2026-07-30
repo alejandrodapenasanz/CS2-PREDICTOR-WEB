@@ -1,5 +1,120 @@
 # Changelog / registro de decisiones
 
+## 2026-07-30 - Backups sin duplicacion local
+
+- Eliminadas las carpetas redundantes `CS2-Predictor-Backups` interior y
+  exterior tras verificar por SHA-256 que sus 89 bases eran copias exactas de
+  `CS2/BBDD/backups`.
+- El backup local de cada ingest se mantiene. El espejo adicional queda
+  desactivado por defecto y solo se crea si se configura
+  `CS2_BACKUP_MIRROR_DIR` o `--mirror-backup-dir` con una ubicación realmente
+  independiente.
+
+## 2026-07-27 - Limpieza fisica e identidad estable
+
+- `BBDD/repair_integrity.py` recupera IDs HLTV historicos desde snapshots raw y
+  master, repara enlaces/favoritos de predicciones y elimina equipos o partidos
+  provisionales sin referencias validas.
+- Corregido un BO1 13-11 almacenado como BO3; al normalizar el formato se
+  consolido un duplicado fisico de Leo-Coalesce sin perder mapas, veto ni
+  evidencia raw. La BBDD queda en 9.799 partidos, todos con ID HLTV estable.
+- Se preservan dobles enfrentamientos con IDs HLTV distintos aunque coincidan
+  fecha, equipos y resultado. La deduplicacion exige identidad fuente
+  inequivoca y no borra filas solo por similitud.
+- Reparadas 9 relaciones `predictions.match_id`, 6 favoritos que apuntaban a
+  placeholders, 9.327 IDs historicos y eliminados 2 equipos provisionales.
+- Los health gates bloquean desde ahora placeholders en `teams`, predicciones
+  huerfanas o incoherentes, IDs ausentes, formatos de serie imposibles y
+  duplicados fisicos. La reparacion es transaccional, idempotente y reconstruye
+  el mart tras cualquier consolidacion.
+- Reentreno completo sobre 9.725 series limpias: politica causal
+  `nested_model_policy`, 64,38% accuracy y log loss 0,6309 sobre 7.289
+  predicciones OOS. Artefacto promovido con SHA-256 `92772a32a58ddf1f`.
+
+## 2026-07-27 - Integridad, feature gates y ledger de produccion
+
+- Reparados 44 resultados con participantes provisionales y fusionadas 182
+  identidades inequivocas; mart reconstruido con 19.452 estados point-in-time.
+- Los historicos sin hora quedan `date_only` y no se ordenan ficticiamente
+  dentro del dia. Prize pool conserva valor numerico y texto raw.
+- Las familias opcionales pasan seleccion fold-local por mejora temporal de log
+  loss. En el refit actual entran `team_trueskill` y `event_history`; player
+  snapshots, rankings y Analytics quedan fuera por no superar la prueba.
+- Anhadido `prediction_ledger`: una prediccion pre-match congelada por partido,
+  con hashes de artefacto/config/politica y evaluacion posterior exacta.
+- Las closing odds historicas dudosas son `legacy_proxy`; solo 94 capturas
+  verificadas dentro de las seis horas previas quedan `closing_observed`.
+- La normalizacion exige dos participantes no provisionales con ID HLTV. Los
+  casos incompletos siguen archivados en raw para reanudacion, pero no entran en
+  ratings, features, predicciones ni entrenamiento. Reparacion y health gate
+  exigen que el numero de casos normalizados incompletos sea cero.
+- Health gates bloqueantes validan integridad, cobertura, consistencia exacta de
+  metricas y log loss frente a Glicko antes de la promocion atomica.
+- Reentreno completo: `nested_model_policy` 64,31% accuracy, log loss 0,6308
+  sobre 7.290 partidos; mejora frente al anterior de +0,20 puntos y -0,00105.
+
+## 2026-07-27 - Certificación real y roster anunciado autoritativo
+
+- La pestaña Modelo incorpora **Evolución del acierto real** desde
+  `predictions_walkforward.csv`: eje X temporal, eje Y de accuracy real y
+  selectores de 7 días, 1 mes, 3 meses, 6 meses y 1 año. Deduplica por partido,
+  agrega por día/semana/mes y muestra `n` en el tooltip. La cobertura disponible
+  va de `2025-11-16` a `2026-07-27`; total `4.688/7.290` (`64,31%`).
+- Ejecutado `start.ps1 -Retrain` completo sobre 9.726 series. La política causal
+  productiva queda en accuracy `0,6412`, log loss `0,6318`, Brier `0,2209`,
+  AUC `0,6858` y ECE `0,0099`; se mantiene `super_learner_cal` para el refit
+  futuro.
+- Ejecutados `evaluate.py --window both` y `compare_models.py --window both
+  --n-trials 40 --verbose` sobre la BBDD real. El zoo obtiene log loss causal
+  `0,6338`, por detrás de producción; no se promociona el mejor combo fijo
+  retrospectivo.
+- Corregido el adaptador de `evaluate.py`: tomaba un `date_obj` ausente de meta
+  y colapsaba todas las filas al periodo cero. Una prueba exige múltiples
+  periodos point-in-time.
+- Sustituido PAV isotónico por bloques realmente colapsados; prueba adversarial
+  de 100.000 filas evita el overflow observado con datos reales.
+- `compare_models.py --window both` reutiliza sliding solo si sus conjuntos
+  train/test son exactamente iguales a expanding.
+- La alineación anunciada 5v5 del partido pasa a ser la fuente autoritativa para
+  la ficha y el denominador de cobertura. Los jugadores ausentes del perfil
+  general entran en la cola de player stats sin reescribir el roster histórico.
+  En HLTV 2396170, Bebop pasa de un 3/3 ficticio a cinco nombres; tras recuperar
+  `redzed` (25 mapas/3 meses) y `z3ndeR` (19 mapas/6 meses), queda con cobertura
+  comparable `0,80`, fiabilidad `0,816` y deja de ser Best Opportunity.
+- `best_opportunity_v2_confirmed_lineups` exige dos alineaciones pre-match 5v5
+  exactas. Los lineups parciales siempre usan denominador cinco, quedan marcados
+  con `PREMATCH_LINEUP_INCOMPLETE` y no son elegibles aunque su confianza sea alta.
+  `roster_integrity_report.json` bloquea la publicación si un roster completo no
+  coincide con los cinco IDs anunciados. Auditoría real: 51/65 confirmados,
+  14 incompletos y 0 violaciones duras.
+
+## 2026-07-27 - Cierre de L1/L2 y reproducibilidad completa
+
+- `train.py` deja de elegir y reportar retrospectivamente al ganador del mismo
+  OOS. `nested_model_policy` selecciona antes de cada semana con el log loss OOS
+  acumulado de semanas anteriores; esa politica causal es la metrica primaria.
+  El candidato que se ajusta sobre todo el historico para el siguiente periodo
+  queda separado en `production_model`.
+- `compare_models.py` aplica la misma separacion: `nested_policy` elige
+  modelo/assembly dentro de cada `outer_train`; `diagnostic_best_combo` se
+  conserva como diagnostico y no se promociona usando su propio outer test.
+- La calibracion del harness se ajusta con predicciones OOS internas, y el
+  metodo se elige en una cola temporal distinta. Se elimina la calibracion
+  in-sample del refit externo.
+- La auditoria L2 reconstruye todas las features enriquecidas desde prefijos de
+  la BBDD real y verifica los selectores as-of de odds, Analytics, lineups y
+  player snapshots. En CI se omite solo la parte que requiere `cs2.db`.
+- El harness real queda alineado con todas las familias auto-gated de
+  produccion. Primero exige cobertura suficiente dentro de `outer_train` y
+  despues aplica forward selection por mejora de log loss OOS.
+- `profiles` agrupa predicciones por patron de cobertura y ajusta cada
+  submodelo una vez, eliminando el refit por fila que hacia el smoke
+  innecesariamente lento.
+- Nuevo `requirements.lock.txt` resuelto con Python 3.12. GitHub Actions instala
+  ese lock; `requirements.txt` conserva los rangos mantenibles.
+- SAGA en `logistic_en` recibe `random_state=42`; pruebas adversariales confirman
+  que cambiar las etiquetas del outer test no cambia la decision de ese fold.
+
 ## 2026-07-27 - Consolidacion de documentacion + handoff PROMPT.md
 
 - La documentacion tecnica reciente se movio de `/docs` (raiz) a `CS2/DOCS/`

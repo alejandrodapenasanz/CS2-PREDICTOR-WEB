@@ -294,6 +294,248 @@ def select_feature_columns(
     return columns, policies
 
 
+def fold_local_family_specs(
+    feature_thresholds: dict[str, int] | None = None,
+) -> list[tuple[str, list[str], str, int]]:
+    """Families eligible for the generic learner's temporal feature gate."""
+    thresholds = feature_thresholds or {}
+    specs = [
+        (
+            name,
+            list(columns),
+            availability,
+            int(thresholds.get(name, min_rows)),
+        )
+        for name, columns, availability, min_rows in AUTO_FEATURE_FAMILIES
+        if name not in {"bayesian_bradley_terry", "kalman_state_space"}
+    ]
+    specs.append(
+        (
+            "context",
+            list(CONTEXT_FEATURE_COLUMNS),
+            "context_available",
+            int(thresholds.get("context_total", CONTEXT_MIN_TRAIN_ROWS)),
+        )
+    )
+    return specs
+
+
+def candidate_feature_columns(
+    feature_profile: str,
+    feature_thresholds: dict[str, int] | None = None,
+) -> list[str]:
+    """Target-free feature universe; activation is decided inside each fold."""
+    columns = list(FEATURE_COLUMNS if feature_profile == "error-aware" else BASE_FEATURE_COLUMNS)
+    for _, family_columns, _, _ in fold_local_family_specs(feature_thresholds):
+        columns.extend(family_columns)
+    # Standalone causal-rating candidates need their columns in the matrix even
+    # though they do not enter the generic learner.
+    columns.extend(BAYES_BT_FEATURE_COLUMNS)
+    columns.extend(KALMAN_FEATURE_COLUMNS)
+    return list(dict.fromkeys(columns))
+
+
+def select_fold_local_features(
+    X_dicts: list[dict[str, float]],
+    y_all: np.ndarray,
+    periods: np.ndarray,
+    eligible_mask: np.ndarray,
+    universe_columns: list[str],
+    base_columns: list[str],
+    *,
+    feature_thresholds: dict[str, int] | None = None,
+    validation_periods: int = 8,
+    min_log_loss_gain: float = 0.0005,
+    min_validation_rows: int = 80,
+    min_validation_available_rows: int = 20,
+    recency_half_life: float = 0.0,
+    seed: int = 42,
+    verbose: bool = False,
+) -> tuple[list[str], dict[str, Any]]:
+    """Select optional families using only an outer fold's historical rows.
+
+    A recent temporal block is held out from the outer training set. Families
+    must first beat the core model alone, then still improve log loss when
+    added greedily to already accepted families. No outer-test label is read.
+    """
+    from sklearn.metrics import log_loss
+
+    eligible_mask = np.asarray(eligible_mask, dtype=bool)
+    eligible_periods = sorted(set(periods[eligible_mask].tolist()))
+    report: dict[str, Any] = {
+        "method": "fold_local_forward_temporal_log_loss",
+        "eligible_rows": int(eligible_mask.sum()),
+        "selected_families": [],
+        "families": {},
+        "min_log_loss_gain": float(min_log_loss_gain),
+    }
+    if len(eligible_periods) <= validation_periods:
+        report["reason"] = "insufficient_periods"
+        return list(base_columns), report
+    validation_set = set(eligible_periods[-validation_periods:])
+    validation_mask = eligible_mask & np.isin(periods, list(validation_set))
+    fit_mask = eligible_mask & ~validation_mask
+    report.update(
+        {
+            "fit_rows": int(fit_mask.sum()),
+            "validation_rows": int(validation_mask.sum()),
+            "validation_period_start": int(min(validation_set)),
+            "validation_period_end": int(max(validation_set)),
+        }
+    )
+    if (
+        fit_mask.sum() < 100
+        or validation_mask.sum() < min_validation_rows
+        or len(np.unique(y_all[fit_mask])) < 2
+        or len(np.unique(y_all[validation_mask])) < 2
+    ):
+        report["reason"] = "insufficient_temporal_holdout"
+        return list(base_columns), report
+
+    column_index = {column: index for index, column in enumerate(universe_columns)}
+    full_matrix = _matrix(X_dicts, universe_columns)
+    cache: dict[tuple[str, ...], float] = {}
+
+    def score(columns: list[str]) -> float:
+        key = tuple(columns)
+        if key in cache:
+            return cache[key]
+        indices = [column_index[column] for column in columns]
+        X_fit = full_matrix[fit_mask][:, indices]
+        X_validation = full_matrix[validation_mask][:, indices]
+        weights = _recency_weights(periods[fit_mask], recency_half_life)
+        estimator = _fit_base(
+            "logistic",
+            X_fit,
+            y_all[fit_mask],
+            columns,
+            random_state=seed,
+            sample_weight=weights,
+        )
+        probability = np.clip(estimator.predict_proba(X_validation)[:, 1], 1e-6, 1 - 1e-6)
+        value = float(log_loss(y_all[validation_mask], probability, labels=[0, 1]))
+        cache[key] = value
+        return value
+
+    current_columns = list(base_columns)
+    try:
+        core_loss = score(current_columns)
+    except Exception as exc:
+        report["reason"] = f"core_fit_failed:{type(exc).__name__}"
+        return current_columns, report
+    report["core_log_loss"] = core_loss
+    if verbose:
+        print(
+            f"          feature gate core: logloss={core_loss:.6f} "
+            f"fit={int(fit_mask.sum())} validation={int(validation_mask.sum())}",
+            flush=True,
+        )
+
+    candidates: list[tuple[float, str, list[str]]] = []
+    thresholds = feature_thresholds or {}
+    for name, family_columns, availability_column, min_rows in fold_local_family_specs(thresholds):
+        history_rows = int(sum(
+            bool(eligible_mask[index])
+            and (X_dicts[index].get(availability_column) or 0.0) >= 0.5
+            for index in range(len(X_dicts))
+        ))
+        validation_available = int(sum(
+            bool(validation_mask[index])
+            and (X_dicts[index].get(availability_column) or 0.0) >= 0.5
+            for index in range(len(X_dicts))
+        ))
+        threshold_ok = history_rows >= min_rows
+        if name == "context":
+            lan_rows = int(sum(
+                bool(eligible_mask[index])
+                and (X_dicts[index].get("context_is_lan") or 0.0) >= 0.5
+                for index in range(len(X_dicts))
+            ))
+            online_rows = int(sum(
+                bool(eligible_mask[index])
+                and (X_dicts[index].get("context_is_online") or 0.0) >= 0.5
+                for index in range(len(X_dicts))
+            ))
+            min_env = int(thresholds.get("context_per_environment", CONTEXT_MIN_ENV_ROWS))
+            threshold_ok = threshold_ok and lan_rows >= min_env and online_rows >= min_env
+        else:
+            lan_rows = online_rows = min_env = None
+        family_report = {
+            "available_rows": history_rows,
+            "validation_available_rows": validation_available,
+            "min_rows": int(min_rows),
+            "availability_column": availability_column,
+            "threshold_ok": bool(threshold_ok),
+            "enabled": False,
+            "columns": [],
+        }
+        if verbose:
+            print(
+                f"          feature gate {name}: coverage={history_rows}/{min_rows} "
+                f"validation_available={validation_available}",
+                flush=True,
+            )
+        if name == "context":
+            family_report.update(
+                {"lan_rows": lan_rows, "online_rows": online_rows, "min_env_rows": min_env}
+            )
+        if not threshold_ok:
+            family_report["reason"] = "coverage_threshold"
+        elif validation_available < min_validation_available_rows:
+            family_report["reason"] = "validation_coverage"
+        else:
+            try:
+                candidate_loss = score(current_columns + family_columns)
+                gain = core_loss - candidate_loss
+                family_report.update(
+                    {"standalone_log_loss": candidate_loss, "standalone_gain": gain}
+                )
+                if gain >= min_log_loss_gain:
+                    candidates.append((gain, name, family_columns))
+                else:
+                    family_report["reason"] = "no_temporal_log_loss_gain"
+            except Exception as exc:
+                family_report["reason"] = f"fit_failed:{type(exc).__name__}"
+        report["families"][name] = family_report
+        if verbose:
+            print(
+                f"            -> {family_report.get('reason', 'candidate')} "
+                f"gain={family_report.get('standalone_gain')}",
+                flush=True,
+            )
+
+    current_loss = core_loss
+    for _, name, family_columns in sorted(candidates, reverse=True):
+        family_report = report["families"][name]
+        try:
+            combined_loss = score(current_columns + family_columns)
+        except Exception as exc:
+            family_report["reason"] = f"combined_fit_failed:{type(exc).__name__}"
+            continue
+        gain = current_loss - combined_loss
+        family_report["incremental_log_loss"] = combined_loss
+        family_report["incremental_gain"] = gain
+        if gain >= min_log_loss_gain:
+            current_columns.extend(family_columns)
+            current_loss = combined_loss
+            family_report["enabled"] = True
+            family_report["columns"] = list(family_columns)
+            family_report["reason"] = "temporal_log_loss_gain"
+            report["selected_families"].append(name)
+        else:
+            family_report["reason"] = "no_incremental_temporal_log_loss_gain"
+        if verbose:
+            print(
+                f"          feature gate incremental {name}: "
+                f"{'ON' if family_report.get('enabled') else 'OFF'} gain={gain:.6f}",
+                flush=True,
+            )
+    report["selected_log_loss"] = current_loss
+    report["total_log_loss_gain"] = core_loss - current_loss
+    report["reason"] = "ok"
+    return list(dict.fromkeys(current_columns)), report
+
+
 def augment(X: np.ndarray, y: np.ndarray, cols: list[str]) -> tuple[np.ndarray, np.ndarray]:
     """Duplica el dataset intercambiando A<->B (niega columnas DIFF, invierte y).
 
@@ -427,7 +669,9 @@ def make_lgbm(monotone: list[int] | None = None, verbose: bool = False):
             objective="binary",
             n_jobs=-1,
             random_state=runtime.random_seed,
-            verbosity=1 if verbose else -1,
+            # El callback de evaluacion ya informa cada 50 iteraciones. Mantener
+            # el logger interno activo repite miles de warnings de split sin gain.
+            verbosity=-1,
         )
         if monotone is not None and any(monotone):
             params["monotone_constraints"] = monotone
@@ -853,7 +1097,13 @@ def walk_forward(
     optuna_retune_periods: int = 26,
     tuning_report: dict[str, Any] | None = None,
     learner_cols: list[str] | None = None,
+    X_dicts: list[dict[str, float]] | None = None,
+    base_learner_cols: list[str] | None = None,
+    feature_thresholds: dict[str, int] | None = None,
+    feature_selection_config: Any | None = None,
+    feature_selection_report: dict[str, Any] | None = None,
     seed: int = 42,
+    selection_min_history: int = 200,
 ) -> dict[str, list[dict[str, Any]]]:
     """Walk-forward semanal. Devuelve predicciones por modelo/candidato.
 
@@ -868,7 +1118,9 @@ def walk_forward(
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
     learner_cols = list(learner_cols or cols)
-    learner_indices = [cols.index(column) for column in learner_cols]
+    base_learner_cols = list(base_learner_cols or learner_cols)
+    current_learner_cols = list(learner_cols)
+    current_learner_indices = [cols.index(column) for column in current_learner_cols]
 
     kinds = tuple(dict.fromkeys(algorithm_kinds))
     specs = candidate_specs(kinds)
@@ -879,6 +1131,7 @@ def walk_forward(
     }
     current_logistic_c = 0.5
     tuning_events: list[dict[str, Any]] = []
+    family_selection_events: list[dict[str, Any]] = []
 
     for wi, period in enumerate(test_periods):
         train_mask = periods < (period - gap)
@@ -893,8 +1146,50 @@ def walk_forward(
             continue
         X_tr_full, y_tr = X_all[train_mask], y_all[train_mask]
         X_te_full, y_te = X_all[test_mask], y_all[test_mask]
-        X_tr = X_tr_full[:, learner_indices]
-        X_te = X_te_full[:, learner_indices]
+        selection_cfg = feature_selection_config
+        should_retune_families = (
+            X_dicts is not None
+            and selection_cfg is not None
+            and (
+                not family_selection_events
+                or wi % max(1, int(selection_cfg.retune_periods)) == 0
+            )
+        )
+        if should_retune_families:
+            selected, family_event = select_fold_local_features(
+                X_dicts,
+                y_all,
+                periods,
+                train_mask,
+                cols,
+                base_learner_cols,
+                feature_thresholds=feature_thresholds,
+                validation_periods=int(selection_cfg.validation_periods),
+                min_log_loss_gain=float(selection_cfg.min_log_loss_gain),
+                min_validation_rows=int(selection_cfg.min_validation_rows),
+                min_validation_available_rows=int(
+                    selection_cfg.min_validation_available_rows
+                ),
+                recency_half_life=recency_half_life,
+                seed=seed + wi,
+                verbose=verbose,
+            )
+            current_learner_cols = selected
+            current_learner_indices = [
+                cols.index(column) for column in current_learner_cols
+            ]
+            family_event["outer_period"] = int(period)
+            family_event["outer_train_rows"] = int(train_mask.sum())
+            family_selection_events.append(family_event)
+            if verbose:
+                selected_names = ",".join(family_event["selected_families"]) or "core_only"
+                print(
+                    f"        fold-local families: {selected_names}; "
+                    f"gain={family_event.get('total_log_loss_gain', 0.0):.6f}",
+                    flush=True,
+                )
+        X_tr = X_tr_full[:, current_learner_indices]
+        X_te = X_te_full[:, current_learner_indices]
         te_meta = [meta[i] for i in np.where(test_mask)[0]]
         base_rate = float(np.mean(y_tr))
         sw_tr = _recency_weights(periods[train_mask], recency_half_life)
@@ -907,8 +1202,8 @@ def walk_forward(
                 X_tr,
                 y_tr,
                 periods[train_mask],
-                learner_cols,
-                set(learner_cols) & (set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS)),
+                current_learner_cols,
+                set(current_learner_cols) & (set(DIFF_COLUMNS) | set(EXTENDED_DIFF_COLUMNS) | set(EXTRA_DIFF_COLUMNS)),
                 n_trials=optuna_trials,
                 gap=max(1, gap),
                 seed=seed + wi,
@@ -943,7 +1238,7 @@ def walk_forward(
                 if verbose:
                     print(f"        fitting {kind}...", flush=True)
                 fitted[kind] = fit_calibrated_multi(
-                    kind, X_tr, y_tr, learner_cols, random_state=seed + wi, verbose=verbose,
+                    kind, X_tr, y_tr, current_learner_cols, random_state=seed + wi, verbose=verbose,
                     sample_weight=sw_tr,
                     estimator_params={"C": current_logistic_c} if kind == "logistic" else None,
                 )
@@ -1000,18 +1295,33 @@ def walk_forward(
             common = {
                 "match_id": m["id"], "date": m["date"], "event": m.get("event"),
                 "team1": m["team1"], "team2": m["team2"], "actual": int(y_te[i]),
+                "period": int(period),
                 "format": m.get("format"),
                 "environment": m.get("environment"),
                 "stage": m.get("stage"),
                 "event_tier": m.get("event_tier"),
                 "patch_version": m.get("patch_version"),
                 "map_pool_regime": m.get("map_pool_regime"),
+                "selected_feature_families": list(
+                    family_selection_events[-1].get("selected_families") or []
+                ) if family_selection_events else [],
             }
             preds["base_rate"].append({**common, "prob_team1": base_rate})
             preds["elo"].append({**common, "prob_team1": float(elo_p[i])})
             preds["glicko"].append({**common, "prob_team1": float(glicko_p[i])})
             for name, arr in cand.items():
                 preds[name].append({**common, "prob_team1": float(arr[i])})
+    selection_candidates = [
+        name for name in [*specs, *rating_candidates]
+        if preds.get(name)
+    ]
+    policy_rows, selection_report = causal_candidate_policy(
+        preds,
+        selection_candidates,
+        min_history=selection_min_history,
+    )
+    if policy_rows:
+        preds["nested_model_policy"] = policy_rows
     if tuning_report is not None:
         tuning_report.update({
             "enabled": any(event.get("enabled") for event in tuning_events),
@@ -1022,8 +1332,136 @@ def walk_forward(
             "inner_gap": int(max(1, gap)),
             "events": tuning_events,
             "last_best_c": current_logistic_c,
+            "candidate_selection": selection_report,
         })
+    if feature_selection_report is not None:
+        feature_selection_report.update(
+            {
+                "method": "fold_local_forward_temporal_log_loss",
+                "automatic": True,
+                "retune_periods": int(
+                    getattr(feature_selection_config, "retune_periods", 0)
+                ),
+                "events": family_selection_events,
+            }
+        )
     return preds
+
+
+def causal_candidate_policy(
+    preds: dict[str, list[dict[str, Any]]],
+    candidate_names: list[str] | tuple[str, ...],
+    min_history: int = 200,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Select a candidate before each period using only earlier OOS labels.
+
+    The returned prediction stream is an honest estimate of the complete model
+    selection policy. Candidate metrics remain useful diagnostics, but are not
+    used as the reported production score after looking at the same test labels.
+    """
+    names = [name for name in candidate_names if preds.get(name)]
+    if not names:
+        return [], {"enabled": False, "reason": "no_candidates"}
+    reference_ids = [str(row["match_id"]) for row in preds[names[0]]]
+    complete_names = [
+        name
+        for name in names
+        if [str(row["match_id"]) for row in preds[name]] == reference_ids
+    ]
+    excluded_incomplete = [name for name in names if name not in complete_names]
+    names = complete_names
+    if not names:
+        return [], {
+            "enabled": False,
+            "reason": "no_complete_candidate_stream",
+            "excluded_incomplete": excluded_incomplete,
+        }
+    by_name = {
+        name: {str(row["match_id"]): row for row in preds[name]}
+        for name in names
+    }
+    reference = preds[names[0]]
+    periods = sorted({int(row["period"]) for row in reference})
+    losses = {name: 0.0 for name in names}
+    counts = {name: 0 for name in names}
+    output: list[dict[str, Any]] = []
+    decisions: list[dict[str, Any]] = []
+
+    for period in periods:
+        eligible = [name for name in names if counts[name] >= min_history]
+        selected = min(
+            eligible or [names[0]],
+            key=lambda name: (
+                losses[name] / counts[name] if counts[name] else float("inf"),
+                names.index(name),
+            ),
+        )
+        period_reference = [
+            row for row in reference if int(row["period"]) == period
+        ]
+        selected_rows = by_name[selected]
+        emitted = 0
+        for row in period_reference:
+            chosen = selected_rows.get(str(row["match_id"]))
+            if chosen is None:
+                continue
+            output.append({**chosen, "selected_candidate": selected})
+            emitted += 1
+        decisions.append(
+            {
+                "period": period,
+                "selected_candidate": selected,
+                "history_rows": int(counts[selected]),
+                "history_log_loss": (
+                    float(losses[selected] / counts[selected])
+                    if counts[selected] else None
+                ),
+                "predictions": emitted,
+            }
+        )
+
+        # Only after emitting this period may its labels influence future choices.
+        for name in names:
+            candidate_rows = by_name[name]
+            for row in period_reference:
+                candidate = candidate_rows.get(str(row["match_id"]))
+                if candidate is None:
+                    continue
+                probability = float(np.clip(candidate["prob_team1"], 1e-9, 1 - 1e-9))
+                actual = int(candidate["actual"])
+                losses[name] += -(
+                    actual * math.log(probability)
+                    + (1 - actual) * math.log(1 - probability)
+                )
+                counts[name] += 1
+
+    eligible_final = [name for name in names if counts[name] >= min_history]
+    production_choice = min(
+        eligible_final or [names[0]],
+        key=lambda name: (
+            losses[name] / counts[name] if counts[name] else float("inf"),
+            names.index(name),
+        ),
+    )
+    return output, {
+        "enabled": True,
+        "method": "prequential_oos_log_loss",
+        "min_history": int(min_history),
+        "default_candidate": names[0],
+        "excluded_incomplete": excluded_incomplete,
+        "production_choice": production_choice,
+        "final_history": {
+            name: {
+                "n": int(counts[name]),
+                "log_loss": (
+                    float(losses[name] / counts[name])
+                    if counts[name] else None
+                ),
+            }
+            for name in names
+        },
+        "decisions": decisions,
+    }
 
 
 def summarize(preds: dict[str, list[dict[str, Any]]]) -> dict[str, dict[str, float]]:
@@ -1583,41 +2021,26 @@ def main() -> int:
     print("[2/6] Construyendo features point-in-time…", flush=True)
     t0 = time.time()
     X_dicts, y_list, meta, state = build_training_frame(rows, form_half_life=args.form_half_life)
-    selected_columns, feature_policies = select_feature_columns(
+    _, feature_policies = select_feature_columns(
         X_dicts, args.feature_profile, runtime_config.feature_thresholds
     )
-    selected_matrix = _matrix(X_dicts, selected_columns)
-    model_columns, exact_pruning = prune_exact_redundancies(
-        selected_matrix,
-        selected_columns,
-        protected={"elo_prob_centered", "glicko_prob_centered"},
+    model_columns = candidate_feature_columns(
+        args.feature_profile, runtime_config.feature_thresholds
     )
-    feature_policies["feature_pruning"] = {
-        "available_rows": len(X_dicts),
-        "min_rows": 0,
-        "enabled": bool(exact_pruning["input_columns"] != exact_pruning["output_columns"]),
-        "columns": list(model_columns),
-        "activation": "automatic_target_free_exact_redundancy_only",
-        **exact_pruning,
-    }
     candidate_only_columns = set(BAYES_BT_FEATURE_COLUMNS) | set(KALMAN_FEATURE_COLUMNS)
-    learner_columns = [column for column in model_columns if column not in candidate_only_columns]
-    learner_indices = [model_columns.index(column) for column in learner_columns]
+    base_learner_columns = list(
+        FEATURE_COLUMNS if args.feature_profile == "error-aware" else BASE_FEATURE_COLUMNS
+    )
+    learner_columns = list(base_learner_columns)
     for family in ("bayesian_bradley_terry", "kalman_state_space"):
         feature_policies[family]["production_scope"] = (
             "standalone_and_super_learner_candidate_not_generic_learner_matrix"
         )
-    analytics_policy = feature_policies["analytics"]
-    context_policy = feature_policies["context"]
-    player_policy = feature_policies["player_snapshots"]
-    model_b_columns = list(learner_columns) + ODDS_FEATURE_COLUMNS
     X_all = _matrix(X_dicts, model_columns)
-    X_model_b_dicts = add_odds_features(X_dicts, rows)
-    X_model_b = _matrix(X_model_b_dicts, model_b_columns)
     y_all = np.array(y_list, dtype=int)
     periods = np.array([_period_index(r.get("date_obj")) for r in rows])
     print(f"      {len(X_all)} filas, {len(model_columns)} features en {time.time()-t0:.1f}s")
-    print("      activacion automatica de extended features:")
+    print("      elegibilidad por cobertura (activacion fold-local por log loss):")
     for family, policy in feature_policies.items():
         detail = f"{policy['available_rows']}/{policy['min_rows']}"
         if family == "context":
@@ -1625,12 +2048,13 @@ def main() -> int:
                 f"; LAN={policy['lan_rows']}/{policy['min_env_rows']}"
                 f"; online={policy['online_rows']}/{policy['min_env_rows']}"
             )
-        print(f"        {family:18s} {'ON' if policy['enabled'] else 'OFF':3s} ({detail})")
+        print(f"        {family:18s} {'READY' if policy['enabled'] else 'WAIT ':5s} ({detail})")
 
     print("[3/6] Walk-forward semanal…", flush=True)
     print(f"      candidatos: {'con' if has_catboost else 'sin'} CatBoost · half_life={args.form_half_life:.0f}d · wf_gap={args.wf_gap}")
     t0 = time.time()
     optuna_report: dict[str, Any] = {}
+    fold_feature_report: dict[str, Any] = {}
     preds = walk_forward(
         X_all, y_all, periods, meta, model_columns, args.warmup_weeks,
         args.min_train, gap=args.wf_gap, algorithm_kinds=enabled_kinds,
@@ -1639,7 +2063,88 @@ def main() -> int:
         optuna_retune_periods=max(1, args.optuna_retune_weeks),
         tuning_report=optuna_report,
         learner_cols=learner_columns,
+        X_dicts=X_dicts,
+        base_learner_cols=base_learner_columns,
+        feature_thresholds=runtime_config.feature_thresholds,
+        feature_selection_config=runtime_config.feature_selection,
+        feature_selection_report=fold_feature_report,
         seed=args.seed,
+        selection_min_history=training_defaults.model_selection_min_history,
+    )
+    final_learner_columns, final_feature_selection = select_fold_local_features(
+        X_dicts,
+        y_all,
+        periods,
+        np.ones(len(y_all), dtype=bool),
+        model_columns,
+        base_learner_columns,
+        feature_thresholds=runtime_config.feature_thresholds,
+        validation_periods=runtime_config.feature_selection.validation_periods,
+        min_log_loss_gain=runtime_config.feature_selection.min_log_loss_gain,
+        min_validation_rows=runtime_config.feature_selection.min_validation_rows,
+        min_validation_available_rows=(
+            runtime_config.feature_selection.min_validation_available_rows
+        ),
+        recency_half_life=args.recency_half_life,
+        seed=args.seed,
+        verbose=args.verbose,
+    )
+    final_matrix = _matrix(X_dicts, final_learner_columns)
+    learner_columns, exact_pruning = prune_exact_redundancies(
+        final_matrix,
+        final_learner_columns,
+        protected={"elo_prob_centered", "glicko_prob_centered"},
+    )
+    learner_columns = [
+        column for column in learner_columns if column not in candidate_only_columns
+    ]
+    learner_indices = [model_columns.index(column) for column in learner_columns]
+    feature_policies["feature_pruning"] = {
+        "available_rows": len(X_dicts),
+        "min_rows": 0,
+        "enabled": bool(exact_pruning["input_columns"] != exact_pruning["output_columns"]),
+        "columns": list(learner_columns),
+        "activation": "after_fold_local_target_free_exact_redundancy",
+        **exact_pruning,
+    }
+    for family, family_result in final_feature_selection.get("families", {}).items():
+        original = feature_policies.get(family, {})
+        feature_policies[family] = {
+            **original,
+            **family_result,
+            "activation": "fold_local_temporal_log_loss",
+            "note": (
+                "Enabled only after reducing log loss on a recent temporal holdout."
+                if family_result.get("enabled")
+                else "Stored but excluded: coverage or temporal log-loss gate did not pass."
+            ),
+        }
+    feature_policies["fold_local_selection"] = {
+        "available_rows": len(X_dicts),
+        "min_rows": runtime_config.feature_selection.min_validation_rows,
+        "enabled": True,
+        "columns": list(learner_columns),
+        "activation": "nested_outer_train_only",
+        "events": len(fold_feature_report.get("events") or []),
+        "final": final_feature_selection,
+    }
+    analytics_policy = feature_policies["analytics"]
+    context_policy = feature_policies["context"]
+    player_policy = feature_policies["player_snapshots"]
+    model_b_columns = list(learner_columns) + ODDS_FEATURE_COLUMNS
+    X_model_b_dicts = add_odds_features(X_dicts, rows)
+    X_model_b = _matrix(X_model_b_dicts, model_b_columns)
+    (out / "fold_local_feature_selection.json").write_text(
+        json.dumps(
+            {"walk_forward": fold_feature_report, "final": final_feature_selection},
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    print(
+        "      familias finales por log loss temporal: "
+        + (", ".join(final_feature_selection.get("selected_families") or []) or "core_only")
     )
     metrics = summarize(preds)
     feature_policies["optuna_purged_cv"] = {
@@ -1661,7 +2166,12 @@ def main() -> int:
     print(f"      hecho en {time.time()-t0:.1f}s; n_test={n_test}")
     specs = candidate_specs(enabled_kinds)
     active_rating_candidates = [name for name in RATING_CANDIDATE_COLUMNS if name in metrics]
-    model_order = ["base_rate", "elo", "glicko"] + active_rating_candidates + list(specs.keys())
+    model_order = (
+        ["base_rate", "elo", "glicko"]
+        + active_rating_candidates
+        + list(specs.keys())
+        + ["nested_model_policy"]
+    )
     for model in model_order:
         m = metrics.get(model)
         if m:
@@ -1674,7 +2184,8 @@ def main() -> int:
         f"last_C={optuna_report.get('last_best_c', 0.5):.5f}"
     )
 
-    # Selección del modelo de producción por menor log loss walk-forward.
+    # El candidato final se decide con OOS historico ya cerrado. La metrica
+    # primaria es la politica prequential que hizo cada eleccion antes del fold.
     candidates = {
         key: metrics[key]
         for key in list(specs) + active_rating_candidates
@@ -1682,8 +2193,21 @@ def main() -> int:
     }
     if not candidates:
         raise SystemExit("Sin candidatos evaluables en walk-forward (revisa min-train/warmup).")
-    best_name = min(candidates, key=lambda k: candidates[k]["log_loss"])
-    print(f"      -> modelo de producción elegido por log loss: {best_name}")
+    diagnostic_best = min(candidates, key=lambda k: candidates[k]["log_loss"])
+    selection_report = optuna_report.get("candidate_selection") or {}
+    best_name = str(selection_report.get("production_choice") or diagnostic_best)
+    if best_name not in candidates:
+        best_name = diagnostic_best
+    evaluation_name = (
+        "nested_model_policy"
+        if metrics.get("nested_model_policy", {}).get("n")
+        else best_name
+    )
+    print(
+        "      -> politica L1 causal: "
+        f"eval={evaluation_name}; ajuste futuro={best_name}; "
+        f"mejor retrospectivo solo diagnostico={diagnostic_best}"
+    )
 
     # A4: significancia estadistica del modelo de produccion (bootstrap+Wilcoxon
     # pareado sobre log loss por-partido) vs baseline Glicko y vs el 2o mejor.
@@ -1691,16 +2215,18 @@ def main() -> int:
     second_best = ranked[1] if len(ranked) > 1 else None
     significance = {
         "production_model": best_name,
+        "evaluation_policy": evaluation_name,
+        "diagnostic_best_candidate": diagnostic_best,
         "walk_forward_gap": args.wf_gap,
         "vs_glicko_baseline": paired_significance(
-            preds.get(best_name, []), preds.get("glicko", []), seed=args.seed
+            preds.get(evaluation_name, []), preds.get("glicko", []), seed=args.seed
         ),
     }
     if second_best:
         significance["vs_second_best"] = {
             "model": second_best,
             **paired_significance(
-                preds.get(best_name, []), preds.get(second_best, []), seed=args.seed
+                preds.get(evaluation_name, []), preds.get(second_best, []), seed=args.seed
             ),
         }
     _sg = significance["vs_glicko_baseline"]
@@ -1710,9 +2236,9 @@ def main() -> int:
               f"-> {'SIGNIFICATIVO' if _sg.get('significant') else 'no concluyente'}")
 
     # Evaluación segmentada por competitividad + benchmark de mercado.
-    segments = segmented_eval(preds.get(best_name, []))
-    favorite_accuracy = favorite_accuracy_bands(preds.get(best_name, []))
-    segment_cal = segment_calibration_suite(preds.get(best_name, []))
+    segments = segmented_eval(preds.get(evaluation_name, []))
+    favorite_accuracy = favorite_accuracy_bands(preds.get(evaluation_name, []))
+    segment_cal = segment_calibration_suite(preds.get(evaluation_name, []))
     print("      calibracion por segmento:")
     for dimension in ("by_format", "by_environment", "by_stage", "by_event_tier"):
         conclusive = [
@@ -1739,7 +2265,7 @@ def main() -> int:
     )
     rich_target_predictions = rich_target_eval.pop("predictions", [])
     if rich_target_predictions:
-        binary_by_id = {row["match_id"]: row for row in preds.get(best_name, [])}
+        binary_by_id = {row["match_id"]: row for row in preds.get(evaluation_name, [])}
         comparable_binary = [binary_by_id[row["match_id"]] for row in rich_target_predictions if row["match_id"] in binary_by_id]
         comparable_rich = [row for row in rich_target_predictions if row["match_id"] in binary_by_id]
         rich_target_eval["winner_metrics"] = summarize({"rich_target": comparable_rich}).get("rich_target", {})
@@ -1757,11 +2283,11 @@ def main() -> int:
     print("      por competitividad:")
     for s in segments:
         print(f"        {s['band']:18s} n={s['n']:5d} ({s['share']*100:4.1f}%) acc={s['accuracy']:.3f} logloss={s['log_loss']:.3f}")
-    market = market_benchmark(rows, preds, best_name)
+    market = market_benchmark(rows, preds, evaluation_name)
     if market.get("n"):
         print(f"      mercado (n={market['n']}): modelo logloss={market.get('model_log_loss')} vs mercado={market.get('market_log_loss')}")
     model_b = model_b_eval(
-        X_model_b, y_all, periods, meta, rows, preds.get(best_name, []), model_b_columns,
+        X_model_b, y_all, periods, meta, rows, preds.get(evaluation_name, []), model_b_columns,
         random_seed=args.seed,
     )
     feature_policies["opening_odds_model_b"] = {
@@ -1773,9 +2299,9 @@ def main() -> int:
         "production_scope": "benchmark_and_operational_market_layer_not_model_a",
         "note": model_b.get("note", ""),
     }
-    economic = economic_backtest(rows, preds.get(best_name, []))
+    economic = economic_backtest(rows, preds.get(evaluation_name, []))
     drift_report = build_drift_report(
-        preds.get(best_name, []), rows, runtime_config.drift
+        preds.get(evaluation_name, []), rows, runtime_config.drift
     )
     if model_b.get("available"):
         mb = model_b["metrics"].get("model_b_stats_plus_opening_odds", {})
@@ -1924,6 +2450,8 @@ def main() -> int:
             "economic_backtest": {k: v for k, v in economic.items() if k != "bets"},
             "drift_monitoring": drift_report,
             "production_model": best_name,
+            "evaluation_policy": evaluation_name,
+            "candidate_selection": selection_report,
             "model": "Glicko-2 features + " + {
                 "ensemble_cal": "LightGBM ⊕ Logística (Platt)",
                 "ensemble_iso": "LightGBM ⊕ Logística (isotónica)",
@@ -1961,7 +2489,8 @@ def main() -> int:
     )
     favorite_accuracy.update(
         {
-            "model": best_name,
+            "model": evaluation_name,
+            "production_fit": best_name,
             "trained_at": artifact.metadata["trained_at"],
         }
     )
@@ -2044,10 +2573,55 @@ def main() -> int:
             "model_registry_dir": str(out),
             "note": "--no-promote: verificacion/local, no toca artefacto de produccion.",
         }
+        artifact.metadata["registry"] = registry
+        artifact.save(artifact_output)
     else:
+        from health_gates import store_report, validate_candidate
+
+        candidate_path = out / "candidate_model.pkl"
+        artifact.metadata["registry"] = {
+            "promoted": False,
+            "note": "Candidate pending blocking health gates.",
+        }
+        artifact.save(candidate_path)
+        gate_report = validate_candidate(Path(args.db), candidate_path, out)
+        (out / "candidate_pre_registry_health_gate.json").write_text(
+            json.dumps(gate_report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        store_report(Path(args.db), gate_report)
+        if gate_report["status"] != "pass":
+            failed = [
+                item["name"]
+                for item in gate_report.get("checks", [])
+                if item.get("status") == "fail"
+            ]
+            raise SystemExit(
+                "Candidato NO promovido por health gates: " + ", ".join(failed)
+            )
         registry = save_model_registry(artifact, metrics, shap_rows, segments, market, model_b, economic)
-    artifact.metadata["registry"] = registry
-    artifact.save(artifact_output)
+        registry["promoted"] = True
+        artifact.metadata["registry"] = registry
+        artifact.save(candidate_path)
+        artifact.save(Path(registry["registered_model"]))
+        final_gate_report = validate_candidate(Path(args.db), candidate_path, out)
+        (out / "candidate_health_gate.json").write_text(
+            json.dumps(final_gate_report, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        store_report(Path(args.db), final_gate_report)
+        if final_gate_report["status"] != "pass":
+            failed = [
+                item["name"]
+                for item in final_gate_report.get("checks", [])
+                if item.get("status") == "fail"
+            ]
+            raise SystemExit(
+                "Candidato final NO promovido por health gates: " + ", ".join(failed)
+            )
+        production_tmp = ARTIFACT_PATH.with_suffix(".pkl.tmp")
+        production_tmp.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(candidate_path, production_tmp)
+        os.replace(production_tmp, ARTIFACT_PATH)
     _write_report(out, metrics, shap_rows, rows, artifact, segments, market, model_b, economic)
     print(f"      artefacto: {artifact_output}")
     print(f"      resultados: {out}")
@@ -2100,7 +2674,12 @@ def _write_report(out: Path, metrics: dict, shap_rows: list, rows: list, artifac
         row("ensemble_beta", "Ensemble (beta)"),
         row("ensemble3_cal", "**Ensemble +CatBoost (Platt)**"),
         row("super_learner_cal", "**Super Learner temporal (Platt)**"),
-        f"\n> Modelo de producción elegido por menor log loss: **{artifact.metadata.get('production_model')}**.\n",
+        row("nested_model_policy", "**Politica causal de seleccion (L1)**"),
+        (
+            "\n> Metrica primaria sin sesgo de seleccion: "
+            f"**{artifact.metadata.get('evaluation_policy')}**. Candidato ajustado para el siguiente "
+            f"periodo: **{artifact.metadata.get('production_model')}**.\n"
+        ),
         "\n> Log loss y Brier son el objetivo (probabilidades calibradas), no solo accuracy.\n",
         "> El baseline 'elige al favorito' (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si lo supera en log loss/Brier/AUC.\n",
         "\n## Importancia de features (SHAP, |valor| medio)\n\n",

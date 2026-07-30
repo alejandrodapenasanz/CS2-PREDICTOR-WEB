@@ -7,11 +7,30 @@ from BBDD import build_db, ingest
 from PIPELINE.opportunity import annotate_opportunities
 
 
+def _confirmed_rosters() -> dict:
+    return {
+        side: {
+            "players": [
+                {"id": f"{side}-{index}", "name": f"{side} player {index}"}
+                for index in range(1, 6)
+            ],
+            "announced_lineup_complete": True,
+            "integrity": {
+                "status": "confirmed",
+                "announced_complete": True,
+                "announced_matches_rendered": True,
+            },
+        }
+        for side in ("team1", "team2")
+    }
+
+
 def _entry(match_id: str, day: str, confidence: float, reliability: float) -> dict:
     probability = confidence
     return {
         "id": match_id,
         "date": day,
+        "rosters": _confirmed_rosters(),
         "prediction": {
             "decision_prob_team1": probability,
             "decision_confidence": confidence,
@@ -39,6 +58,28 @@ def test_annotate_opportunities_applies_gates_and_daily_ranks() -> None:
     assert predictions["3"]["opportunity_rank"] is None
     assert predictions["4"]["opportunity_rank_day"] == 1
     assert predictions["4"]["is_best_opportunity"] is True
+
+
+def test_incomplete_announced_lineup_is_never_a_best_opportunity() -> None:
+    incomplete = _entry("incomplete", "2026-07-01", 0.99, 0.99)
+    incomplete["rosters"]["team2"]["players"].pop()
+    incomplete["rosters"]["team2"]["announced_lineup_complete"] = False
+    incomplete["rosters"]["team2"]["integrity"] = {
+        "status": "announced_incomplete",
+        "announced_complete": False,
+        "announced_matches_rendered": None,
+    }
+    confirmed = _entry("confirmed", "2026-07-01", 0.70, 0.80)
+
+    annotate_opportunities([incomplete, confirmed])
+
+    blocked = incomplete["prediction"]
+    assert blocked["opportunity_eligible"] is False
+    assert blocked["opportunity_roster_confirmed"] is False
+    assert blocked["opportunity_rank_day"] is None
+    assert blocked["is_best_opportunity"] is False
+    assert "team2_announced_lineup_incomplete" in blocked["opportunity_ineligible_reasons"]
+    assert confirmed["prediction"]["is_best_opportunity"] is True
 
 
 def test_prediction_ingest_persists_best_opportunity_metadata(tmp_path: Path) -> None:
@@ -76,7 +117,7 @@ def test_prediction_ingest_persists_best_opportunity_metadata(tmp_path: Path) ->
                 "opportunity_rank": 1,
                 "opportunity_rank_day": 1,
                 "is_best_opportunity": True,
-                "opportunity_policy_version": "best_opportunity_v1",
+                "opportunity_policy_version": "best_opportunity_v2_confirmed_lineups",
             },
             "controls": {
                 "decision_policy": {"source": "test"},
@@ -175,4 +216,5 @@ def test_best_opportunity_web_has_no_result_cap() -> None:
     )[0]
 
     assert ".slice(" not in render_best
+    assert "x.m.prediction?.opportunity_eligible===true" in render_best
     assert "decisionConfidence(x.m)>=probMin && x.rel>=relMin" in render_best

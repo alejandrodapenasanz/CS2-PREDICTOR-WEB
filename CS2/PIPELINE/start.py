@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import gzip
 import hashlib
@@ -87,6 +88,7 @@ PLAYER_CORE_STAT_LABELS = ("Rating 3.0", "KPR", "DPR", "APR", "KAST", "Impact", 
 PREMATCH_REFRESH_HOURS = float(os.environ.get("HLTV_PREMATCH_REFRESH_HOURS", "6"))
 PREMATCH_NEAR_START_REFRESH_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_START_REFRESH_HOURS", "2"))
 PREMATCH_NEAR_START_WINDOW_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_START_WINDOW_HOURS", "24"))
+CLOSING_ODDS_MAX_AGE_HOURS = float(os.environ.get("HLTV_CLOSING_ODDS_MAX_AGE_HOURS", "6"))
 
 # --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
 # Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
@@ -1690,8 +1692,8 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
         if not label or not value:
             continue
         if "prize" in label:
-            amount = re.sub(r"[^0-9]", "", value)
-            event_metadata["prize_pool"] = int(amount) if amount else None
+            event_metadata["prize_pool"] = parse_money_amount(value)
+            event_metadata["prize_pool_raw"] = value
         elif "teams competing" in label:
             event_metadata["teams_competing"] = parse_int(value)
         elif label == "event":
@@ -1894,6 +1896,24 @@ def parse_int(text: Any) -> int | None:
         return None
     match = re.search(r"-?\d+", str(text).replace(",", ""))
     return int(match.group(0)) if match else None
+
+
+def parse_money_amount(value: Any) -> int | None:
+    """Parse source amounts such as '$5K', 'EUR 20,000' or '$1.2M'."""
+    text = clean_text(value)
+    if not text:
+        return None
+    match = re.search(r"([0-9]+(?:[.,][0-9]+)?)\s*([kmb])?", text, re.IGNORECASE)
+    if not match:
+        return None
+    number_text = match.group(1)
+    suffix = (match.group(2) or "").lower()
+    if suffix:
+        number = float(number_text.replace(",", "."))
+        multiplier = {"k": 1_000, "m": 1_000_000, "b": 1_000_000_000}[suffix]
+        return int(round(number * multiplier))
+    digits = re.sub(r"[^0-9]", "", number_text)
+    return int(digits) if digits else None
 
 
 def clean_texts(node) -> list[str]:
@@ -2377,7 +2397,9 @@ def append_odds_point(record: dict[str, Any], odds: dict[str, Any], run_dir: Pat
     record["latest_odds_point"] = point
     record["latest_odds"] = odds
     if record.get("status") == "completed":
-        record.setdefault("closing_odds", point)
+        closing = observed_closing_odds(record, point)
+        if closing:
+            record.setdefault("closing_odds", closing)
     return True
 
 
@@ -3013,7 +3035,9 @@ def update_pending_matches(
         if result:
             record.update(result)
             if record.get("latest_odds_point") and not record.get("closing_odds"):
-                record["closing_odds"] = record["latest_odds_point"]
+                closing = observed_closing_odds(record, record["latest_odds_point"])
+                if closing:
+                    record["closing_odds"] = closing
             record["last_updated_at"] = now_utc()
             update_item.update({"status": "completed", "winner": result.get("winner")})
             updates.append(update_item)
@@ -3191,6 +3215,79 @@ def player_ids_from_team_profiles_payload(profiles: list[dict[str, Any]]) -> set
             if player_id:
                 player_ids.add(player_id)
     return player_ids
+
+
+def player_stats_profiles_with_announced_lineups(
+    profiles: list[dict[str, Any]],
+    snapshots: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Add match-specific lineup players to the player-stat candidate set.
+
+    The result is intentionally separate from ``team_profiles.json``: an
+    announced lineup is authoritative for that match, but must not rewrite the
+    team's persistent roster history.
+    """
+    expanded = copy.deepcopy(profiles)
+    by_team_id = {
+        str(item.get("id") or ""): item
+        for item in expanded
+        if str(item.get("id") or "")
+    }
+    lineup_players_seen: set[str] = set()
+    players_added: set[str] = set()
+    synthetic_teams = 0
+
+    for snapshot in snapshots:
+        for lineup in (snapshot.get("prematch_lineups") or {}).values():
+            if not isinstance(lineup, dict):
+                continue
+            team_id = str(lineup.get("hltv_team_id") or "")
+            if not team_id:
+                continue
+            item = by_team_id.get(team_id)
+            if item is None:
+                item = {
+                    "id": team_id,
+                    "profile": {
+                        "name": lineup.get("team_name"),
+                        "squad": [],
+                        "source": "prematch_announced_lineup_candidate",
+                    },
+                }
+                expanded.append(item)
+                by_team_id[team_id] = item
+                synthetic_teams += 1
+            profile = item.setdefault("profile", {})
+            squad = profile.setdefault("squad", [])
+            existing_ids = {
+                str(player.get("id") or "")
+                for player in squad
+                if str(player.get("id") or "")
+            }
+            for player in lineup.get("players") or []:
+                player_id = str(player.get("hltv_player_id") or "")
+                if not player_id:
+                    continue
+                lineup_players_seen.add(player_id)
+                if player_id in existing_ids:
+                    continue
+                squad.append(
+                    {
+                        "id": player_id,
+                        "name": player.get("nickname") or player_id,
+                        "link": player.get("profile_link"),
+                        "source": "prematch_announced_lineup_candidate",
+                    }
+                )
+                existing_ids.add(player_id)
+                players_added.add(player_id)
+
+    return expanded, {
+        "lineup_players_seen": len(lineup_players_seen),
+        "lineup_players_added": len(players_added),
+        "synthetic_teams_added": synthetic_teams,
+        "players_requested": len(player_ids_from_team_profiles_payload(expanded)),
+    }
 
 
 def player_ids_from_team_profiles(team_profiles_file: Path) -> set[str]:
@@ -3856,6 +3953,34 @@ def upcoming_match_datetime(match: dict[str, Any]) -> datetime | None:
         return None
 
 
+def observed_closing_odds(
+    record: dict[str, Any],
+    point: dict[str, Any] | None,
+    *,
+    max_age_hours: float = CLOSING_ODDS_MAX_AGE_HOURS,
+) -> dict[str, Any] | None:
+    """Return a closing quote only when it was observed shortly pre-kickoff."""
+    if not point or not point.get("captured_at"):
+        return None
+    kickoff = upcoming_match_datetime(record)
+    if kickoff is None:
+        return None
+    try:
+        captured = datetime.fromisoformat(
+            str(point["captured_at"]).replace("Z", "+00:00")
+        )
+    except ValueError:
+        return None
+    seconds_to_start = int((kickoff - captured).total_seconds())
+    if seconds_to_start < 0 or seconds_to_start > max_age_hours * 3600:
+        return None
+    qualified = dict(point)
+    qualified["quality"] = "closing_observed"
+    qualified["seconds_to_start"] = seconds_to_start
+    qualified["is_observed_closing"] = True
+    return qualified
+
+
 def scheduled_snapshot_refresh_reason(record: dict[str, Any], match: dict[str, Any], now: datetime | None = None) -> str | None:
     """Decide si corresponde una foto incremental, sin tocar la primera."""
     if record.get("status") == "completed":
@@ -4004,7 +4129,9 @@ def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_d
         record.setdefault("opening_odds", odds_point)
         record["latest_odds_point"] = odds_point
         if record.get("status") == "completed":
-            record.setdefault("closing_odds", odds_point)
+            closing = observed_closing_odds(record, odds_point)
+            if closing:
+                record.setdefault("closing_odds", closing)
     record.setdefault("snapshot_files", [])
     if snapshot_file not in record["snapshot_files"]:
         record["snapshot_files"].append(snapshot_file)
@@ -4215,11 +4342,20 @@ def main() -> int:
     manifest["steps"]["roster_history"] = roster_history
     write_json(run_dir / "manifest.json", manifest)
 
+    player_stats_profiles, player_stats_candidates = player_stats_profiles_with_announced_lineups(
+        team_profiles,
+        snapshots,
+    )
+    player_stats_profiles_file = run_dir / "player_stats_profiles.json"
+    write_json(player_stats_profiles_file, player_stats_profiles)
+    manifest["steps"]["player_stats_candidates"] = player_stats_candidates
+    write_json(run_dir / "manifest.json", manifest)
+
     player_stats_result = {"ok": False, "reason": "skipped"}
-    if not args.skip_player_stats and team_profiles:
+    if not args.skip_player_stats and player_stats_profiles:
         log("phase: player compare stats", force=VERBOSE)
         player_stats_result = collect_player_stats(
-            run_dir / "team_profiles.json",
+            player_stats_profiles_file,
             run_dir,
             datetime.now().year,
             args.player_delay,

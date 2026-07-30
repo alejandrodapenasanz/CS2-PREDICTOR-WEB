@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sqlite3
 import sys
@@ -27,6 +28,11 @@ if str(MODEL_DIR) not in sys.path:
 
 from BBDD import build_db
 from cs2model import dataio
+from cs2model.identity import (
+    choose_match_team,
+    is_provisional_team_name,
+    resolved_team,
+)
 from PIPELINE.match_context import parse_match_context_meta, schema_stage
 from PIPELINE.opportunity import (
     MIN_DECISION_CONFIDENCE,
@@ -163,15 +169,7 @@ def entity_is_fresh(conn: sqlite3.Connection, entity_type: str, entity_key: str,
 
 
 def team_from_record(record: dict[str, Any], side: str) -> dict[str, Any] | None:
-    direct = record.get(side)
-    if isinstance(direct, dict) and direct.get("name"):
-        return direct
-    detail = record.get("detail") or {}
-    match = detail.get("match") or {}
-    direct = match.get(side)
-    if isinstance(direct, dict) and direct.get("name"):
-        return direct
-    return None
+    return choose_match_team(record, side)
 
 
 def context_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
@@ -194,7 +192,9 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
         return 0
     team1 = team_from_record(record, "team1")
     team2 = team_from_record(record, "team2")
-    if not team1 or not team2:
+    # Keep unresolved evidence in raw_snapshots, but do not normalize a match
+    # until both announced participants have stable HLTV identities.
+    if not resolved_team(team1) or not resolved_team(team2):
         return 0
     cur = conn.cursor()
     team_cache, team_hltv_cache = build_db._load_team_caches(conn)
@@ -224,24 +224,40 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
     has_analytics = 1 if record.get("analytics") or record.get("latest_analytics_file") else 0
     has_context = 1 if context else 0
     dt = parse_datetime(record.get("date"), record.get("hour")) or record.get("date")
+    datetime_precision = "exact" if dt and "T" in str(dt) else "date_only"
     cur.execute(
         """
         INSERT INTO matches(
-            hltv_match_id, event_id, datetime_utc, team1_id, team2_id, best_of,
+            hltv_match_id, event_id, datetime_utc, datetime_precision,
+            team1_id, team2_id, best_of,
             stage, environment, stage_detail, incentive_label, high_stakes, opening_match,
             winner_advances, loser_eliminated, bracket, context_json, status, data_tier,
             prematch_captured_at_utc, result_filled_at_utc, has_prematch_odds, has_analytics,
             has_context, winner_team_id, score_t1, score_t2
         )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(hltv_match_id) DO UPDATE SET
             -- Antes de empezar HLTV puede corregir/renombrar un participante,
             -- hora o fase. El hecho actual se actualiza; las fotos raw y la
             -- primera cuota permanecen append-only en sus propias tablas.
             event_id=CASE WHEN matches.status <> 'completed' THEN excluded.event_id ELSE matches.event_id END,
             datetime_utc=CASE WHEN matches.status <> 'completed' THEN excluded.datetime_utc ELSE matches.datetime_utc END,
-            team1_id=CASE WHEN matches.status <> 'completed' THEN excluded.team1_id ELSE matches.team1_id END,
-            team2_id=CASE WHEN matches.status <> 'completed' THEN excluded.team2_id ELSE matches.team2_id END,
+            datetime_precision=CASE
+                WHEN matches.status <> 'completed' THEN excluded.datetime_precision
+                ELSE matches.datetime_precision
+            END,
+            -- En RESULT el detalle final de HLTV es autoritativo. Esto resuelve
+            -- TBD/winner/loser sin alterar los snapshots PRE-MATCH append-only.
+            team1_id=CASE
+                WHEN excluded.status='completed' THEN excluded.team1_id
+                WHEN matches.status <> 'completed' THEN excluded.team1_id
+                ELSE matches.team1_id
+            END,
+            team2_id=CASE
+                WHEN excluded.status='completed' THEN excluded.team2_id
+                WHEN matches.status <> 'completed' THEN excluded.team2_id
+                ELSE matches.team2_id
+            END,
             best_of=CASE WHEN matches.status <> 'completed' THEN excluded.best_of ELSE matches.best_of END,
             stage=CASE WHEN matches.status <> 'completed' THEN excluded.stage ELSE matches.stage END,
             environment=CASE WHEN matches.status <> 'completed' THEN excluded.environment ELSE matches.environment END,
@@ -268,14 +284,18 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
                 WHEN excluded.status='completed' THEN matches.has_context
                 ELSE MAX(matches.has_context, excluded.has_context)
             END,
-            winner_team_id=COALESCE(matches.winner_team_id, excluded.winner_team_id),
-            score_t1=COALESCE(matches.score_t1, excluded.score_t1),
-            score_t2=COALESCE(matches.score_t2, excluded.score_t2)
+            winner_team_id=CASE
+                WHEN excluded.status='completed' THEN excluded.winner_team_id
+                ELSE matches.winner_team_id
+            END,
+            score_t1=CASE WHEN excluded.status='completed' THEN excluded.score_t1 ELSE matches.score_t1 END,
+            score_t2=CASE WHEN excluded.status='completed' THEN excluded.score_t2 ELSE matches.score_t2 END
         """,
         (
             hltv_id,
             event_id,
             dt,
+            datetime_precision,
             team1_id,
             team2_id,
             best_of,
@@ -309,7 +329,6 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
     payload = read_json(path, [])
     if not isinstance(payload, list):
         return 0
-    version = f"glicko2+model@{run_dir.name}"
     inserted = 0
     for row in payload:
         pred = row.get("prediction") or {}
@@ -319,9 +338,21 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
         hltv_id = str(row.get("id") or "")
         match_id = build_db._match_id_for_hltv(conn, hltv_id)
         match_row = conn.execute(
-            "SELECT team1_id, team2_id FROM matches WHERE match_id=?",
+            """
+            SELECT m.team1_id, m.team2_id, m.datetime_utc, m.datetime_precision,
+                   m.status, t1.name AS team1_name, t2.name AS team2_name,
+                   t1.hltv_id AS team1_hltv_id, t2.hltv_id AS team2_hltv_id
+            FROM matches m
+            JOIN teams t1 ON t1.team_id=m.team1_id
+            JOIN teams t2 ON t2.team_id=m.team2_id
+            WHERE m.match_id=?
+            """,
             (match_id,),
         ).fetchone()
+        model_trace = row.get("model_trace") or {}
+        version = str(
+            model_trace.get("model_version") or f"untraced_model@{run_dir.name}"
+        )
         decision_prob = pred.get("decision_prob_team1")
         if decision_prob is None:
             decision_prob = pred.get("risk_adjusted_prob_team1")
@@ -431,9 +462,183 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             """,
             tuple(values[column] for column in columns),
         )
+        upsert_prediction_ledger(
+            conn,
+            row,
+            match_id=match_id,
+            match_row=match_row,
+            model_version=version,
+        )
         inserted += 1
+    finalize_prediction_ledger(conn)
     build_db.backfill_prediction_opportunities(conn)
     return inserted
+
+
+def upsert_prediction_ledger(
+    conn: sqlite3.Connection,
+    row: dict[str, Any],
+    *,
+    match_id: int,
+    match_row: sqlite3.Row | tuple | None,
+    model_version: str,
+) -> int:
+    """Freeze the latest traceable prediction observed strictly pre-kickoff."""
+    if match_row is None:
+        return 0
+    pred = row.get("prediction") or {}
+    probability = build_db.safe_float(pred.get("model_prob_team1"))
+    if probability is None or not 0.0 < probability < 1.0:
+        return 0
+    kickoff = str(match_row[2] or "")
+    predicted_at = str(row.get("captured_at") or utcnow())
+    trace = row.get("model_trace") or {}
+    invalid_reasons: list[str] = []
+    if str(match_row[3]) != "exact" or "T" not in kickoff:
+        invalid_reasons.append("kickoff_not_exact")
+    if predicted_at >= kickoff:
+        invalid_reasons.append("prediction_not_prematch")
+    if is_provisional_team_name(match_row[5]) or is_provisional_team_name(match_row[6]):
+        invalid_reasons.append("provisional_participant")
+    if match_row[7] is None or match_row[8] is None:
+        invalid_reasons.append("participant_without_stable_hltv_id")
+    if trace.get("is_fallback") or not trace.get("artifact_sha256"):
+        invalid_reasons.append("untraced_or_fallback_artifact")
+    status = "invalid" if invalid_reasons else "open"
+    now = utcnow()
+    conn.execute(
+        """
+        INSERT INTO prediction_ledger(
+            match_id, hltv_match_id, team1_id, team2_id, kickoff_utc,
+            predicted_at_utc, model_version, artifact_sha256, config_sha256,
+            feature_policy_sha256, prob_team1, decision_prob_team1,
+            reliability_score, prediction_json, features_json, data_quality_json,
+            ledger_status, invalid_reason, created_at_utc, updated_at_utc
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(match_id) DO UPDATE SET
+            hltv_match_id=excluded.hltv_match_id,
+            team1_id=excluded.team1_id,
+            team2_id=excluded.team2_id,
+            kickoff_utc=excluded.kickoff_utc,
+            predicted_at_utc=excluded.predicted_at_utc,
+            model_version=excluded.model_version,
+            artifact_sha256=excluded.artifact_sha256,
+            config_sha256=excluded.config_sha256,
+            feature_policy_sha256=excluded.feature_policy_sha256,
+            prob_team1=excluded.prob_team1,
+            decision_prob_team1=excluded.decision_prob_team1,
+            reliability_score=excluded.reliability_score,
+            prediction_json=excluded.prediction_json,
+            features_json=excluded.features_json,
+            data_quality_json=excluded.data_quality_json,
+            ledger_status=excluded.ledger_status,
+            invalid_reason=excluded.invalid_reason,
+            updated_at_utc=excluded.updated_at_utc
+        WHERE prediction_ledger.ledger_status='open'
+          AND excluded.predicted_at_utc > prediction_ledger.predicted_at_utc
+          AND excluded.predicted_at_utc < excluded.kickoff_utc
+        """,
+        (
+            match_id,
+            str(row.get("id") or ""),
+            int(match_row[0]),
+            int(match_row[1]),
+            kickoff,
+            predicted_at,
+            model_version,
+            trace.get("artifact_sha256"),
+            trace.get("config_sha256"),
+            trace.get("feature_policy_sha256"),
+            probability,
+            build_db.safe_float(pred.get("decision_prob_team1")),
+            build_db.safe_float(pred.get("reliability_score")),
+            json.dumps(pred, ensure_ascii=False),
+            json.dumps(row.get("features"), ensure_ascii=False),
+            json.dumps(row.get("data_quality"), ensure_ascii=False),
+            status,
+            ",".join(invalid_reasons) or None,
+            now,
+            now,
+        ),
+    )
+    return int(conn.execute("SELECT changes()").fetchone()[0])
+
+
+def finalize_prediction_ledger(conn: sqlite3.Connection, now: str | None = None) -> int:
+    """Freeze started matches and score only the exact frozen prediction."""
+    now = now or utcnow()
+    conn.execute(
+        """
+        UPDATE prediction_ledger
+        SET ledger_status='invalid',
+            invalid_reason=COALESCE(invalid_reason, 'prediction_not_prematch'),
+            updated_at_utc=?
+        WHERE ledger_status IN ('open','frozen')
+          AND predicted_at_utc >= kickoff_utc
+        """,
+        (now,),
+    )
+    conn.execute(
+        """
+        UPDATE prediction_ledger
+        SET ledger_status='frozen', updated_at_utc=?
+        WHERE ledger_status='open' AND kickoff_utc <= ?
+        """,
+        (now, now),
+    )
+    rows = conn.execute(
+        """
+        SELECT pl.ledger_id, pl.team1_id, pl.team2_id, pl.prob_team1,
+               m.team1_id AS result_team1_id, m.team2_id AS result_team2_id,
+               m.winner_team_id, m.result_filled_at_utc
+        FROM prediction_ledger pl
+        JOIN matches m ON m.match_id=pl.match_id
+        WHERE pl.ledger_status IN ('open','frozen')
+          AND m.status='completed'
+          AND m.winner_team_id IS NOT NULL
+        """
+    ).fetchall()
+    evaluated = 0
+    for ledger in rows:
+        if int(ledger[1]) != int(ledger[4]) or int(ledger[2]) != int(ledger[5]):
+            conn.execute(
+                """
+                UPDATE prediction_ledger
+                SET ledger_status='invalid', invalid_reason='participant_mismatch',
+                    updated_at_utc=?
+                WHERE ledger_id=?
+                """,
+                (now, ledger[0]),
+            )
+            continue
+        actual = int(int(ledger[6]) == int(ledger[1]))
+        probability = min(max(float(ledger[3]), 1e-9), 1.0 - 1e-9)
+        predicted = int(probability >= 0.5)
+        log_loss = -(
+            actual * math.log(probability)
+            + (1 - actual) * math.log(1.0 - probability)
+        )
+        conn.execute(
+            """
+            UPDATE prediction_ledger
+            SET ledger_status='evaluated', result_filled_at_utc=?,
+                actual_team1_win=?, prediction_correct=?,
+                realized_log_loss=?, realized_brier=?, updated_at_utc=?
+            WHERE ledger_id=?
+            """,
+            (
+                ledger[7] or now,
+                actual,
+                int(predicted == actual),
+                log_loss,
+                (probability - actual) ** 2,
+                now,
+                ledger[0],
+            ),
+        )
+        evaluated += 1
+    return evaluated
 
 
 def _prediction_has_player_snapshot(row: dict[str, Any]) -> bool:
@@ -751,13 +956,21 @@ def main() -> int:
     parser.add_argument("--requests-made", type=int, default=None)
     parser.add_argument("--requests-skipped-by-freshness", type=int, default=None)
     parser.add_argument("--backup-dir", default=str(DEFAULT_BACKUP_DIR))
-    parser.add_argument("--mirror-backup-dir", default=str(DEFAULT_MIRROR_BACKUP_DIR))
+    parser.add_argument(
+        "--mirror-backup-dir",
+        default=str(DEFAULT_MIRROR_BACKUP_DIR) if DEFAULT_MIRROR_BACKUP_DIR else "",
+        help="Espejo opcional; desactivado salvo ruta explicita o CS2_BACKUP_MIRROR_DIR.",
+    )
     parser.add_argument("--no-backup", action="store_true")
     parser.add_argument("--no-mirror-backup", action="store_true")
     args = parser.parse_args()
     run_dir = Path(args.run_dir) if args.run_dir else latest_run_dir()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
-    mirror = None if args.no_backup or args.no_mirror_backup else Path(args.mirror_backup_dir)
+    mirror = (
+        None
+        if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir
+        else Path(args.mirror_backup_dir)
+    )
     result = ingest_run(
         run_dir,
         Path(args.db),

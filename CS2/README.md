@@ -158,25 +158,24 @@ Walk-forward semanal (ventana expansiva, nunca k-fold aleatorio). Se evalúan
 baselines (base-rate, Elo, Glicko-2), logística, LightGBM, CatBoost y ensembles
 calibrados con Platt/isotónica/beta; se elige el de producción por **menor log loss**.
 
-### 4.4. Resultados (era CS2, 9.492 series unicas, 7.056 de test)
+### 4.4. Resultados vigentes (27-07-2026, 9.726 series, 7.290 OOS)
 
 | Modelo | Accuracy | Log loss | Brier | ROC-AUC | ECE |
 |---|---:|---:|---:|---:|---:|
-| Base rate | 0.563 | 0.685 | 0.246 | 0.487 | 0.002 |
-| Elo | 0.603 | 0.656 | 0.232 | 0.643 | 0.043 |
-| Glicko-2 | 0.609 | 0.659 | 0.233 | 0.650 | 0.049 |
-| Logística calibrada | 0.640 | 0.632 | 0.221 | 0.685 | 0.014 |
-| LightGBM calibrado | 0.640 | 0.631 | 0.221 | 0.687 | 0.017 |
-| CatBoost calibrado | 0.640 | 0.630 | 0.220 | 0.689 | 0.023 |
-| Ensemble LGBM+Log (Platt) | 0.644 | 0.629 | 0.220 | 0.691 | 0.014 |
-| Ensemble beta | 0.645 | 0.629 | 0.220 | 0.691 | 0.015 |
-| **Ensemble + CatBoost (producción)** | **0.644** | **0.628** | **0.219** | **0.692** | **0.017** |
+| Base rate | 0.5636 | 0.6851 | 0.2460 | 0.4881 | 0.0020 |
+| Elo | 0.6008 | 0.6578 | 0.2329 | 0.6399 | 0.0429 |
+| Glicko-2 | 0.6078 | 0.6598 | 0.2332 | 0.6479 | 0.0495 |
+| Logística calibrada | 0.6413 | 0.6333 | 0.2214 | 0.6832 | 0.0092 |
+| LightGBM calibrado | 0.6390 | 0.6354 | 0.2225 | 0.6788 | 0.0114 |
+| Random Forest calibrado | 0.6387 | 0.6335 | 0.2216 | 0.6834 | 0.0138 |
+| Super Learner fijo (diagnóstico) | 0.6451 | 0.6304 | 0.2202 | 0.6885 | 0.0128 |
+| **Política causal de selección (primaria)** | **0.6412** | **0.6318** | **0.2209** | **0.6858** | **0.0099** |
 
-> Hallazgo honesto: con features de resultados (relaciones monótonas tipo
-> "diferencia de rating"), la logística calibrada casi iguala al ensemble. Tras
-> ejecutar el sweep profesional con CatBoost, la mejor configuración por log loss
-> es `ensemble3_cal` con `--form-half-life 90 --wf-gap 0`. La elección sigue siendo
-> data-driven: se prioriza log loss/calibración frente a maximizar accuracy bruta.
+> La métrica primaria es `nested_model_policy`: cada semana decide con OOS
+> estrictamente anterior. `super_learner_cal` es el candidato ajustado sobre todo
+> el histórico para el siguiente periodo; su fila retrospectiva es diagnóstica,
+> no una estimación sin sesgo. La certificación independiente del zoo quedó en
+> log loss `0.6338`, por lo que no sustituye al modelo productivo actual.
 
 ### 4.5. Accuracy por probabilidad predicha
 
@@ -185,21 +184,22 @@ es siempre `max(p_team1, 1-p_team1)`; las odds no cambian el equipo elegido:
 
 | Banda predicha | Partidos | Aciertos | Accuracy observada | Prob. media predicha |
 |---|---:|---:|---:|---:|
-| 50-60% | 2.823 | 1.545 | 54,73% | 54,86% |
-| 60-70% | 2.329 | 1.516 | 65,09% | 64,88% |
-| 70-80% | 1.496 | 1.127 | 75,33% | 74,34% |
-| 80-90% | 404 | 354 | 87,62% | 83,12% |
-| 90-100% | 4 | 3 | 75,00% | 91,12% |
-| **Total** | **7.056** | **4.545** | **64,41%** | — |
+| 50-60% | 2.971 | 1.644 | 55,33% | 54,86% |
+| 60-70% | 2.358 | 1.524 | 64,63% | 64,82% |
+| 70-80% | 1.522 | 1.133 | 74,44% | 74,38% |
+| 80-90% | 432 | 366 | 84,72% | 83,13% |
+| 90-100% | 7 | 7 | 100,00% | 90,73% |
+| **Total** | **7.290** | **4.674** | **64,12%** | — |
 
-La franja 90-100% no es interpretable todavia (`n=4`). Las demas franjas son
+La franja 90-100% no es interpretable todavia (`n=7`). Las demas franjas son
 monotonas y las tres primeras estan bien calibradas; el mayor margen de mejora
 sigue en los partidos cercanos al 50%.
 
 ### 4.6. Benchmark de mercado (odds)
 
-Con odds de apertura guardadas (hoy n=98 partidos unicos, todavía ilustrativo): el **mercado** queda en
-log loss 0.610 vs 0.628 del modelo en esos mismos partidos. Confirma que las odds son muy
+Con odds de apertura guardadas (hoy `n=237`, todavía ilustrativo), el **mercado**
+queda en log loss `0.6107`; el benchmark solo se compara en ese subconjunto, no
+contra las 7.290 predicciones completas del modelo. Confirma que las odds son muy
 informativas (PROJECT.md §6.5): se usan como **benchmark a batir** y como blend
 de mercado en la web, no como feature única (canibalizaría el interés
 académico). El modelo entrenado es "Model A" (solo stats) por diseño.
@@ -217,9 +217,20 @@ Estática (HTML+JS sobre `data.js`), **sin servidor**, estilo cyberpunk
   dónde el modelo está seguro **y** respaldado por datos. La política por
   defecto exige confianza `>=60%` y fiabilidad `>=45%`. Cada run congela en
   SQLite el score, la elegibilidad y los rankings global/diario;
-  `is_best_opportunity=1` identifica el número 1 de su día.
-- **Modelo** — métricas walk-forward, importancia SHAP y curva de calibración
-  con resultados reales.
+  `is_best_opportunity=1` identifica el número 1 de su día. Para cada partido,
+  la alineación anunciada 5v5 tiene prioridad sobre el perfil general del equipo;
+  la cobertura de player stats se divide entre esos cinco y reduce fiabilidad si
+  faltan snapshots. La política `best_opportunity_v2_confirmed_lineups` exige
+  además dos alineaciones anunciadas de cinco IDs únicos que coincidan exactamente
+  con los rosters mostrados. Un lineup incompleto puede seguir apareciendo en
+  Partidos con el flag `PREMATCH_LINEUP_INCOMPLETE`, pero nunca en Best Opportunity.
+  Cada enrich escribe `roster_integrity_report.json` y aborta antes de publicar si
+  detecta un roster completo incoherente.
+- **Modelo** — métricas walk-forward, importancia SHAP, curva de calibración y
+  evolución temporal de la accuracy real. El selector ofrece últimos 7 días,
+  1 mes, 3 meses, 6 meses y 1 año; usa agregación diaria, semanal o mensual
+  según el horizonte. Cada punto se calcula con predicciones fuera de muestra y
+  ganadores reales, y se regenera automáticamente después de cada entrenamiento.
 
 ## 6. Cómo ejecutarlo
 
@@ -227,6 +238,21 @@ Requiere `python` en PATH. Instala dependencias desde `CS2/`:
 
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+Para reproducir exactamente el entorno validado de Python 3.12, usa el lock:
+
+```powershell
+python -m pip install -r requirements.lock.txt
+```
+
+`requirements.txt` declara rangos mantenibles; `requirements.lock.txt` es el
+resultado resuelto que usa CI. Se actualiza deliberadamente con:
+
+```powershell
+python -m pip install pip-tools==7.5.2
+python -m piptools compile --resolver backtracking --strip-extras `
+  --output-file requirements.lock.txt requirements.txt
 ```
 
 SQLite va incluido en Python.
@@ -324,14 +350,18 @@ completo para tener snapshots, odds, Analytics, contexto de torneo, rosters y
 stats de jugador actualizados e ingeridos en SQLite; luego usa
 `python MODEL\run_professional_training.py --install-deps`
 para probar CatBoost, ensembles, half-life y gap con salida verbosa en
-`MODEL\results\professional_training_output.md`. El entrenamiento usa validacion walk-forward temporal,
-elige produccion por menor log loss, guarda el artefacto final en
+`MODEL\results\professional_training_output.md`. El entrenamiento usa validacion walk-forward temporal.
+`nested_model_policy` elige cada semana solo con OOS de semanas anteriores y es
+la metrica primaria sin sesgo L1. Tras cerrar el OOS, se elige por log loss el
+candidato que se ajusta para el siguiente periodo y se guarda el artefacto final en
 `MODEL\artifacts\model.pkl` y versiona una copia en `MODEL\artifacts\registry`.
 Analytics, contexto, stats de jugador, box score/mapas, historial de evento,
 rankings y roster se calculan y guardan siempre que exista evidencia previa al
-partido. Cada familia entra sola cuando supera el umbral de `MODEL\config.yaml`.
-El estado exacto se imprime durante el entreno y queda en
-`MODEL\results\REPORT.md` y `artifact.metadata["feature_policies"]`.
+partido. Cada familia entra sola unicamente cuando supera el umbral de
+`MODEL\config.yaml` y reduce el log loss en el holdout temporal interno del
+fold. No hay switch manual. La decision y su evidencia quedan en
+`MODEL\results\fold_local_feature_selection.json`, `MODEL\results\REPORT.md` y
+`artifact.metadata["feature_policies"]`.
 
 Además se generan `segment_calibration.json`, `feature_pruning.json`,
 `rich_target_bo3.json` y `rich_target_bo3_predictions.json`. Estos archivos
@@ -352,6 +382,32 @@ con SHA-256 de datos/config, commit Git, estado dirty, argumentos y versiones.
 inicio que ya tienen resultado. Page-Hinkley vigila aumentos de log loss y
 empeoramiento de CLV; el map pool se reconstruye con mapas anteriores y el
 parche solo se marca si una fuente pre-match lo proporciona explicitamente.
+
+Antes de entrenar, `start.ps1` ejecuta `BBDD/repair_integrity.py` y el health
+gate de datos. La promocion de `MODEL/artifacts/model.pkl` se bloquea si hay
+participantes provisionales, partidos online sin dos IDs HLTV confirmados, FK rotas, duplicados inequivocos, cobertura
+reciente degradada, metricas no reproducibles desde el CSV o peor log loss que
+Glicko. `prediction_ledger` congela una unica prediccion trazable por partido y
+`MODEL/evaluate_live_ledger.py` evalua exactamente el hash desplegado.
+
+Las paginas con participantes provisionales se archivan igualmente en
+`raw_snapshots`, de modo que el siguiente `start.ps1` puede recuperarlas sin
+perder evidencia. No se normalizan ni se predicen hasta que ambos equipos
+tengan nombre real e ID HLTV. Odds de apertura, player/ranking snapshots,
+Analytics, contexto y alineacion pre-match se conservan por observacion con
+`captured_at_utc`; el resultado nunca sobrescribe esas fotos.
+
+La reparacion de integridad tambien puede ejecutarse de forma explicita:
+
+```powershell
+python BBDD\repair_integrity.py
+```
+
+Antes de modificar la BBDD crea un backup, recupera IDs historicos desde la
+evidencia raw, corrige referencias, purga placeholders sin valor normalizado y
+consolida solo duplicados de identidad inequivoca. Es idempotente: repetirla
+sobre una base sana no cambia filas. Encuentros parecidos con IDs HLTV
+distintos se conservan como partidos reales separados.
 
 El backtest de `MODEL/results/economic_backtest.json` parte de 1.000 EUR,
 desglosa vig, Kelly fraccional, limites de stake/payout, drawdown y CLV contra

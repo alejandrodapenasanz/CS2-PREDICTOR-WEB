@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import random
+import sqlite3
 import sys
 import unittest
 from datetime import datetime, timedelta
@@ -17,7 +18,19 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "MODEL"))
 
+from cs2model.dataio import (
+    _iso_date,
+    _latest_analytics_by_match_asof,
+    _opening_odds_by_match,
+    _prematch_lineups_by_match_asof,
+    _team_player_snapshot_summary,
+    load_training_rows_from_db,
+)
 from cs2model.features import ChronologicalState, build_training_frame
+
+
+ROOT = Path(__file__).resolve().parents[1]
+LIVE_DB = ROOT / "BBDD" / "cs2.db"
 
 
 def _synthetic_rows(n: int = 600, seed: int = 11):
@@ -66,6 +79,116 @@ class LeakageAuditTests(unittest.TestCase):
                     float(value), float(ref), places=9,
                     msg=f"FUGA: feature '{key}' del partido {i} difiere al reconstruir solo con el pasado",
                 )
+
+
+@unittest.skipUnless(LIVE_DB.exists(), "cs2.db real no disponible en este entorno")
+class RealDatabaseLeakageAuditTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.rows = load_training_rows_from_db(LIVE_DB)
+        cls.X_full, _y, _meta, _state = build_training_frame(cls.rows)
+
+    def test_enriched_features_are_stable_when_rebuilt_from_prefix(self):
+        """Cada familia enriquecida debe ser idéntica sin filas futuras."""
+        self.assertGreater(len(self.rows), 100)
+        availability_columns = (
+            "analytics_available",
+            "analytics_extended_available",
+            "announced_lineup_available",
+            "player_snapshot_available",
+            "ranking_available",
+            "roster_available",
+            "asset_available",
+            "event_history_available",
+            "context_available",
+        )
+        sample_indices: set[int] = {len(self.rows) - 1}
+        for column in availability_columns:
+            covered = [
+                index for index, features in enumerate(self.X_full)
+                if float(features.get(column, 0.0) or 0.0) > 0.0
+            ]
+            if covered:
+                sample_indices.add(covered[len(covered) // 2])
+                sample_indices.add(covered[-1])
+
+        for index in sorted(sample_indices):
+            prefix_X, _y, _meta, _state = build_training_frame(self.rows[: index + 1])
+            rebuilt = prefix_X[-1]
+            reference = self.X_full[index]
+            self.assertEqual(set(rebuilt), set(reference))
+            for column, expected in reference.items():
+                actual = rebuilt[column]
+                self.assertAlmostEqual(
+                    float(actual),
+                    float(expected),
+                    places=9,
+                    msg=(
+                        f"FUGA L2: '{column}' del partido {self.rows[index]['id']} "
+                        "cambia al eliminar el futuro"
+                    ),
+                )
+
+    def test_asof_selectors_never_cross_match_start(self):
+        """Los selectores pueden ignorar fotos futuras sin borrarlas de la BBDD."""
+        with sqlite3.connect(LIVE_DB) as conn:
+            conn.row_factory = sqlite3.Row
+            matches = conn.execute(
+                """
+                SELECT match_id, team1_id, team2_id, datetime_utc
+                FROM matches
+                WHERE datetime_utc IS NOT NULL
+                ORDER BY datetime_utc
+                """
+            ).fetchall()
+            match_dates = {
+                int(row["match_id"]): _iso_date(row["datetime_utc"])
+                for row in matches
+            }
+            opening = _opening_odds_by_match(conn)
+            analytics = _latest_analytics_by_match_asof(conn)
+            lineups = _prematch_lineups_by_match_asof(conn, matches)
+
+            selected_sources = {
+                "opening odds": {
+                    match_id: payload.get("captured_at")
+                    for match_id, payload in opening.items()
+                },
+                "analytics": {
+                    match_id: payload.get("captured_at")
+                    for match_id, payload in analytics.items()
+                },
+                "announced lineups": {
+                    match_id: payload.get("captured_at")
+                    for match_id, payload in lineups.items()
+                },
+            }
+            for source, selected in selected_sources.items():
+                for match_id, captured_at in selected.items():
+                    captured = _iso_date(captured_at)
+                    self.assertIsNotNone(captured, f"{source}: falta captured_at en {match_id}")
+                    self.assertLessEqual(
+                        captured,
+                        match_dates[match_id],
+                        f"{source}: snapshot futuro seleccionado para {match_id}",
+                    )
+
+            sampled = matches[:: max(1, len(matches) // 100)]
+            for match in sampled:
+                match_dt = match_dates[int(match["match_id"])]
+                for team_column in ("team1_id", "team2_id"):
+                    summary = _team_player_snapshot_summary(
+                        conn,
+                        int(match[team_column]),
+                        str(match["datetime_utc"]),
+                    )
+                    selected_at = _iso_date(summary.get("captured_at_max"))
+                    if selected_at is not None:
+                        self.assertLessEqual(
+                            selected_at,
+                            match_dt,
+                            f"player stats: snapshot futuro seleccionado para {match['match_id']}",
+                        )
 
 
 if __name__ == "__main__":

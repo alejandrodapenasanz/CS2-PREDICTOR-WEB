@@ -18,6 +18,7 @@ en el bucle interno con datos estrictamente pasados; el bucle externo solo mide.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Any, Sequence
 
 import numpy as np
@@ -111,9 +112,29 @@ def select_families_cv(train_rows: list[dict[str, Any]], base_cols: list[str],
     """Anade una familia solo si BAJA el log loss OOS interno. Sustituye umbrales fijos."""
     params = default_params or {}
     active: list[Family] = []
-    remaining = list(families)
+    coverage = {
+        family.name: sum(
+            1
+            for row in train_rows
+            if (_num(row.get(family.availability_column)) or 0.0) >= 0.5
+        )
+        for family in families
+    }
+    remaining = [
+        family
+        for family in families
+        if coverage[family.name] >= family.threshold
+    ]
     base_ll = _inner_logloss(model_name, params, 0.0, train_rows, family_columns(base_cols, active), cfg)
-    log = {"base_log_loss": base_ll, "steps": []}
+    log = {
+        "base_log_loss": base_ll,
+        "steps": [],
+        "coverage": coverage,
+        "eligible": [family.name for family in remaining],
+        "skipped_below_coverage": [
+            family.name for family in families if family not in remaining
+        ],
+    }
     improved = True
     while improved and remaining:
         improved = False
@@ -150,7 +171,9 @@ def tune_optuna(model_name: str, train_rows: list[dict[str, Any]], cols: list[st
         recency = trial.suggest_categorical("recency_half_life", [0.0, 90.0, 180.0, 365.0, 730.0])
         return _inner_logloss(model_name, params, recency, train_rows, cols, cfg)
 
-    sampler = optuna.samplers.TPESampler(seed=cfg.seed, multivariate=True)
+    # Keep the production search on Optuna's stable TPE API. ``multivariate``
+    # is still experimental and emitted one warning per study.
+    sampler = optuna.samplers.TPESampler(seed=cfg.seed)
     study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
     best = dict(study.best_params)
@@ -172,21 +195,43 @@ def assembly_fit_predict(mode: str, model_name: str, params: dict[str, Any], rec
     if mode == "profiles":
         # Submodelo por patron de disponibilidad; routing por perfil, fallback a base.
         base_only_cols = list(base_cols)
-        groups: dict[tuple[int, ...], list[dict[str, Any]]] = {}
+        train_groups: dict[tuple[int, ...], list[dict[str, Any]]] = {}
         for r in train_rows:
-            groups.setdefault(_coverage_key(r, active), []).append(r)
+            train_groups.setdefault(_coverage_key(r, active), []).append(r)
         preds = np.empty(len(predict_rows))
-        # fallback global (solo base) entrenado con todo
-        for i, r in enumerate(predict_rows):
-            key = _coverage_key(r, active)
-            grp = groups.get(key, [])
+        predict_groups: dict[tuple[int, ...], list[int]] = {}
+        for index, row in enumerate(predict_rows):
+            predict_groups.setdefault(_coverage_key(row, active), []).append(index)
+
+        fallback_indices: list[int] = []
+        for key, indices in predict_groups.items():
+            grp = train_groups.get(key, [])
             # familias cubiertas en este perfil
             covered = [f for f, k in zip(active, key) if k == 1]
             cols = family_columns(base_cols, covered)
             if len(grp) >= 60 and len(np.unique(_labels(grp))) >= 2:
-                preds[i] = _fit_predict(model_name, params, recency, grp, [r], cols)[0]
+                group_predictions = _fit_predict(
+                    model_name,
+                    params,
+                    recency,
+                    grp,
+                    [predict_rows[index] for index in indices],
+                    cols,
+                )
+                preds[indices] = group_predictions
             else:
-                preds[i] = _fit_predict(model_name, params, recency, train_rows, [r], base_only_cols)[0]
+                fallback_indices.extend(indices)
+        # Fit the global fallback once, not once per prediction row.
+        if fallback_indices:
+            fallback_predictions = _fit_predict(
+                model_name,
+                params,
+                recency,
+                train_rows,
+                [predict_rows[index] for index in fallback_indices],
+                base_only_cols,
+            )
+            preds[fallback_indices] = fallback_predictions
         return preds
 
     if mode == "two_stage":
@@ -220,6 +265,8 @@ class ComparisonConfig:
     n_trials: int = 0
     cal_fraction: float = 0.25            # cola temporal del train para calibrar
     calibration_methods: tuple[str, ...] = ALL_METHODS
+    verbose: bool = False
+    retune_folds: int = 6
 
 
 def _split_tail(rows: list[dict[str, Any]], fraction: float) -> tuple[list, list]:
@@ -243,13 +290,22 @@ def run_comparison(rows: list[dict[str, Any]], base_cols: list[str], families: S
 
     combos = [(m, a) for m in comp.models for a in comp.assemblies]
     oos: dict[str, list[float]] = {f"{m}|{a}": [] for (m, a) in combos}
-    oos.update({"elo": [], "market": []})
+    oos.update({"nested_policy": [], "elo": [], "market": []})
     oos_y: list[int] = []
     oos_meta: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     calib_choice: dict[str, list[str]] = {f"{m}|{a}": [] for (m, a) in combos}
+    calib_choice["nested_policy"] = []
 
+    if comp.verbose:
+        print(
+            f"[compare][{cfg.window}] outer folds={len(outer)} "
+            f"rows={len(rows)} combos={len(combos)}",
+            flush=True,
+        )
+    model_state: dict[str, dict[str, Any]] = {}
     for fold_i, (tr_p, te_p) in enumerate(outer):
+        fold_started = time.perf_counter()
         tr_idx = [i for i in range(len(rows)) if per[i] in tr_p]
         te_idx = [i for i in range(len(rows)) if per[i] in te_p]
         if len(tr_idx) < cfg.warmup_periods or not te_idx or len(np.unique(y_all[tr_idx])) < 2:
@@ -257,19 +313,73 @@ def run_comparison(rows: list[dict[str, Any]], base_cols: list[str], families: S
         train_rows = [rows[i] for i in tr_idx]
         test_rows = [rows[i] for i in te_idx]
         head, tail = _split_tail(train_rows, comp.cal_fraction)
+        if comp.verbose:
+            print(
+                f"[compare][{cfg.window}] fold {fold_i + 1}/{len(outer)} "
+                f"train={len(train_rows)} test={len(test_rows)}",
+                flush=True,
+            )
 
-        fold_dec: dict[str, Any] = {"fold": fold_i, "train_rows": len(train_rows), "test_rows": len(test_rows)}
+        fold_dec: dict[str, Any] = {
+            "fold": fold_i,
+            "train_rows": len(train_rows),
+            "test_rows": len(test_rows),
+            "train_period_max": int(max(tr_p)),
+            "test_period_min": int(min(te_p)),
+            "test_period_max": int(max(te_p)),
+        }
         # activacion + tuning por MODELO (compartido entre assemblies)
         per_model: dict[str, dict[str, Any]] = {}
         for m in comp.models:
-            active, act_log = select_families_cv(train_rows, base_cols, families, m, cfg)
-            cols = family_columns(base_cols, active)
-            params, recency = tune_optuna(m, train_rows, cols, cfg, comp.n_trials)
-            per_model[m] = {"active": active, "params": params, "recency": recency}
+            model_started = time.perf_counter()
+            should_retune = (
+                m not in model_state
+                or fold_i - int(model_state[m]["tuned_at_fold"]) >= max(1, comp.retune_folds)
+            )
+            if should_retune:
+                active, act_log = select_families_cv(
+                    train_rows, base_cols, families, m, cfg
+                )
+                cols = family_columns(base_cols, active)
+                params, recency = tune_optuna(
+                    m, train_rows, cols, cfg, comp.n_trials
+                )
+                model_state[m] = {
+                    "active": active,
+                    "params": params,
+                    "recency": recency,
+                    "activation": act_log,
+                    "tuned_at_fold": fold_i,
+                }
+            info = model_state[m]
+            active = info["active"]
+            params = info["params"]
+            recency = info["recency"]
+            act_log = info["activation"]
+            per_model[m] = info
             fold_dec[m] = {"families": [f.name for f in active], "recency": recency,
-                           "tuned": bool(params), "activation": act_log}
+                           "tuned": bool(params), "activation": act_log,
+                           "retuned_this_fold": should_retune,
+                           "tuned_at_fold": int(info["tuned_at_fold"])}
+            if comp.verbose:
+                tuning_status = (
+                    "RETUNE"
+                    if should_retune
+                    else f"reuse@{info['tuned_at_fold']}"
+                )
+                print(
+                    f"[compare][{cfg.window}]   {m}: families="
+                    f"{[f.name for f in active] or 'none'} recency={recency:g}d "
+                    f"{tuning_status} "
+                    f"elapsed={time.perf_counter() - model_started:.1f}s",
+                    flush=True,
+                )
 
+        fold_predictions: dict[str, np.ndarray] = {}
+        fold_scores: dict[str, float] = {}
+        fold_calibrators: dict[str, str] = {}
         for (m, a) in combos:
+            combo_name = f"{m}|{a}"
             info = per_model[m]
             active, params, recency = info["active"], info["params"], info["recency"]
             # 1) calibrador: entrena assembly en head, predice tail, selecciona
@@ -279,17 +389,39 @@ def run_comparison(rows: list[dict[str, Any]], base_cols: list[str], families: S
                 # sub-split del tail para elegir metodo sin optimismo
                 cut = len(tail) // 2
                 if cut >= 10 and len(set(y_tail[:cut].tolist())) == 2 and len(set(y_tail[cut:].tolist())) == 2:
-                    cal, _sc = select_calibrator(p_tail[:cut], y_tail[:cut], p_tail[cut:], y_tail[cut:],
-                                                 methods=comp.calibration_methods)
+                    cal, _sc = select_calibrator(
+                        p_tail[:cut],
+                        y_tail[:cut],
+                        p_tail[cut:],
+                        y_tail[cut:],
+                        methods=comp.calibration_methods,
+                    )
                 else:
                     cal, _sc = select_calibrator(p_tail, y_tail, p_tail, y_tail, methods=comp.calibration_methods)
             else:
                 from .calibration_suite import fit_calibrator
                 cal = fit_calibrator("identity", np.array([0.5]), np.array([0]))
-            calib_choice[f"{m}|{a}"].append(cal.method)
+                _sc = {"identity": float("inf")}
+            calib_choice[combo_name].append(cal.method)
+            fold_scores[combo_name] = float(_sc.get(cal.method, float("inf")))
+            fold_calibrators[combo_name] = cal.method
             # 2) refit en TODO el train, predice test, aplica calibrador
             p_test = assembly_fit_predict(a, m, params, recency, active, train_rows, test_rows, base_cols, cfg)
-            oos[f"{m}|{a}"].extend(cal.apply(p_test).tolist())
+            calibrated = cal.apply(p_test)
+            fold_predictions[combo_name] = calibrated
+            oos[combo_name].extend(calibrated.tolist())
+
+        # Politica realmente anidada: el combo del fold externo se decide con
+        # la cola temporal de outer-train, antes de observar outer-test.
+        selected_combo = min(
+            (name for name in fold_predictions),
+            key=lambda name: (fold_scores.get(name, float("inf")), name),
+        )
+        oos["nested_policy"].extend(fold_predictions[selected_combo].tolist())
+        calib_choice["nested_policy"].append(fold_calibrators[selected_combo])
+        fold_dec["selected_combo"] = selected_combo
+        fold_dec["selection_log_loss"] = fold_scores[selected_combo]
+        fold_dec["selection_scores"] = fold_scores
 
         # baselines + meta del test
         for r in test_rows:
@@ -299,6 +431,12 @@ def run_comparison(rows: list[dict[str, Any]], base_cols: list[str], families: S
                              ("opening_prob_t1", "opening_odds_t1", "opening_odds_t2", "closing_prob_t1", "closing_odds_t1", "closing_odds_t2")})
         oos_y.extend(y_all[te_idx].tolist())
         decisions.append(fold_dec)
+        if comp.verbose:
+            print(
+                f"[compare][{cfg.window}] fold {fold_i + 1}/{len(outer)} done "
+                f"elapsed={time.perf_counter() - fold_started:.1f}s",
+                flush=True,
+            )
 
     y = np.array(oos_y, dtype=int)
     result: dict[str, Any] = {"window": cfg.window, "n_eval": int(len(y)), "n_folds": len(decisions),
@@ -314,11 +452,13 @@ def run_comparison(rows: list[dict[str, Any]], base_cols: list[str], families: S
         if name in calib_choice:
             uniq, cnts = np.unique(calib_choice[name], return_counts=True)
             result["calibrator_choice"][name] = dict(zip(uniq.tolist(), cnts.tolist()))
-    # calibracion del mejor combo por log loss
+    # Los combos fijos son diagnosticos. La politica anidada es la unica
+    # seleccion de Model A cuya metrica no ha mirado sus propios outer labels.
     combo_names = [f"{m}|{a}" for (m, a) in combos]
     ranked = sorted((n for n in combo_names if result["models"].get(n, {}).get("n", 0)),
                     key=lambda n: result["models"][n]["log_loss"])
-    best = ranked[0] if ranked else None
+    result["diagnostic_best_combo"] = ranked[0] if ranked else None
+    best = "nested_policy" if result["models"].get("nested_policy", {}).get("n", 0) else None
     result["best_combo"] = best
     if best:
         pb = np.array(oos[best], dtype=float)
