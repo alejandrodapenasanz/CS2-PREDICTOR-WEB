@@ -1,0 +1,9 @@
+{
+  "byte_length": 928679,
+  "captured_at_utc": "2026-07-30T09:48:28Z",
+  "fixture_purpose": "Offline parser test against one real Tennis Explorer daily page.",
+  "match_date": "2026-07-30",
+  "sha256": "2910901e884a468c0f0ae3ef55d0032bb44748bc6026752c878f63075f9758ec",
+  "source_url": "https://www.tennisexplorer.com/matches/?day=30&month=07&type=all&year=2026",
+  "usage_scope": "User-reported operator authorization for academic, non-commercial use."
+}

@@ -1,0 +1,12 @@
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+unidecode
+scikit-learn
+lightgbm
+pyarrow
+joblib
+matplotlib
+scrapling[fetchers]==0.4.12

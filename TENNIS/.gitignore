@@ -1,0 +1,45 @@
+# Entornos virtuales
+.venv/
+venv/
+
+# Datos crudos, salvo el marcador de estructura
+data/raw/**
+!data/raw/.gitkeep
+
+# Artefactos Elo procesados, salvo el marcador de estructura
+data/processed/elo/**
+!data/processed/elo/.gitkeep
+
+# Datasets de features generados, salvo el marcador de estructura
+data/processed/features/**
+!data/processed/features/.gitkeep
+
+# Predicciones diarias publicadas, salvo el marcador de estructura
+data/processed/predictions/**
+!data/processed/predictions/.gitkeep
+
+# Registro operativo local y sus archivos transaccionales.
+BBDD/**
+!BBDD/.gitkeep
+
+# Modelos, calibradores y backtests generados
+models/**
+!models/.gitkeep
+
+# Caché y cola generados por el mapeo de jugadores
+data/processed/player_mapping.sqlite3*
+data/processed/unresolved_players.csv
+data/processed/unresolved_players.csv.*
+
+# Bytecode y cachés de Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+
+# Informes locales de cobertura
+.coverage
+htmlcov/

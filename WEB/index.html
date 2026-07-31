@@ -224,7 +224,13 @@
     .health { font-family: ui-monospace, monospace; font-weight: 900; text-transform: uppercase; }
     .health.ok { color: var(--green); }
     .health.warning { color: var(--amber); }
+    .health.empty, .health.unavailable { color: var(--amber); }
     .health.error, .health.missing { color: var(--red-soft); }
+    #tennisRows tr { cursor: default; }
+    .tennis-match-name { font-weight: 750; white-space: nowrap; }
+    .tennis-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .tennis-real { color: var(--green); font-weight: 750; }
+    .tennis-unavailable { color: var(--muted); }
     .dbline { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.05); }
     .dbline:last-child { border-bottom:0; }
     .dbline .key { color: var(--muted); }
@@ -268,6 +274,7 @@
         <button class="tab" data-view="best">★ Best Opportunity <span class="dot" id="bestCount"></span></button>
         <button class="tab" data-view="model">◈ Modelo</button>
         <button class="tab" data-view="database">BBDD <span class="dot" id="dbHealthDot"></span></button>
+        <button class="tab" data-view="tennis">Tenis <span class="dot" id="tennisCount"></span></button>
       </div>
       <div class="controls" id="controls">
         <input id="search" placeholder="▷ Buscar equipo, torneo, partido…">
@@ -444,12 +451,46 @@
         </div>
       </div>
     </section>
+
+    <!-- VIEW: TENNIS -->
+    <section id="view-tennis" class="hidden">
+      <div class="kpis" id="tennisKpis"></div>
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-title">
+          <span>// Predicciones de tenis · última jornada persistida</span>
+          <span class="health" id="tennisHealth">-</span>
+        </div>
+        <div class="small" id="tennisRunMeta" style="padding:10px 14px"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <span>// Partidos <span class="accent">[</span><span id="tennisRowCount">0</span><span class="accent">]</span></span>
+          <span class="small">predicción original y resultado real se muestran por separado</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Fecha / Hora</th>
+              <th>Torneo</th>
+              <th>Partido</th>
+              <th>Ganador previsto</th>
+              <th>Probabilidad</th>
+              <th>Fiabilidad / flags</th>
+              <th>Ganador real</th>
+            </tr></thead>
+            <tbody id="tennisRows"></tbody>
+          </table>
+        </div>
+        <div class="small" id="tennisNotes" style="padding:10px 14px"></div>
+      </div>
+    </section>
   </main>
 
   <script>
-    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {} };
+    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {}, tennis: {} };
     const M = DATA.matches || [];
     const DB = DATA.database || {};
+    const TENNIS = DATA.tennis || {};
     const state = { view: "matches", selected: null, sortKey: "time", sortDir: "asc", accuracyRange: "1m" };
     const SORT_DEFAULT_DIR = { time: "asc", match: "asc", decision: "desc", reliability: "desc", flags: "desc" };
     const $ = (id) => document.getElementById(id);
@@ -1049,6 +1090,83 @@
       ).join("") || '<tr><td colspan="3" class="empty">Sin backups encontrados</td></tr>';
     }
 
+    // ---------- tennis view ----------
+    function renderTennis(){
+      const rows = TENNIS.matches || [];
+      const run = TENNIS.latest_run || {};
+      const health = TENNIS.health || (TENNIS.database?.exists ? "unavailable" : "missing");
+      const predicted = rows.filter(row=>row.predicted?.winner && row.predicted?.probability != null).length;
+      const settled = rows.filter(row=>row.actual?.winner).length;
+      const unavailable = rows.length - predicted;
+      const lowConfidence = rows.filter(row=>String(row.reliability?.label||"").toUpperCase()==="LOW").length;
+
+      const healthEl = $("tennisHealth");
+      healthEl.textContent = health;
+      healthEl.className = `health ${health}`;
+      $("tennisRowCount").textContent = intfmt(rows.length);
+      $("tennisKpis").innerHTML = [
+        [intfmt(rows.length), "partidos jornada"],
+        [intfmt(predicted), "con predicción"],
+        [intfmt(unavailable), "sin predicción"],
+        [intfmt(lowConfidence), "confianza baja"],
+        [intfmt(settled), "con resultado real"],
+      ].map(([value,label])=>`<div class="kpi"><b>${value}</b><span>${label}</span></div>`).join("");
+
+      const runBits = [
+        run.date ? `jornada ${esc(run.date)}` : "",
+        run.run_id ? `run ${esc(run.run_id)}` : "",
+        run.status ? `estado ${esc(run.status)}` : "",
+        run.finished_at_utc ? `finalizado ${esc(run.finished_at_utc)}` : "",
+      ].filter(Boolean);
+      $("tennisRunMeta").innerHTML = runBits.length
+        ? runBits.join(" · ")
+        : "No hay una ejecución de tenis disponible en la base operativa.";
+
+      const flagClass = flag => /unavailable|unmapped|missing|stale|poor|low|error/i.test(String(flag))
+        ? "danger"
+        : /unknown|unverified|warning/i.test(String(flag)) ? "warning" : "info";
+      $("tennisRows").innerHTML = rows.map(row=>{
+        const a = row.player_a?.name || "Jugador A";
+        const b = row.player_b?.name || "Jugador B";
+        const prediction = row.predicted || {};
+        const reliabilityData = row.reliability || {};
+        const flags = reliabilityData.flags || [];
+        const confidenceScore = Number(reliabilityData.score);
+        const scoreLabel = Number.isFinite(confidenceScore)
+          ? (confidenceScore >= 0 && confidenceScore <= 1 ? pct(confidenceScore) : num(confidenceScore,1))
+          : "";
+        const reliabilityBits = [reliabilityData.label, scoreLabel].filter(Boolean);
+        const flagHtml = flags.map(flag=>`<span class="flag ${flagClass(flag)}">${esc(flag)}</span>`).join("");
+        const probabilityDetail = prediction.probability_a != null || prediction.probability_b != null
+          ? `<div class="tennis-meta">A ${pct(prediction.probability_a)} · B ${pct(prediction.probability_b)}</div>`
+          : "";
+        const predictedWinner = prediction.winner
+          ? `<span class="fav">${esc(prediction.winner)}</span>`
+          : `<span class="tennis-unavailable">Sin predicción</span>`;
+        const actualWinner = row.actual?.winner
+          ? `<span class="tennis-real">${esc(row.actual.winner)}</span>`
+          : `<span class="tennis-unavailable">Pendiente / no disponible</span>`;
+        const actualStatusText = row.actual?.status || row.actual?.settled_at_utc;
+        const actualStatus = actualStatusText
+          ? `<div class="tennis-meta">${esc(actualStatusText)}</div>`
+          : "";
+        const tournamentMeta = [row.level, row.surface, row.gender].filter(Boolean).map(esc).join(" · ");
+        return `<tr>
+          <td class="mono">${esc(row.date||"—")}<div class="tennis-meta">${esc(row.scheduled_time||"hora no disponible")}</div></td>
+          <td>${esc(row.tournament||"—")}<div class="tennis-meta">${tournamentMeta||"—"}</div></td>
+          <td><div class="tennis-match-name">${esc(a)} <span style="color:var(--red)">vs</span> ${esc(b)}</div><div class="tennis-meta">${esc(row.status||"estado no disponible")}</div></td>
+          <td>${predictedWinner}<div class="tennis-meta">${esc(prediction.status||"")}</div></td>
+          <td class="mono">${pct(prediction.probability)}${probabilityDetail}</td>
+          <td><div class="mono">${esc(reliabilityBits.join(" · ")||"—")}</div><div class="flags">${flagHtml}</div></td>
+          <td>${actualWinner}${actualStatus}</td>
+        </tr>`;
+      }).join("") || '<tr><td colspan="7" class="empty">Sin predicciones de tenis persistidas para mostrar.</td></tr>';
+
+      const notes = (TENNIS.notes || []).map(esc);
+      notes.push("El ganador real es un dato posterior y nunca modifica la predicción publicada.");
+      $("tennisNotes").innerHTML = notes.join("<br>");
+    }
+
     // ---------- views ----------
     function setView(v){
       state.view=v;
@@ -1057,9 +1175,10 @@
       $("view-best").classList.toggle("hidden",v!=="best");
       $("view-model").classList.toggle("hidden",v!=="model");
       $("view-database").classList.toggle("hidden",v!=="database");
+      $("view-tennis").classList.toggle("hidden",v!=="tennis");
       $("view-match").classList.add("hidden");
       $("controls").style.display = v==="matches" ? "" : "none";
-      if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase();
+      if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase(); if(v==="tennis") renderTennis();
     }
 
     // ---------- match detail page (hash routing #/partido/:id) ----------
@@ -1072,7 +1191,7 @@
       const mth = (location.hash||"").match(/^#\/partido\/(.+)$/);
       if (mth){
         renderMatchPage(decodeURIComponent(mth[1]));
-        ["view-matches","view-best","view-model","view-database"].forEach(v=>$(v).classList.add("hidden"));
+        ["view-matches","view-best","view-model","view-database","view-tennis"].forEach(v=>$(v).classList.add("hidden"));
         $("view-match").classList.remove("hidden");
         $("controls").style.display = "none";
         document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
@@ -1091,6 +1210,12 @@
         const health = DB.health || (DB.exists ? "unknown" : "missing");
         dbDot.textContent = health === "ok" ? "OK" : "!";
         dbDot.style.color = health === "ok" ? "var(--green)" : health === "warning" ? "var(--amber)" : "var(--red-soft)";
+      }
+      const tennisCount = $("tennisCount");
+      if(tennisCount){
+        const tennisRows = TENNIS.matches || [];
+        tennisCount.textContent = tennisRows.length ? `(${tennisRows.length})` : "!";
+        tennisCount.style.color = tennisRows.length ? "var(--green)" : "var(--amber)";
       }
       document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
         if((location.hash||"").startsWith("#/partido")) history.replaceState(null,"",location.pathname+location.search);
