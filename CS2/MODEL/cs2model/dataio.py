@@ -952,7 +952,18 @@ def load_training_rows_from_db(
     floor = min_date or (CS2_ERA_START if cs2_only else None)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    # WAL requiere memoria compartida (-wal/-shm); en carpetas sincronizadas
+    # (OneDrive) o de red puede fallar. Si no queda activo, usamos DELETE.
+    try:
+        _jm = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+    except sqlite3.OperationalError:
+        _jm = None
+    if not _jm or str(_jm[0]).lower() != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except sqlite3.OperationalError:
+            pass
     conn.row_factory = sqlite3.Row
     try:
         odds_by_match = _opening_odds_by_match(conn)

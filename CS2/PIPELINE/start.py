@@ -220,7 +220,18 @@ def fetch_diagnostics() -> dict[str, Any]:
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(BBDD_DB)
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    # WAL requiere memoria compartida (-wal/-shm); en carpetas sincronizadas
+    # (OneDrive) o de red puede fallar. Si no queda activo, usamos DELETE.
+    try:
+        _jm = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+    except sqlite3.OperationalError:
+        _jm = None
+    if not _jm or str(_jm[0]).lower() != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except sqlite3.OperationalError:
+            pass
     return conn
 
 

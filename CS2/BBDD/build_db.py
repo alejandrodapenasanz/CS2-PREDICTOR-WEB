@@ -123,7 +123,24 @@ PREDICTION_LIVE_COLUMNS: dict[str, str] = {
 
 def configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    # Espera si el fichero está bloqueado (p.ej. OneDrive sincronizando) en vez
+    # de fallar al instante con "database is locked".
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    # WAL rinde mejor, pero requiere memoria compartida (ficheros -wal/-shm). En
+    # carpetas sincronizadas (OneDrive) o unidades de red eso puede fallar con
+    # "disk I/O error"/"database is locked". Intentamos WAL y, si no queda activo,
+    # degradamos a un journal que no usa memoria compartida (DELETE).
+    mode = ""
+    try:
+        row = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+        mode = (row[0] if row else "").lower()
+    except sqlite3.OperationalError:
+        mode = ""
+    if mode != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except sqlite3.OperationalError:
+            pass
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
