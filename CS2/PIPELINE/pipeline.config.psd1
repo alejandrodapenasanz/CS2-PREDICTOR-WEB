@@ -38,10 +38,12 @@
     }
 
     # Dependencias que deben poder importarse en el Python del modelo.
-    ModelImports = @('numpy', 'pandas', 'sklearn', 'scipy', 'matplotlib', 'lightgbm', 'shap')
+    # yaml (cs2model.config) y parsel (enrich_predictions) son imports top-level:
+    # sin ellos falla ya la semilla de la BBDD y la etapa de enriquecimiento.
+    ModelImports = @('numpy', 'pandas', 'sklearn', 'scipy', 'matplotlib', 'lightgbm', 'shap', 'yaml', 'parsel')
 
     # Paquetes pip a instalar si faltan (nombres de distribucion).
-    ModelPipPackages = @('numpy', 'pandas', 'scikit-learn', 'scipy', 'matplotlib', 'lightgbm', 'shap')
+    ModelPipPackages = @('numpy', 'pandas', 'scikit-learn', 'scipy', 'matplotlib', 'lightgbm', 'shap', 'pyyaml', 'parsel')
 
     # Dependencias base y stealth del venv del scraper.
     ScraperBaseImports    = @('scrapy', 'cloudscraper', 'parsel', 'requests')
