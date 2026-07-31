@@ -1,0 +1,108 @@
+"""API pública del núcleo de modelado probabilístico de la fase 7."""
+
+from .baselines import (
+    BaselineDataError,
+    BaselinePredictions,
+    RankProbabilityBaseline,
+    market_baseline_predictions,
+    ranking_favorite_predictions,
+)
+from .calibration import (
+    CalibrationError,
+    PlattCalibrator,
+    PlattParameters,
+)
+from .estimators import (
+    EstimatorContractError,
+    EstimatorKind,
+    FittedGenderEstimator,
+    ModelingDependencyError,
+    build_lightgbm_pipeline,
+    build_logistic_pipeline,
+    fit_gender_estimator,
+)
+from .parameters import (
+    DEFAULT_LIGHTGBM_PARAMETERS,
+    DEFAULT_LOGISTIC_PARAMETERS,
+    DEFAULT_RANDOM_SEED,
+    DEFAULT_TEMPORAL_EVALUATION_PARAMETERS,
+    MODEL_ARTIFACT_VERSION,
+    LightGBMParameters,
+    LogisticParameters,
+    TemporalEvaluationParameters,
+)
+from .metrics import (
+    METRIC_COLUMNS,
+    MetricsError,
+    audit_high_accuracy_segments,
+    binary_classification_metrics,
+    evaluate_prediction_columns,
+    evaluate_predictions,
+    reliability_curve_quantile,
+)
+from .preprocessing import (
+    CATEGORICAL_FEATURE_COLUMNS,
+    MARKET_FEATURE_COLUMNS,
+    FeatureContract,
+    FeatureContractError,
+    FeatureProfile,
+    ResolvedFeatureProfile,
+    build_preprocessor,
+    load_feature_contract,
+    select_model_frame,
+    validate_market_training_coverage,
+)
+from .splits import (
+    TemporalFold,
+    TemporalSplitError,
+    build_expanding_season_folds,
+    validate_temporal_fold,
+)
+
+
+__all__ = [
+    "BaselineDataError",
+    "BaselinePredictions",
+    "CATEGORICAL_FEATURE_COLUMNS",
+    "CalibrationError",
+    "DEFAULT_LIGHTGBM_PARAMETERS",
+    "DEFAULT_LOGISTIC_PARAMETERS",
+    "DEFAULT_RANDOM_SEED",
+    "DEFAULT_TEMPORAL_EVALUATION_PARAMETERS",
+    "EstimatorContractError",
+    "EstimatorKind",
+    "FeatureContract",
+    "FeatureContractError",
+    "FeatureProfile",
+    "FittedGenderEstimator",
+    "LightGBMParameters",
+    "LogisticParameters",
+    "METRIC_COLUMNS",
+    "MARKET_FEATURE_COLUMNS",
+    "MODEL_ARTIFACT_VERSION",
+    "ModelingDependencyError",
+    "MetricsError",
+    "PlattCalibrator",
+    "PlattParameters",
+    "RankProbabilityBaseline",
+    "ResolvedFeatureProfile",
+    "TemporalFold",
+    "TemporalEvaluationParameters",
+    "TemporalSplitError",
+    "audit_high_accuracy_segments",
+    "binary_classification_metrics",
+    "build_expanding_season_folds",
+    "build_lightgbm_pipeline",
+    "build_logistic_pipeline",
+    "build_preprocessor",
+    "evaluate_prediction_columns",
+    "evaluate_predictions",
+    "fit_gender_estimator",
+    "load_feature_contract",
+    "market_baseline_predictions",
+    "ranking_favorite_predictions",
+    "reliability_curve_quantile",
+    "select_model_frame",
+    "validate_market_training_coverage",
+    "validate_temporal_fold",
+]

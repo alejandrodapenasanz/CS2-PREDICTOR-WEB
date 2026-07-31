@@ -3,7 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07080b">
+  <meta name="application-name" content="CS2 Predictor">
+  <meta name="apple-mobile-web-app-title" content="CS2 Predictor">
   <title>CS2 PREDICTOR // NEURAL ODDS</title>
+  <link rel="icon" type="image/png" href="./media/logo.png">
+  <link rel="shortcut icon" type="image/png" href="./media/logo.png">
+  <link rel="apple-touch-icon" href="./media/logo.png">
+  <link rel="manifest" href="./manifest.webmanifest">
   <script src="./data.js"></script>
   <style>
     :root {
@@ -55,11 +62,11 @@
     .topbar { display: flex; align-items: center; gap: 18px; padding: 14px 0 0; flex-wrap: wrap; }
     .brand { display: flex; align-items: center; gap: 12px; }
     .logo {
-      width: 38px; height: 38px; display: grid; place-items: center;
-      background: var(--grad-red); border-radius: 7px; font-weight: 900; font-size: 20px;
-      clip-path: polygon(0 0, 100% 0, 100% 72%, 80% 100%, 0 100%);
-      box-shadow: var(--glow-red);
+      width: 44px; height: 44px; display: grid; place-items: center; overflow: hidden;
+      flex: 0 0 44px; background: #111318; border: 1px solid rgba(255,39,64,.65);
+      border-radius: 7px; box-shadow: var(--glow-red);
     }
+    .logo img { width: 145%; height: 145%; max-width: none; object-fit: cover; display: block; }
     h1 {
       margin: 0; font-size: 22px; letter-spacing: 3px; font-weight: 800; text-transform: uppercase;
       font-family: ui-monospace, 'Cascadia Code', monospace;
@@ -85,7 +92,7 @@
     }
     .tab .dot { color: var(--red); }
 
-    .controls { display: grid; grid-template-columns: minmax(220px,1.4fr) repeat(4, auto); gap: 10px; padding: 16px 0; align-items: center; }
+    .controls { display: grid; grid-template-columns: minmax(220px,1.4fr) repeat(3, auto); gap: 10px; padding: 16px 0; align-items: center; }
     input, select, button {
       background: var(--panel2); color: var(--text); border: 1px solid var(--line2);
       border-radius: 6px; padding: 10px 12px; font: inherit;
@@ -115,6 +122,18 @@
     tbody tr { cursor: pointer; transition: background .12s; }
     tbody tr:hover { background: rgba(255,39,64,.06); }
     tbody tr.sel { background: rgba(255,39,64,.10); box-shadow: inset 3px 0 0 var(--red); }
+
+    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover { color: var(--text); }
+    th.sortable.active { color: var(--red-soft); }
+    .sortarrow { color: var(--red); font-size: 10px; margin-left: 2px; }
+    .openlink { color: var(--muted); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; font-size: 12px; margin-left: 8px; }
+    .openlink:hover { color: var(--red-soft); border-color: var(--red); text-decoration: none; }
+    .hourcell { min-width: 118px; }
+    .hourcell .h { font-family: ui-monospace, monospace; font-weight: 800; font-size: 18px; line-height: 1.1; }
+    .hourcell .d { color: var(--muted); font-size: 12px; margin-top: 3px; letter-spacing: .3px; }
+    #view-match .backbar { margin: 8px 0 16px; display: flex; gap: 10px; align-items: center; }
+    #view-match .matchwrap { max-width: 980px; margin: 0 auto; }
 
     .matchcell { display: flex; flex-direction: column; gap: 3px; }
     .vs { font-weight: 700; display:flex; align-items:center; gap:7px; }
@@ -181,6 +200,19 @@
 
     /* model view */
     .mgrid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; align-items:start; }
+    .model-wide { grid-column: 1 / -1; }
+    .accuracy-chart-wrap { padding:14px; display:flex; gap:22px; align-items:center; flex-wrap:wrap; }
+    .accuracy-canvas-box { position:relative; flex:1 1 620px; min-width:0; }
+    .accuracy-chart { max-width:720px; aspect-ratio: 620 / 340; }
+    .accuracy-stats { min-width:220px; flex:1; }
+    .accuracy-stats .row2 { grid-template-columns:minmax(105px,1fr) 0 minmax(155px,auto); }
+    .accuracy-stats .val { overflow-wrap:anywhere; white-space:normal; }
+    .accuracy-range { display:inline-flex; margin:12px 14px 0; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+    .accuracy-range button { min-width:62px; height:32px; padding:0 11px; border:0; border-right:1px solid var(--line); background:var(--panel2); color:var(--muted); font:700 11px ui-monospace,monospace; cursor:pointer; }
+    .accuracy-range button:last-child { border-right:0; }
+    .accuracy-range button:hover { color:#fff; background:#171d28; }
+    .accuracy-range button.active { color:#fff; background:rgba(255,39,64,.16); box-shadow:inset 0 -2px 0 var(--red); }
+    .accuracy-tooltip { position:fixed; z-index:40; pointer-events:none; padding:7px 9px; border:1px solid var(--cyan); border-radius:5px; background:#0a0d13; color:#e8edf5; font:11px/1.5 ui-monospace,monospace; box-shadow:0 8px 24px rgba(0,0,0,.45); }
     .dbgrid { display:grid; grid-template-columns: 1fr 1fr; gap:18px; align-items:start; }
     .dbwide { grid-column: 1 / -1; }
     .table-scroll { overflow-x: auto; }
@@ -192,7 +224,13 @@
     .health { font-family: ui-monospace, monospace; font-weight: 900; text-transform: uppercase; }
     .health.ok { color: var(--green); }
     .health.warning { color: var(--amber); }
+    .health.empty, .health.unavailable { color: var(--amber); }
     .health.error, .health.missing { color: var(--red-soft); }
+    #tennisRows tr { cursor: default; }
+    .tennis-match-name { font-weight: 750; white-space: nowrap; }
+    .tennis-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
+    .tennis-real { color: var(--green); font-weight: 750; }
+    .tennis-unavailable { color: var(--muted); }
     .dbline { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.05); }
     .dbline:last-child { border-bottom:0; }
     .dbline .key { color: var(--muted); }
@@ -211,6 +249,10 @@
       .tab { flex: 0 0 auto; padding: 10px 14px; }
       .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .dbgrid, .panel, .table-scroll { min-width: 0; max-width: 100%; }
+      .accuracy-chart-wrap { padding:10px; gap:12px; }
+      .accuracy-stats { min-width:0; width:100%; }
+      .accuracy-range { width:calc(100% - 20px); margin:10px; }
+      .accuracy-range button { min-width:0; flex:1; padding:0 5px; }
     }
   </style>
 </head>
@@ -219,7 +261,7 @@
     <div class="wrap">
       <div class="topbar">
         <div class="brand">
-          <div class="logo">⟁</div>
+          <div class="logo"><img src="./media/logo.png" alt="Logo de CS2 Predictor"></div>
           <div>
             <h1>CS2<span class="accent">·</span>PREDICTOR</h1>
             <div class="sub mono" id="runInfo">cargando…</div>
@@ -232,6 +274,7 @@
         <button class="tab" data-view="best">★ Best Opportunity <span class="dot" id="bestCount"></span></button>
         <button class="tab" data-view="model">◈ Modelo</button>
         <button class="tab" data-view="database">BBDD <span class="dot" id="dbHealthDot"></span></button>
+        <button class="tab" data-view="tennis">Tenis <span class="dot" id="tennisCount"></span></button>
       </div>
       <div class="controls" id="controls">
         <input id="search" placeholder="▷ Buscar equipo, torneo, partido…">
@@ -240,15 +283,6 @@
           <option value="">Odds: todas</option>
           <option value="yes">Con odds</option>
           <option value="no">Sin odds</option>
-        </select>
-        <select id="sortBy">
-          <option value="confidence">Orden: confianza</option>
-          <option value="opportunity">Orden: oportunidad</option>
-          <option value="time">Orden: hora</option>
-          <option value="value">Orden: value edge</option>
-          <option value="stake">Orden: stake</option>
-          <option value="flags">Orden: red flags</option>
-          <option value="upset">Orden: fav. upset</option>
         </select>
         <button class="btn" id="reset">Reset</button>
       </div>
@@ -262,7 +296,13 @@
       <div class="layout">
         <div class="panel">
           <div class="panel-title"><span>// Cartelera <span class="accent">[</span><span id="rowCount">0</span><span class="accent">]</span></span><span class="small">click para detalle</span></div>
-          <table><thead><tr><th>Hora</th><th>Partido</th><th>Decisión</th><th>Fav. upset</th><th>Mercado</th><th>Stake</th><th>Fiab.</th><th>Señales</th></tr></thead><tbody id="rows"></tbody></table>
+          <table><thead><tr>
+            <th class="sortable" data-sort="time">Hora / Día <span class="sortarrow" data-arrow="time"></span></th>
+            <th class="sortable" data-sort="match">Partido <span class="sortarrow" data-arrow="match"></span></th>
+            <th class="sortable" data-sort="decision">Decisión <span class="sortarrow" data-arrow="decision"></span></th>
+            <th class="sortable" data-sort="reliability">Fiab. <span class="sortarrow" data-arrow="reliability"></span></th>
+            <th class="sortable" data-sort="flags">Señales <span class="sortarrow" data-arrow="flags"></span></th>
+          </tr></thead><tbody id="rows"></tbody></table>
         </div>
         <aside class="panel detail" id="detail"><div class="empty">Selecciona un partido</div></aside>
       </div>
@@ -277,7 +317,34 @@
           (historial de ambos equipos, incertidumbre Glicko RD, BO1, rival por definir). No es consejo de apuesta.
         </div>
       </div>
+      <div class="controls" id="bestControls" style="grid-template-columns:repeat(3,minmax(150px,1fr)) auto;padding-top:0">
+        <select id="bestDay"><option value="">Día: todos</option></select>
+        <select id="bestProb">
+          <option value="0">Probabilidad: todas</option>
+          <option value="0.6">Prob. ganar ≥ 60%</option>
+          <option value="0.7">Prob. ganar ≥ 70%</option>
+          <option value="0.8">Prob. ganar ≥ 80%</option>
+          <option value="0.9">Prob. ganar ≥ 90%</option>
+        </select>
+        <select id="bestRel">
+          <option value="0">Fiabilidad: todas</option>
+          <option value="0.8">Fiabilidad ALTA (≥80%)</option>
+          <option value="0.55">Fiabilidad MEDIA+ (≥55%)</option>
+        </select>
+        <button class="btn" id="bestReset">Reset</button>
+      </div>
       <div class="opps" id="opps"></div>
+    </section>
+
+    <!-- VIEW: MATCH DETAIL PAGE (routing #/partido/:id) -->
+    <section id="view-match" class="hidden">
+      <div class="matchwrap">
+        <div class="backbar">
+          <a class="btn" id="backLink" href="#">← Volver</a>
+          <span class="small">Página de partido · enlazable y compartible</span>
+        </div>
+        <div class="panel detail"><div id="matchPageBody"><div class="empty">Cargando partido…</div></div></div>
+      </div>
     </section>
 
     <!-- VIEW: MODEL -->
@@ -289,6 +356,23 @@
           <div class="small" style="padding:10px 14px">
             Objetivo de entrenamiento = <b>log loss</b> (probabilidades calibradas), no solo accuracy.
             El baseline "elige al favorito" (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si baja el log loss/Brier.
+          </div>
+        </div>
+        <div class="panel model-wide">
+          <div class="panel-title"><span>// Evolución del acierto real</span><span class="small">predicciones walk-forward · resultados cerrados</span></div>
+          <div class="accuracy-range" role="group" aria-label="Periodo del gráfico de accuracy">
+            <button type="button" data-accuracy-range="7d">7 días</button>
+            <button type="button" data-accuracy-range="1m" class="active">1 mes</button>
+            <button type="button" data-accuracy-range="3m">3 meses</button>
+            <button type="button" data-accuracy-range="6m">6 meses</button>
+            <button type="button" data-accuracy-range="1y">1 año</button>
+          </div>
+          <div class="accuracy-chart-wrap">
+            <div class="accuracy-canvas-box">
+              <canvas class="accuracy-chart" id="accuracyCanvas" width="620" height="340" aria-label="Evolución temporal del porcentaje de aciertos reales del modelo"></canvas>
+              <div class="accuracy-tooltip hidden" id="accuracyTooltip"></div>
+            </div>
+            <div class="small accuracy-stats" id="accuracyStats"></div>
           </div>
         </div>
         <div class="panel">
@@ -351,7 +435,7 @@
         </div>
         <div class="panel">
           <div class="panel-title"><span>// Fetch state</span><span class="small">frescura y bloqueos</span></div>
-          <table><thead><tr><th>Entidad</th><th>Total</th><th>OK</th><th>Fresh</th><th>Issues</th></tr></thead><tbody id="dbFetchRows"></tbody></table>
+          <table><thead><tr><th>Entidad</th><th>Total</th><th>OK</th><th>Fresh</th><th>Sin muestra</th><th>Issues</th></tr></thead><tbody id="dbFetchRows"></tbody></table>
         </div>
         <div class="panel">
           <div class="panel-title"><span>// Ultimos ingest</span></div>
@@ -367,13 +451,48 @@
         </div>
       </div>
     </section>
+
+    <!-- VIEW: TENNIS -->
+    <section id="view-tennis" class="hidden">
+      <div class="kpis" id="tennisKpis"></div>
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-title">
+          <span>// Predicciones de tenis · última jornada persistida</span>
+          <span class="health" id="tennisHealth">-</span>
+        </div>
+        <div class="small" id="tennisRunMeta" style="padding:10px 14px"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-title">
+          <span>// Partidos <span class="accent">[</span><span id="tennisRowCount">0</span><span class="accent">]</span></span>
+          <span class="small">predicción original y resultado real se muestran por separado</span>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr>
+              <th>Fecha / Hora</th>
+              <th>Torneo</th>
+              <th>Partido</th>
+              <th>Ganador previsto</th>
+              <th>Probabilidad</th>
+              <th>Fiabilidad / flags</th>
+              <th>Ganador real</th>
+            </tr></thead>
+            <tbody id="tennisRows"></tbody>
+          </table>
+        </div>
+        <div class="small" id="tennisNotes" style="padding:10px 14px"></div>
+      </div>
+    </section>
   </main>
 
   <script>
-    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {} };
+    const DATA = window.__CS2_PREDICTOR_DATA__ || { matches: [], model: {}, manifest: {}, database: {}, tennis: {} };
     const M = DATA.matches || [];
     const DB = DATA.database || {};
-    const state = { view: "matches", selected: null };
+    const TENNIS = DATA.tennis || {};
+    const state = { view: "matches", selected: null, sortKey: "time", sortDir: "asc", accuracyRange: "1m" };
+    const SORT_DEFAULT_DIR = { time: "asc", match: "asc", decision: "desc", reliability: "desc", flags: "desc" };
     const $ = (id) => document.getElementById(id);
 
     // ---------- helpers ----------
@@ -415,7 +534,12 @@
     const decisionConfidence = (m) => Math.max(decisionProb(m), 1 - decisionProb(m));
     const decisionSide = (m) => (m.prediction?.decision_favorite_side || (decisionProb(m) >= .5 ? "team1" : "team2"));
     const decisionFavorite = (m) => m.prediction?.decision_favorite || sideName(m, decisionSide(m));
-    const opportunity = (m) => decisionConfidence(m) * reliability(m);
+    const opportunity = (m) => {
+      const stored = m.prediction?.opportunity_score;
+      return stored != null && !isNaN(stored)
+        ? Number(stored)
+        : decisionConfidence(m) * reliability(m);
+    };
     function relLabel(r){ return r>=.8?["ALTA","var(--green)"]:r>=.55?["MEDIA","var(--amber)"]:["BAJA","var(--red-soft)"]; }
     function stakeView(st,m){
       const reason = String(st.reason || "").toLowerCase();
@@ -520,31 +644,41 @@
       let list = M.filter(m => {
         const t = `${tn(m,'team1')} ${tn(m,'team2')} ${m.event||""}`.toLowerCase();
         if (q && !t.includes(q)) return false;
-        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning")) return false;
+        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")) return false;
         if (ff && ff!=="__warn" && !(m.flags||[]).some(f=>f.code===ff)) return false;
         if (of==="yes" && !m.odds?.available) return false;
         if (of==="no" && m.odds?.available) return false;
         return true;
       });
-      const s = $("sortBy").value;
-      const c = m => decisionConfidence(m);
-      if (s==="confidence") list.sort((a,b)=>c(b)-c(a));
-      else if (s==="opportunity") list.sort((a,b)=>opportunity(b)-opportunity(a));
-      else if (s==="flags") list.sort((a,b)=>(b.flags?.length||0)-(a.flags?.length||0));
-      else if (s==="value") list.sort((a,b)=>(Math.abs(b.controls?.market?.model_edge_team1||0))-(Math.abs(a.controls?.market?.model_edge_team1||0)));
-      else if (s==="stake") list.sort((a,b)=>(b.staking?.recommended_fraction||0)-(a.staking?.recommended_fraction||0));
-      else if (s==="upset") list.sort((a,b)=>{
-        const ua = upsetView(a).raw, ub = upsetView(b).raw;
-        const sa = (ua.favorite_matches||0) >= 3 ? (ua.favorite_loss_rate ?? -1) : -1;
-        const sb = (ub.favorite_matches||0) >= 3 ? (ub.favorite_loss_rate ?? -1) : -1;
-        return sb - sa;
-      });
-      else list.sort((a,b)=>`${a.date} ${a.hour}`.localeCompare(`${b.date} ${b.hour}`));
+      const key = state.sortKey, dir = state.sortDir === "asc" ? 1 : -1;
+      list.sort((a,b)=>dir*rowCmp(a,b,key));
       return list;
+    }
+    // Comparador para las cabeceras ordenables de la cartelera.
+    function rowCmp(a,b,key){
+      if (key==="time")  return `${a.date||""} ${a.hour||""}`.localeCompare(`${b.date||""} ${b.hour||""}`);
+      if (key==="match") return tn(a,'team1').localeCompare(tn(b,'team1'), 'es', {sensitivity:'base'});
+      if (key==="decision")    return decisionConfidence(a)-decisionConfidence(b);
+      if (key==="reliability") return reliability(a)-reliability(b);
+      if (key==="flags")       return (a.flags?.length||0)-(b.flags?.length||0);
+      return 0;
+    }
+    function updateSortArrows(){
+      document.querySelectorAll("th.sortable").forEach(th=>{
+        const active = th.dataset.sort===state.sortKey;
+        th.classList.toggle("active", active);
+        const arrow = th.querySelector(".sortarrow");
+        if (arrow) arrow.textContent = active ? (state.sortDir==="asc"?"▲":"▼") : "";
+      });
+    }
+    function setSort(key){
+      if (state.sortKey===key) state.sortDir = state.sortDir==="asc" ? "desc" : "asc";
+      else { state.sortKey = key; state.sortDir = SORT_DEFAULT_DIR[key] || "desc"; }
+      renderRows();
     }
     function renderKpis(list){
       const odds = list.filter(m=>m.odds?.available).length;
-      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning")).length;
+      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")).length;
       const high = list.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
       const val = list.filter(m=>Math.abs(m.controls?.market?.model_edge_team1||0)>=.08).length;
       const avg = list.length ? list.reduce((s,m)=>s+decisionConfidence(m),0)/list.length : 0;
@@ -558,33 +692,23 @@
     function renderRows(){
       const list = filtered(); renderKpis(list); $("rowCount").textContent = list.length;
       $("rows").innerHTML = list.map(m=>{
-        const p = m.prediction||{}, f = m.features||{};
         const p1 = decisionProb(m);
         const favSide = decisionSide(m);
         const favT1 = favSide==="team1";
         const favName = decisionFavorite(m);
         const conf = decisionConfidence(m);
         const rel = reliability(m); const [rl,rc] = relLabel(rel);
-        const edge = m.controls?.market?.model_edge_team1;
-        const st = m.staking || {};
-        const sv = stakeView(st,m);
-        const uv = upsetView(m);
         return `<tr data-id="${esc(m.id)}" class="${state.selected===m.id?'sel':''}">
-          <td><b class="mono">${esc(m.hour||"")}</b><div class="ev">${esc(m.date||"")}</div></td>
-          <td><div class="matchcell"><div class="vs">${logo(m,'team1')} ${esc(tn(m,'team1'))} <span class="mid">VS</span> ${logo(m,'team2')} ${esc(tn(m,'team2'))}</div><div class="ev">${esc(m.event||"")} · ${esc((m.format||"").toUpperCase())}</div></div></td>
+          <td class="hourcell"><div class="h">${esc(m.hour||"—")}</div><div class="d">${esc(m.date||"")}</div></td>
+          <td><div class="matchcell"><div class="vs">${logo(m,'team1')} ${esc(tn(m,'team1'))} <span class="mid">VS</span> ${logo(m,'team2')} ${esc(tn(m,'team2'))}<a class="openlink" href="#/partido/${encodeURIComponent(m.id)}" title="Abrir página del partido" onclick="event.stopPropagation()">⤢ abrir</a></div><div class="ev">${esc(m.event||"")} · ${esc((m.format||"").toUpperCase())}</div></div></td>
           <td class="predcell"><span class="fav">${esc(favName||"—")}</span> <span class="confnum">${pct(conf)}</span>
             <div class="bar"><i style="width:${Math.round((favT1?p1:1-p1)*100)}%"></i></div></td>
-          <td><span class="mono" style="font-weight:900;color:${uv.color}">${esc(uv.main)}</span>
-            <div class="ev">${esc(uv.row)}</div></td>
-          <td><span class="mono">${m.odds?.average?`${num(m.odds.average.team1_decimal)}/${num(m.odds.average.team2_decimal)}`:"—"}</span>
-            <div class="ev">${edge!=null?`edge ${sg(edge)}`:"sin mercado"}</div></td>
-          <td><span class="mono" style="font-weight:900;color:${sv.color}">${esc(sv.pct)}</span>
-            <div class="ev">${esc(sv.row)}</div></td>
           <td><span class="mono" style="color:${rc};font-weight:800">${rl}</span><div class="meter"><i style="width:${Math.round(rel*100)}%;background:${rc}"></i></div></td>
           <td><div class="flags">${(m.flags||[]).slice(0,3).map(fl=>`<span class="flag ${fl.level}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">OK</span>'}</div></td>
         </tr>`;
-      }).join("") || `<tr><td colspan="8" class="empty">Sin partidos que coincidan</td></tr>`;
+      }).join("") || `<tr><td colspan="5" class="empty">Sin partidos que coincidan</td></tr>`;
       document.querySelectorAll("tr[data-id]").forEach(tr=>tr.onclick=()=>selectMatch(tr.dataset.id));
+      updateSortArrows();
       if(!state.selected && list[0]) selectMatch(list[0].id);
     }
 
@@ -598,6 +722,9 @@
       state.selected = id;
       document.querySelectorAll("tr[data-id]").forEach(tr=>tr.classList.toggle("sel",tr.dataset.id===id));
       const m = M.find(x=>x.id===id); if(!m) return;
+      $("detail").innerHTML = detailHTML(m);
+    }
+    function detailHTML(m){
       const p=m.prediction||{}, f=m.features||{}, ctl=m.controls||{}, mk=ctl.market||{}, mp=ctl.map_pool||{}, ctx=ctl.tournament_context||{};
       const st=m.staking||{};
       const sv=stakeView(st,m);
@@ -608,6 +735,27 @@
       const dp=decisionProb(m), ds=decisionSide(m), dfav=decisionFavorite(m), dconf=decisionConfidence(m);
       const avg=m.odds?.average;
       const rosterRow = s => { const r=(ctl.roster_stability||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: ${num(r.days_with_current_roster,1)}d con roster · cambios30d ${r.changes_30d??"—"} · size ${r.roster_size??"—"} ${r.standin_risk?"· ⚠ stand-in":""}</div>`; };
+      const rosterChangeRow = s => {
+        const r=(ctl.roster_change_90d||{})[s]||{};
+        if(r.status==="changed"){
+          const incoming=(r.players_in||[]).map(p=>p.name).join(", ")||"sin alta identificada";
+          const outgoing=(r.players_out||[]).map(p=>p.name).join(", ")||"sin baja identificada";
+          return `<div class="small" style="color:var(--red-soft)">${esc(sideName(m,s))}: CAMBIO 90D · entra ${esc(incoming)} · sale ${esc(outgoing)} · vs partido ${esc(r.latest_previous_match_id||"anterior")} · muestra ${r.previous_matches_compared||0}</div>`;
+        }
+        if(r.status==="unchanged"){
+          return `<div class="small" style="color:var(--green)">${esc(sideName(m,s))}: misma alineacion que el ultimo partido · ${r.previous_matches_compared||0} partidos comparados en 90d</div>`;
+        }
+        const reason={
+          current_lineup_missing:"alineacion anunciada no publicada",
+          current_lineup_incomplete:"alineacion anunciada incompleta",
+          no_recent_complete_history:"sin alineacion real completa en los ultimos 90d",
+          team_id_missing:"equipo pendiente de definir",
+          team_lineup_mismatch:"IDs de equipo inconsistentes",
+          match_datetime_unknown:"hora del partido desconocida",
+          post_start_snapshot_rejected:"snapshot posterior al inicio rechazado"
+        }[r.status]||"sin datos";
+        return `<div class="small">${esc(sideName(m,s))}: cambio 90d no verificable · ${esc(reason)}</div>`;
+      };
       const formRow = s => { const fr=(ctl.player_form||{})[s]||{}, l5=(fr.team_windows||{}).last5||{}, se=fr.season_avg||{}; return `<div class="small">${esc(sideName(m,s))}: R season ${num(se.rating)} · L5 ${num(l5.rating)} · KAST ${num(se.kast,1)} · cobertura real ${pct(fr.real_form_coverage)}</div>`; };
       const playerEdgeRow = s => {
         const r=m.rosters?.[s]||{}, d=r.distribution||{}, met=(d.metrics||{}).rating||{}, top=(d.top||{}).rating||{}, bot=(d.bottom||{}).rating||{};
@@ -616,10 +764,10 @@
       const fatigueRow = s => { const ff=(ctl.fatigue||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: 24h ${ff.last24_count??0} · 48h ${ff.last48_count??0} · mismo día ${ff.same_day_total??0} ${ff.back_to_back?"· ⚠ back-to-back":""}</div>`; };
       const players = roster => (roster?.players||[]).map(pl=>{const s=pl.stats?.stats||{};return `<div class="player"><span>${esc(pl.name)}</span><span class="chip">R ${esc(s["Rating 3.0"]||"—")} · KAST ${esc(s.KAST||"—")}</span></div>`;}).join("") || '<div class="small">Sin roster</div>';
 
-      $("detail").innerHTML = `
+      return `
         <div class="dhead">
           <h2>${esc(tn(m,'team1'))} <span style="color:var(--red)">vs</span> ${esc(tn(m,'team2'))}</h2>
-          <div class="small mono">${esc(m.date)} ${esc(m.hour)} · ${esc(m.event)} · ${esc((m.format||"").toUpperCase())} · <a href="https://www.hltv.org${esc(m.link)}" target="_blank">HLTV ↗</a></div>
+          <div class="small mono">${esc(m.date)} ${esc(m.hour)} · ${esc(m.event)} · ${esc((m.format||"").toUpperCase())} · <a href="https://www.hltv.org${esc(m.link)}" target="_blank">HLTV ↗</a> · <a href="#/partido/${encodeURIComponent(m.id)}" class="openlink">⤢ página</a></div>
           <div style="margin-top:8px"><span class="flag" style="color:${rc};border-color:${rc}">FIABILIDAD ${rl} ${Math.round(rel*100)}%</span> <span class="flag info">snapshot ${m.data_quality?.real_pre_match_snapshot?"real":"legacy"}</span></div>
         </div>
         <div class="box"><b>Predicción del modelo (stats)</b>
@@ -662,7 +810,7 @@
           <div class="small">Confianza ${esc(mp.confidence||"n/a")} · cobertura ${pct(mp.coverage)} · ventaja T1 ${sg(mp.map_pool_advantage_team1)}</div>
           <div class="small">${esc(tn(m,"team1"))} mejor: ${mp.team1_best_map?`${esc(mp.team1_best_map.map)} (${sg(mp.team1_best_map.diff_team1)})`:"—"} · ${esc(tn(m,"team2"))} mejor: ${mp.team2_best_map?`${esc(mp.team2_best_map.map)}`:"—"}</div>
         </div>
-        <div class="box"><b>Roster · forma · fatiga</b>${rosterRow("team1")}${rosterRow("team2")}<div style="height:6px"></div>${playerEdgeRow("team1")}${playerEdgeRow("team2")}<div style="height:6px"></div>${formRow("team1")}${formRow("team2")}<div style="height:6px"></div>${fatigueRow("team1")}${fatigueRow("team2")}</div>
+        <div class="box"><b>Roster · forma · fatiga</b>${rosterChangeRow("team1")}${rosterChangeRow("team2")}<div style="height:6px"></div>${rosterRow("team1")}${rosterRow("team2")}<div style="height:6px"></div>${playerEdgeRow("team1")}${playerEdgeRow("team2")}<div style="height:6px"></div>${formRow("team1")}${formRow("team2")}<div style="height:6px"></div>${fatigueRow("team1")}${fatigueRow("team2")}</div>
         <div class="box"><b>Contexto torneo</b>
           <div class="small">Stage ${esc(ctx.stage||"?")} · ${esc(ctx.environment||"?")} · high-stakes ${ctx.high_stakes?"sí":"no"} · incentivo ${esc(ctx.incentive_label||ctx.incentive_uncertainty||"?")} · fuente ${esc(ctx.source||"n/a")}</div>
           ${ctx.stage_detail?`<div class="small">${esc(ctx.stage_detail)}</div>`:""}
@@ -674,10 +822,15 @@
 
     // ---------- best opportunity ----------
     function renderBest(){
+      const dayF = $("bestDay")?.value || "";
+      const probMin = Math.max(0.6, parseFloat($("bestProb")?.value || "0") || 0);
+      const relMin = Math.max(0.45, parseFloat($("bestRel")?.value || "0") || 0);
       const list = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
                     .map(m=>({m, opp:opportunity(m), rel:reliability(m)}))
-                    .filter(x=>decisionConfidence(x.m)>=.6 && x.rel>=.45)
-                    .sort((a,b)=>b.opp-a.opp).slice(0,18);
+                    .filter(x=>x.m.prediction?.opportunity_eligible===true)
+                    .filter(x=>decisionConfidence(x.m)>=probMin && x.rel>=relMin)
+                    .filter(x=>!dayF || x.m.date===dayF)
+                    .sort((a,b)=>b.opp-a.opp);
       $("bestCount").textContent = list.length ? `(${list.length})` : "";
       $("opps").innerHTML = list.map((x,i)=>{
         const m=x.m, p=m.prediction||{}, f=m.features||{};
@@ -723,7 +876,92 @@
         `Benchmark de mercado (odds apertura, n=${mk.n}, ilustrativo): modelo log loss <b class="mono">${num(mk.model_log_loss,3)}</b> vs mercado <b class="mono" style="color:var(--cyan)">${num(mk.market_log_loss,3)}</b>. ${esc(mk.note||"")}`
         : `${esc(mk.note||"Aún sin odds suficientes para el benchmark de mercado.")}`;
       $("marketBox").innerHTML += `<br><span style="color:var(--muted)">Log loss de un coinflip puro = ln(2) ≈ 0.693. El mérito del modelo está en la banda 55-80%; los partidos parejos son incertidumbre irreducible.</span>`;
+      drawFavoriteAccuracy();
       drawCalibration();
+    }
+    function drawFavoriteAccuracy(range=state.accuracyRange){
+      state.accuracyRange=range;
+      document.querySelectorAll("[data-accuracy-range]").forEach(button=>{
+        button.classList.toggle("active",button.dataset.accuracyRange===range);
+        button.onclick=()=>drawFavoriteAccuracy(button.dataset.accuracyRange);
+      });
+      const cv=$("accuracyCanvas"); if(!cv) return; const ctx=cv.getContext("2d");
+      const W=cv.width,H=cv.height,left=54,right=18,top=34,bottom=58;
+      const timeline=DATA.model?.favorite_accuracy_timeline||{};
+      const windowData=(timeline.windows||{})[range]||{};
+      const points=windowData.points||[];
+      const stats=$("accuracyStats"),tooltip=$("accuracyTooltip");
+      ctx.clearRect(0,0,W,H);
+      if(!points.length){
+        ctx.fillStyle="#7d8aa0";ctx.font="12px monospace";
+        ctx.fillText("Sin evaluación walk-forward disponible.",left,H/2);
+        if(stats) stats.innerHTML='<div class="empty">Sin resultados cerrados evaluados.</div>';
+        return;
+      }
+      const plotW=W-left-right,plotH=H-top-bottom;
+      const X=index=>points.length===1?left+plotW/2:left+index*(plotW/(points.length-1));
+      const Y=value=>top+(1-Math.max(0,Math.min(1,Number(value))))*plotH;
+      ctx.font="11px monospace";ctx.textAlign="right";ctx.textBaseline="middle";
+      for(let i=0;i<=4;i++){
+        const value=i/4,y=Y(value);
+        ctx.strokeStyle="#1c2230";ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(W-right,y);ctx.stroke();
+        ctx.fillStyle="#7d8aa0";ctx.fillText(`${Math.round(value*100)}%`,left-8,y);
+      }
+      const overall=Number(windowData.accuracy);
+      if(Number.isFinite(overall)){
+        const y=Y(overall);ctx.strokeStyle="#25d9f8";ctx.lineWidth=1;ctx.setLineDash([6,5]);
+        ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(W-right,y);ctx.stroke();ctx.setLineDash([]);
+        ctx.fillStyle="#25d9f8";ctx.textAlign="left";ctx.textBaseline="bottom";
+        ctx.fillText(`media ${pct(overall)}`,left+4,y-4);
+      }
+      const plotted=[];
+      ctx.strokeStyle="#37e89c";ctx.lineWidth=2.5;ctx.shadowColor="rgba(55,232,156,.35)";ctx.shadowBlur=7;
+      ctx.beginPath();let drawing=false;
+      points.forEach((point,index)=>{
+        const accuracy=point.accuracy==null?null:Number(point.accuracy);
+        if(!Number.isFinite(accuracy)){drawing=false;return;}
+        const x=X(index),y=Y(accuracy);
+        drawing?ctx.lineTo(x,y):ctx.moveTo(x,y);drawing=true;
+        plotted.push({x,y,index,point});
+      });
+      ctx.stroke();ctx.shadowBlur=0;
+      plotted.forEach(({x,y,point})=>{
+        const radius=3+Math.min(4,Math.sqrt(Number(point.n||0))/3);
+        ctx.fillStyle=Number(point.n||0)<5?"#f1b94b":"#37e89c";
+        ctx.beginPath();ctx.arc(x,y,radius,0,Math.PI*2);ctx.fill();
+      });
+      const formatDate=(value,bucket)=>{
+        const d=new Date(`${value}T00:00:00Z`);
+        return new Intl.DateTimeFormat("es-ES",bucket==="month"?{month:"short",year:"2-digit",timeZone:"UTC"}:{day:"2-digit",month:"2-digit",timeZone:"UTC"}).format(d);
+      };
+      const tickCount=Math.min(6,points.length);
+      const tickIndexes=[...new Set(Array.from({length:tickCount},(_,i)=>Math.round(i*(points.length-1)/Math.max(1,tickCount-1))))];
+      ctx.textAlign="center";ctx.textBaseline="top";ctx.fillStyle="#7d8aa0";ctx.font="10px monospace";
+      tickIndexes.forEach(index=>ctx.fillText(formatDate(points[index].date,windowData.bucket),X(index),H-bottom+12));
+      ctx.fillStyle="#aab4c6";ctx.textAlign="right";ctx.fillText("fecha",W-right,H-10);
+
+      cv.onmousemove=event=>{
+        if(!plotted.length||!tooltip)return;
+        const rect=cv.getBoundingClientRect();
+        const logicalX=(event.clientX-rect.left)*W/rect.width;
+        const nearest=plotted.reduce((best,item)=>Math.abs(item.x-logicalX)<Math.abs(best.x-logicalX)?item:best,plotted[0]);
+        const point=nearest.point;
+        const period=point.end_date&&point.end_date!==point.date?`${formatDate(point.date,windowData.bucket)}–${formatDate(point.end_date,windowData.bucket)}`:formatDate(point.date,windowData.bucket);
+        tooltip.innerHTML=`<b>${esc(period)}</b><br>Acierto ${pct(point.accuracy)}<br>${intfmt(point.correct)} / ${intfmt(point.n)} partidos`;
+        tooltip.style.left=`${event.clientX+12}px`;tooltip.style.top=`${event.clientY+12}px`;tooltip.classList.remove("hidden");
+      };
+      cv.onmouseleave=()=>tooltip?.classList.add("hidden");
+      const trained=(DATA.model?.favorite_accuracy||{}).trained_at;
+      const trainedLabel=trained?String(trained).replace("T"," ").replace("Z"," UTC"):"—";
+      if(stats) stats.innerHTML=`
+        <div class="row2"><span class="lab">accuracy periodo</span><span></span><span class="val" style="color:var(--green)">${pct(windowData.accuracy)}</span></div>
+        <div class="row2"><span class="lab">aciertos</span><span></span><span class="val">${intfmt(windowData.correct)} / ${intfmt(windowData.n)}</span></div>
+        <div class="row2"><span class="lab">periodo</span><span></span><span class="val">${esc(windowData.start||"—")} → ${esc(windowData.end||"—")}</span></div>
+        <div class="row2"><span class="lab">agrupación</span><span></span><span class="val">${windowData.bucket==="day"?"diaria":windowData.bucket==="week"?"semanal":"mensual"}</span></div>
+        <div class="row2"><span class="lab">modelo</span><span></span><span class="val">${esc(timeline.model||"—")}</span></div>
+        <div class="row2"><span class="lab">entrenado</span><span></span><span class="val">${esc(trainedLabel)}</span></div>
+        <div class="small" style="margin-top:8px">Cada punto usa resultados reales del intervalo indicado. Los puntos ámbar tienen menos de cinco partidos; la línea cian es la media ponderada del periodo.</div>`;
     }
     function drawCalibration(){
       const cv = $("calCanvas"); if(!cv) return; const ctx = cv.getContext("2d");
@@ -830,8 +1068,8 @@
       $("dbFetchRows").innerHTML = (DB.fetch_summary||[]).map(r=>{
         const issues = Number(r.blocked||0)+Number(r.error||0)+Number(r.partial||0);
         const color = issues ? "var(--amber)" : "var(--green)";
-        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${intfmt(r.total)}</td><td>${intfmt(r.ok)}</td><td>${intfmt(r.fresh)}</td><td style="color:${color}">${intfmt(issues)}</td></tr>`;
-      }).join("") || '<tr><td colspan="5" class="empty">Sin fetch_state</td></tr>';
+        return `<tr class="winrow"><td>${esc(r.entity_type)}</td><td>${intfmt(r.total)}</td><td>${intfmt(r.ok)}</td><td>${intfmt(r.fresh)}</td><td>${intfmt(r.not_found)}</td><td style="color:${color}">${intfmt(issues)}</td></tr>`;
+      }).join("") || '<tr><td colspan="6" class="empty">Sin fetch_state</td></tr>';
 
       const rowsSummary = (rows) => {
         const entries = Object.entries(rows || {}).sort((a,b)=>b[1]-a[1]).slice(0,4);
@@ -852,6 +1090,83 @@
       ).join("") || '<tr><td colspan="3" class="empty">Sin backups encontrados</td></tr>';
     }
 
+    // ---------- tennis view ----------
+    function renderTennis(){
+      const rows = TENNIS.matches || [];
+      const run = TENNIS.latest_run || {};
+      const health = TENNIS.health || (TENNIS.database?.exists ? "unavailable" : "missing");
+      const predicted = rows.filter(row=>row.predicted?.winner && row.predicted?.probability != null).length;
+      const settled = rows.filter(row=>row.actual?.winner).length;
+      const unavailable = rows.length - predicted;
+      const lowConfidence = rows.filter(row=>String(row.reliability?.label||"").toUpperCase()==="LOW").length;
+
+      const healthEl = $("tennisHealth");
+      healthEl.textContent = health;
+      healthEl.className = `health ${health}`;
+      $("tennisRowCount").textContent = intfmt(rows.length);
+      $("tennisKpis").innerHTML = [
+        [intfmt(rows.length), "partidos jornada"],
+        [intfmt(predicted), "con predicción"],
+        [intfmt(unavailable), "sin predicción"],
+        [intfmt(lowConfidence), "confianza baja"],
+        [intfmt(settled), "con resultado real"],
+      ].map(([value,label])=>`<div class="kpi"><b>${value}</b><span>${label}</span></div>`).join("");
+
+      const runBits = [
+        run.date ? `jornada ${esc(run.date)}` : "",
+        run.run_id ? `run ${esc(run.run_id)}` : "",
+        run.status ? `estado ${esc(run.status)}` : "",
+        run.finished_at_utc ? `finalizado ${esc(run.finished_at_utc)}` : "",
+      ].filter(Boolean);
+      $("tennisRunMeta").innerHTML = runBits.length
+        ? runBits.join(" · ")
+        : "No hay una ejecución de tenis disponible en la base operativa.";
+
+      const flagClass = flag => /unavailable|unmapped|missing|stale|poor|low|error/i.test(String(flag))
+        ? "danger"
+        : /unknown|unverified|warning/i.test(String(flag)) ? "warning" : "info";
+      $("tennisRows").innerHTML = rows.map(row=>{
+        const a = row.player_a?.name || "Jugador A";
+        const b = row.player_b?.name || "Jugador B";
+        const prediction = row.predicted || {};
+        const reliabilityData = row.reliability || {};
+        const flags = reliabilityData.flags || [];
+        const confidenceScore = Number(reliabilityData.score);
+        const scoreLabel = Number.isFinite(confidenceScore)
+          ? (confidenceScore >= 0 && confidenceScore <= 1 ? pct(confidenceScore) : num(confidenceScore,1))
+          : "";
+        const reliabilityBits = [reliabilityData.label, scoreLabel].filter(Boolean);
+        const flagHtml = flags.map(flag=>`<span class="flag ${flagClass(flag)}">${esc(flag)}</span>`).join("");
+        const probabilityDetail = prediction.probability_a != null || prediction.probability_b != null
+          ? `<div class="tennis-meta">A ${pct(prediction.probability_a)} · B ${pct(prediction.probability_b)}</div>`
+          : "";
+        const predictedWinner = prediction.winner
+          ? `<span class="fav">${esc(prediction.winner)}</span>`
+          : `<span class="tennis-unavailable">Sin predicción</span>`;
+        const actualWinner = row.actual?.winner
+          ? `<span class="tennis-real">${esc(row.actual.winner)}</span>`
+          : `<span class="tennis-unavailable">Pendiente / no disponible</span>`;
+        const actualStatusText = row.actual?.status || row.actual?.settled_at_utc;
+        const actualStatus = actualStatusText
+          ? `<div class="tennis-meta">${esc(actualStatusText)}</div>`
+          : "";
+        const tournamentMeta = [row.level, row.surface, row.gender].filter(Boolean).map(esc).join(" · ");
+        return `<tr>
+          <td class="mono">${esc(row.date||"—")}<div class="tennis-meta">${esc(row.scheduled_time||"hora no disponible")}</div></td>
+          <td>${esc(row.tournament||"—")}<div class="tennis-meta">${tournamentMeta||"—"}</div></td>
+          <td><div class="tennis-match-name">${esc(a)} <span style="color:var(--red)">vs</span> ${esc(b)}</div><div class="tennis-meta">${esc(row.status||"estado no disponible")}</div></td>
+          <td>${predictedWinner}<div class="tennis-meta">${esc(prediction.status||"")}</div></td>
+          <td class="mono">${pct(prediction.probability)}${probabilityDetail}</td>
+          <td><div class="mono">${esc(reliabilityBits.join(" · ")||"—")}</div><div class="flags">${flagHtml}</div></td>
+          <td>${actualWinner}${actualStatus}</td>
+        </tr>`;
+      }).join("") || '<tr><td colspan="7" class="empty">Sin predicciones de tenis persistidas para mostrar.</td></tr>';
+
+      const notes = (TENNIS.notes || []).map(esc);
+      notes.push("El ganador real es un dato posterior y nunca modifica la predicción publicada.");
+      $("tennisNotes").innerHTML = notes.join("<br>");
+    }
+
     // ---------- views ----------
     function setView(v){
       state.view=v;
@@ -860,8 +1175,30 @@
       $("view-best").classList.toggle("hidden",v!=="best");
       $("view-model").classList.toggle("hidden",v!=="model");
       $("view-database").classList.toggle("hidden",v!=="database");
+      $("view-tennis").classList.toggle("hidden",v!=="tennis");
+      $("view-match").classList.add("hidden");
       $("controls").style.display = v==="matches" ? "" : "none";
-      if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase();
+      if(v==="best") renderBest(); if(v==="model") renderModel(); if(v==="database") renderDatabase(); if(v==="tennis") renderTennis();
+    }
+
+    // ---------- match detail page (hash routing #/partido/:id) ----------
+    function renderMatchPage(id){
+      const m = M.find(x=>x.id===id);
+      $("matchPageBody").innerHTML = m ? detailHTML(m)
+        : `<div class="empty">Partido no encontrado. <a href="#">Volver</a></div>`;
+    }
+    function applyRoute(){
+      const mth = (location.hash||"").match(/^#\/partido\/(.+)$/);
+      if (mth){
+        renderMatchPage(decodeURIComponent(mth[1]));
+        ["view-matches","view-best","view-model","view-database","view-tennis"].forEach(v=>$(v).classList.add("hidden"));
+        $("view-match").classList.remove("hidden");
+        $("controls").style.display = "none";
+        document.querySelectorAll(".tab").forEach(t=>t.classList.remove("active"));
+        window.scrollTo({top:0});
+      } else {
+        setView(state.view || "matches");
+      }
     }
 
     function init(){
@@ -874,13 +1211,37 @@
         dbDot.textContent = health === "ok" ? "OK" : "!";
         dbDot.style.color = health === "ok" ? "var(--green)" : health === "warning" ? "var(--amber)" : "var(--red-soft)";
       }
-      document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>setView(t.dataset.view));
-      ["search","flagFilter","oddsFilter","sortBy"].forEach(id=>$(id).oninput=renderRows);
-      $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");$("sortBy").value="confidence";renderRows();};
-      $("sortBy").value="confidence";
+      const tennisCount = $("tennisCount");
+      if(tennisCount){
+        const tennisRows = TENNIS.matches || [];
+        tennisCount.textContent = tennisRows.length ? `(${tennisRows.length})` : "!";
+        tennisCount.style.color = tennisRows.length ? "var(--green)" : "var(--amber)";
+      }
+      document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+        if((location.hash||"").startsWith("#/partido")) history.replaceState(null,"",location.pathname+location.search);
+        setView(t.dataset.view);
+      });
+      ["search","flagFilter","oddsFilter"].forEach(id=>$(id).oninput=renderRows);
+      document.querySelectorAll("th.sortable").forEach(th=>th.onclick=()=>setSort(th.dataset.sort));
+      $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");state.sortKey="time";state.sortDir="asc";renderRows();};
+
+      // Filtros de la vista Best Opportunity (Favoritos): dia / probabilidad / fiabilidad.
+      const days = [...new Set(M.map(m=>m.date).filter(Boolean))].sort();
+      const bd = $("bestDay");
+      if (bd) bd.innerHTML = '<option value="">Día: todos</option>' + days.map(d=>`<option value="${esc(d)}">${esc(d)}</option>`).join("");
+      ["bestDay","bestProb","bestRel"].forEach(id=>{ const el=$(id); if(el) el.oninput=renderBest; });
+      const br=$("bestReset");
+      if(br) br.onclick=()=>{ if($("bestDay"))$("bestDay").value=""; if($("bestProb"))$("bestProb").value="0"; if($("bestRel"))$("bestRel").value="0"; renderBest(); };
+
+      // Routing de la pagina de partido.
+      const back=$("backLink");
+      if(back) back.onclick=(e)=>{ e.preventDefault(); history.replaceState(null,"",location.pathname+location.search); applyRoute(); };
+      window.addEventListener("hashchange", applyRoute);
+
       renderRows();
+      applyRoute();  // honra deep-link #/partido/:id al cargar
       // pre-cuenta best
-      const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&m.prediction?.confidence>=.6&&reliability(m)>=.45).length;
+      const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&decisionConfidence(m)>=.6&&reliability(m)>=.45).length;
       $("bestCount").textContent = n?`(${n})`:"";
     }
     init();

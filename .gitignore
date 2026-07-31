@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+CS2/TESTS/.cache/
 .venv/
 venv/
 
@@ -12,46 +13,63 @@ venv/
 *.env
 cf_session.json
 cookies*.json
-SCRAPPER/hltv-scraper-api/hltv_scraper/cf_session.json
-SCRAPPER/hltv-scraper-api/hltv_scraper/*session*.json
+CS2/SCRAPER/hltv-scraper-api/hltv_scraper/cf_session.json
+CS2/SCRAPER/hltv-scraper-api/hltv_scraper/*session*.json
 
 # Local virtual environments
-SCRAPPER/hltv-scraper-api/.venv/
+CS2/SCRAPER/hltv-scraper-api/.venv/
 
 # CA bundle especifico de maquina (redes con inspeccion TLS); no versionar
-SCRAPPER/hltv-scraper-api/corp_ca_bundle.pem
+CS2/SCRAPER/hltv-scraper-api/corp_ca_bundle.pem
 
 # Clon local de Scrapling (14M, con .git anidado). Scrapling se instala desde
 # PyPI via requirements; el clon no es necesario y no debe versionarse.
-SCRAPPER/Scrapling/
+CS2/SCRAPER/Scrapling/
 
 # Scraped/generated data
-SCRAPPER/hltv-scraper-api/hltv_scraper/data/raw/
-DAILY_SNAPSHOTS/runs/
-DAILY_SNAPSHOTS/master/*.json
-DAILY_SNAPSHOTS/master/*.jsonl
-DAILY_SNAPSHOTS/logs/
-logs/
-BBDD/*.db
-BBDD/*.db-wal
-BBDD/*.db-shm
-BBDD/cs2_dump.sql
-BBDD/backups/
-MODEL/artifacts/*.pkl
-MODEL/artifacts/registry/
-MODEL/results/*.json
-MODEL/results/*.csv
-MODEL/results/professional_train_*/
-MODEL/results/full_train_catboost_*/
-MODEL/results/empirical_*/
-MODEL/results/WALKFORWARD_FAILURE_AUDIT.md
-MODEL/results/walkforward_failure_*.png
+CS2/SCRAPER/hltv-scraper-api/hltv_scraper/data/raw/
+CS2/PIPELINE/runs/
+CS2/PIPELINE/master/*.json
+CS2/PIPELINE/master/*.jsonl
+CS2/PIPELINE/logs/
+CS2/BBDD/*.db
+CS2/BBDD/*.db-wal
+CS2/BBDD/*.db-shm
+CS2/BBDD/cs2_dump.sql
+CS2/BBDD/*_report.json
+CS2/BBDD/backups/
+
+# BLACKBOX: se versionan el codigo (blackbox.py), el README y el restaurador
+# standalone; los DATOS generados (sqlite/sql comprimidos + manifest) NO.
+CS2/BBDD/BLACKBOX/data/
+CS2/BBDD/BLACKBOX/manifest.json
+CS2/BBDD/BLACKBOX/schema.sql
+CS2/BBDD/BLACKBOX/.staging/
+CS2/BBDD/BLACKBOX/.prev/
+CS2/BBDD/BLACKBOX/.verify_tmp.sqlite
+CS2/MODEL/artifacts/*.pkl
+CS2/MODEL/artifacts/registry/
+CS2/MODEL/results/*.json
+CS2/MODEL/results/*.csv
+CS2/MODEL/results/*.yaml
+CS2/MODEL/results/*.pkl
+CS2/MODEL/results/smoke_*/
+CS2/MODEL/results/professional_train_*/
+CS2/MODEL/results/full_train_catboost_*/
+CS2/MODEL/results/empirical_*/
+CS2/MODEL/results/WALKFORWARD_FAILURE_AUDIT.md
+CS2/MODEL/results/walkforward_failure_*.png
+# Artefactos generados por el harness de evaluacion (MODEL/evaluate.py)
+CS2/MODEL/results/EVAL_REPORT.md
+CS2/MODEL/results/reliability_curve.png
+CS2/MODEL/results/experiments.jsonl
+CS2/MODEL/results/MODEL_COMPARISON.md
 context_calibration.json
 professional_training_output*.md
 WEB/data.js
-tests/graphs/
+CS2/TESTS/graphs/
 tmp_results.json
-SCRAPPER/hltv-scraper-api/tmp_results.json
+CS2/SCRAPER/hltv-scraper-api/tmp_results.json
 
 # OS/editor
 .DS_Store
