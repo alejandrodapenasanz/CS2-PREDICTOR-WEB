@@ -1,5 +1,28 @@
 # Changelog / registro de decisiones
 
+## 2026-07-31 - Robustez de entorno: deps del modelo, SQLite en OneDrive y Python del scraper
+
+- **Deps del modelo completadas.** `cs2model.config` importa `yaml` y
+  `enrich_predictions` importa `parsel` a nivel de modulo, pero no estaban en
+  `ModelImports`/`ModelPipPackages` de `PIPELINE/pipeline.config.psd1`. En una
+  maquina sin ellos la etapa "Semilla BBDD" fallaba con
+  `ModuleNotFoundError: No module named 'yaml'`. Se sincroniza la config con
+  `requirements.txt` (anadidos `pyyaml` y `parsel`).
+- **SQLite tolerante a carpetas sincronizadas.** Las conexiones (`build_db`,
+  `export_master_json`, `cs2model/dataio`, `PIPELINE/start`) usan WAL con
+  fallback a `DELETE` si no queda activo, mas `busy_timeout=30000`. WAL rompe
+  dentro de OneDrive/red por los ficheros `-wal`/`-shm`; fuera de OneDrive el
+  comportamiento (WAL) no cambia.
+- **Python del scraper auto-resuelto.** `Get-ScraperBasePython` enumera con
+  `py -0p` sin emitir el error `No suitable Python runtime found`, y si no hay
+  ningun Python 3.10-3.13 (requisito del navegador stealth de Scrapling)
+  **instala Python 3.13 con winget** (`--scope user`, sin admin). Es best-effort:
+  si winget no esta o falla, `Ensure-ScraperPython` degrada a las deps HTTP base
+  y desactiva stealth en vez de abortar la pipeline.
+- **Requisito de entorno:** el modelo corre en Python 3.14 (todas las deps ML
+  tienen wheels). El **scraper** necesita 3.10-3.13 para el modo stealth; ahora
+  se provisiona solo. Primera ejecucion recomendada: `.\start.ps1 -RecreateScraperVenv`.
+
 ## 2026-07-30 - Backups sin duplicacion local
 
 - Eliminadas las carpetas redundantes `CS2-Predictor-Backups` interior y
