@@ -125,12 +125,26 @@ function Get-SystemPython {
 }
 
 function Get-ScraperBasePython {
-    # Scrapling (navegador stealth) soporta Python 3.10-3.13, NO 3.14.
-    foreach ($v in @("3.13", "3.12", "3.11", "3.10")) {
+    # Scrapling (navegador stealth) soporta Python 3.10-3.13, NO 3.14. Buscamos un
+    # interprete compatible sin provocar errores por versiones ausentes: con
+    # ErrorActionPreference=Stop, el stderr de 'py' (p.ej. "No suitable Python
+    # runtime found") se convertiria en error terminante. Enumeramos con 'py -0p'.
+    $py = Get-Command py -ErrorAction SilentlyContinue
+    if ($py) {
+        $eap = $ErrorActionPreference
+        $ErrorActionPreference = 'SilentlyContinue'
         try {
-            $out = & py "-$v" -c "import sys; print(sys.executable)" 2>$null
-            if ($LASTEXITCODE -eq 0 -and $out) { return $out.Trim() }
-        } catch { }
+            $listing = & py -0p 2>$null
+            foreach ($v in @('3.13', '3.12', '3.11', '3.10')) {
+                $hit = $listing | Where-Object { $_ -match ('-V:' + [regex]::Escape($v)) } | Select-Object -First 1
+                if ($hit -and ($hit -match '([A-Za-z]:\\.*python\.exe)')) {
+                    return $Matches[1]
+                }
+            }
+        } catch {
+        } finally {
+            $ErrorActionPreference = $eap
+        }
     }
     Write-Log "No se encontro Python 3.10-3.13; uso el del sistema. El navegador stealth de Scrapling podria no instalar (se usara solo el tier HTTP / requests)." -Level WARN
     return (Get-SystemPython)
@@ -262,7 +276,16 @@ function Ensure-ScraperPython {
         }
         Invoke-Native $BasePython @("-m", "venv", (Join-Path $ScraperDir ".venv")) "Creacion venv scraper" | Out-Null
         Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade pip scraper" | Out-Null
-        Invoke-Native $VenvPython @("-m", "pip", "install", "-r", $Requirements) "Instalacion requirements scraper" | Out-Null
+        try {
+            Invoke-Native $VenvPython @("-m", "pip", "install", "-r", $Requirements) "Instalacion requirements scraper" | Out-Null
+        } catch {
+            # Fallo tipico: Scrapling/curl_cffi/nodriver sin wheels para el Python
+            # del venv (p.ej. 3.14). Degradamos a HTTP: instalamos solo lo base y
+            # desactivamos el navegador stealth para no abortar toda la pipeline.
+            Write-Log ("Fallo instalando requirements completos del scraper; reintento solo deps HTTP base y desactivo stealth: " + $_.Exception.Message) -Level WARN
+            Invoke-Native $VenvPython @("-m", "pip", "install", "Scrapy", "cloudscraper", "requests") "Instalacion base scraper (sin stealth)" | Out-Null
+            Set-Item -Path "Env:HLTV_USE_SCRAPLING" -Value "0"
+        }
         try {
             & $VenvPython -c "from scrapling.cli import install; install([], standalone_mode=False)"
             if ($LASTEXITCODE -ne 0) { Write-Log "'scrapling install' devolvio error; el navegador stealth podria no estar disponible." -Level WARN }
