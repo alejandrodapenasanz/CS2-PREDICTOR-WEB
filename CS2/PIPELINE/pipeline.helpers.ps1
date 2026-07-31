@@ -124,29 +124,62 @@ function Get-SystemPython {
     return $cmd.Source
 }
 
-function Get-ScraperBasePython {
-    # Scrapling (navegador stealth) soporta Python 3.10-3.13, NO 3.14. Buscamos un
-    # interprete compatible sin provocar errores por versiones ausentes: con
-    # ErrorActionPreference=Stop, el stderr de 'py' (p.ej. "No suitable Python
-    # runtime found") se convertiria en error terminante. Enumeramos con 'py -0p'.
+function Find-CompatiblePython {
+    # Devuelve la ruta a un python.exe 3.10-3.13 registrado en el lanzador 'py',
+    # o $null. No emite errores si faltan versiones: con ErrorActionPreference=Stop
+    # el stderr de 'py' se convertiria en error terminante, asi que lo silenciamos.
     $py = Get-Command py -ErrorAction SilentlyContinue
-    if ($py) {
+    if (-not $py) { return $null }
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'SilentlyContinue'
+    try {
+        $listing = & py -0p 2>$null
+        foreach ($v in @('3.13', '3.12', '3.11', '3.10')) {
+            $hit = $listing | Where-Object { $_ -match ('-V:' + [regex]::Escape($v)) } | Select-Object -First 1
+            if ($hit -and ($hit -match '([A-Za-z]:\\.*python\.exe)')) { return $Matches[1] }
+        }
+    } catch {
+    } finally {
+        $ErrorActionPreference = $eap
+    }
+    return $null
+}
+
+function Get-ScraperBasePython {
+    # Scrapling (navegador stealth) requiere Python 3.10-3.13 (NO 3.14). Si no hay
+    # ninguno, intentamos instalar 3.13 automaticamente con winget (scope usuario,
+    # sin admin) para que "todo funcione" sin pasos manuales. Best-effort: si winget
+    # no esta o falla, degradamos al Python del sistema (scraper en modo HTTP).
+    $found = Find-CompatiblePython
+    if ($found) { return $found }
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Write-Log "No hay Python 3.10-3.13; instalando Python 3.13 con winget (una vez, scope usuario)..." -Level WARN
         $eap = $ErrorActionPreference
-        $ErrorActionPreference = 'SilentlyContinue'
+        $ErrorActionPreference = 'Continue'
         try {
-            $listing = & py -0p 2>$null
-            foreach ($v in @('3.13', '3.12', '3.11', '3.10')) {
-                $hit = $listing | Where-Object { $_ -match ('-V:' + [regex]::Escape($v)) } | Select-Object -First 1
-                if ($hit -and ($hit -match '([A-Za-z]:\\.*python\.exe)')) {
-                    return $Matches[1]
-                }
-            }
+            & winget install --exact --id Python.Python.3.13 --scope user --silent `
+                --accept-package-agreements --accept-source-agreements 2>&1 |
+                ForEach-Object { Write-Log ([string]$_) -Level DEBUG }
         } catch {
+            Write-Log ("winget no pudo instalar Python 3.13: " + $_.Exception.Message) -Level WARN
         } finally {
             $ErrorActionPreference = $eap
         }
+        $found = Find-CompatiblePython
+        if (-not $found) {
+            $cand = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
+            if (Test-Path $cand) { $found = $cand }
+        }
+        if ($found) {
+            Write-Log ("Python 3.13 disponible: " + $found) -Level INFO -Color Green
+            return $found
+        }
+        Write-Log "No se pudo dejar disponible Python 3.13 tras winget; uso el del sistema (scraper en modo HTTP)." -Level WARN
+    } else {
+        Write-Log "No hay Python 3.10-3.13 ni winget para instalarlo; uso el del sistema (scraper en modo HTTP)." -Level WARN
     }
-    Write-Log "No se encontro Python 3.10-3.13; uso el del sistema. El navegador stealth de Scrapling podria no instalar (se usara solo el tier HTTP / requests)." -Level WARN
     return (Get-SystemPython)
 }
 
