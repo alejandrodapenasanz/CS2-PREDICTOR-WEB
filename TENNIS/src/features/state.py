@@ -452,20 +452,36 @@ class CausalHistoryState:
         self,
         match_date: date,
         results: Iterable[HistoricalMatchResult],
+        *,
+        availability_date: date | None = None,
     ) -> None:
-        """Aplica atómicamente resultados de una única fecha posterior.
+        """Aplica resultados fuente cuando termina su embargo temporal.
 
         El llamador debe invocar este método solo después de haber generado
-        todos los snapshots de ``match_date``. Los resultados deben llegar ya
-        filtrados y deduplicados por la capa de ingesta.
+        todos los snapshots de ``match_date``. ``availability_date`` controla
+        cuándo pasa a ser visible el bloque; ``match_date`` se conserva para
+        ventanas de forma y descanso. Si se omite, ambas fechas coinciden para
+        mantener el contrato de llamadas históricas ya tipadas.
         """
 
         checked_date = _validate_date(match_date, field_name="match_date")
-        if self._last_date is not None and checked_date <= self._last_date:
+        effective_date = (
+            checked_date
+            if availability_date is None
+            else _validate_date(
+                availability_date,
+                field_name="availability_date",
+            )
+        )
+        if effective_date < checked_date:
+            raise HistoryDateOrderError(
+                "availability_date no puede ser anterior a match_date."
+            )
+        if self._last_date is not None and effective_date <= self._last_date:
             raise HistoryDateOrderError(
                 "Los bloques deben aplicarse en fechas estrictamente "
                 f"crecientes; última={self._last_date.isoformat()}, "
-                f"recibida={checked_date.isoformat()}."
+                f"recibida={effective_date.isoformat()}."
             )
         materialized = tuple(results)
         if not materialized:
@@ -528,4 +544,4 @@ class CausalHistoryState:
                     lower_id=lower_id,
                 )
 
-        self._last_date = checked_date
+        self._last_date = effective_date

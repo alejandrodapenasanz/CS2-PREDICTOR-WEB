@@ -20,8 +20,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-from datetime import date
-import json
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 import sys
 from typing import Mapping, Sequence
@@ -38,6 +37,10 @@ from src.config import (  # noqa: E402
 from src.modeling.parameters import (  # noqa: E402
     DEFAULT_LIGHTGBM_PARAMETERS,
     TemporalEvaluationParameters,
+)
+from src.modeling.data import (  # noqa: E402
+    ModelDataError,
+    load_feature_source_manifest,
 )
 from src.modeling.training import (  # noqa: E402
     ModelTrainingRun,
@@ -95,15 +98,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Hilos de LightGBM; -1 usa los disponibles.",
     )
+    parser.add_argument(
+        "--training-as-of-date",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Corte causal del reentreno; por defecto hoy UTC. Solo usa "
+            "resultados con result_available_date estrictamente anterior."
+        ),
+    )
     return parser
 
 
-def infer_last_complete_season(manifest_path: Path) -> int:
+def infer_last_complete_season(
+    manifest_path: Path,
+    training_as_of_date: date,
+) -> int:
     """Obtiene la última temporada cerrada común sin usar filas futuras."""
 
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        source = load_feature_source_manifest(manifest_path)
+        payload = source.raw_payload
+    except ModelDataError as exc:
         raise ValueError(
             f"No se pudo leer el manifiesto {manifest_path}."
         ) from exc
@@ -126,7 +143,19 @@ def infer_last_complete_season(manifest_path: Path) -> int:
             max_years.append(date.fromisoformat(value).year)
         except ValueError as exc:
             raise ValueError(f"max_date inválida para {gender}.") from exc
-    return min(min(max_years), date.today().year - 1)
+    latest_admissible_source_date = training_as_of_date - timedelta(
+        days=source.source_date_policy.result_embargo_days + 1
+    )
+    last_fully_available_year = (
+        latest_admissible_source_date.year
+        if (
+            latest_admissible_source_date.month,
+            latest_admissible_source_date.day,
+        )
+        == (12, 31)
+        else latest_admissible_source_date.year - 1
+    )
+    return min(min(max_years), last_fully_available_year)
 
 
 def _print_report(run: ModelTrainingRun) -> None:
@@ -166,10 +195,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Ejecuta el reentreno completo y devuelve cero tras verificarlo."""
 
     args = build_parser().parse_args(argv)
+    training_cutoff = (
+        datetime.now(UTC).date()
+        if args.training_as_of_date is None
+        else args.training_as_of_date
+    )
     last_season = (
         args.last_test_season
         if args.last_test_season is not None
-        else infer_last_complete_season(args.manifest)
+        else infer_last_complete_season(args.manifest, training_cutoff)
     )
     evaluation = TemporalEvaluationParameters(
         first_test_season=args.first_test_season,
@@ -186,6 +220,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         evaluation_parameters=evaluation,
         script_path=Path(__file__).resolve(),
         progress=lambda message: print(message, flush=True),
+        training_as_of_date=training_cutoff,
     )
     _print_report(run)
     return 0

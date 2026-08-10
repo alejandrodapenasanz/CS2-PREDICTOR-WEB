@@ -21,6 +21,7 @@ from .identifiers import (
     required_text,
 )
 from .types import OperationsValidationError
+from ..temporal import DEFAULT_SOURCE_DATE_POLICY
 
 
 PREDICTION_REQUIRED_COLUMNS = frozenset(
@@ -38,6 +39,8 @@ PREDICTION_REQUIRED_COLUMNS = frozenset(
         "model_probability_b",
         "prediction_status",
         "model_fingerprint",
+        "model_training_max_date",
+        "model_training_available_max_date",
     }
 )
 
@@ -94,6 +97,8 @@ class PredictionValidity:
     model_probability_raw_a: float | None
     model_probability_a: float | None
     model_probability_b: float | None
+    model_training_max_date: str | None
+    model_training_available_max_date: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +207,8 @@ def _prediction_failure_reasons(
     player_b_slug: str | None,
     probability_a: float | None,
     probability_b: float | None,
+    model_training_max_date: str | None,
+    model_training_available_max_date: str | None,
 ) -> tuple[str, ...]:
     """Enumera razones que excluyen una fila de la selección oficial."""
 
@@ -242,18 +249,35 @@ def _prediction_failure_reasons(
         < pd.Timestamp(prediction_as_of_utc)
     ):
         reasons.append("source_not_strictly_before_prediction")
-    training_date_value = optional_scalar(
-        row.get("model_training_max_date")
-    )
-    if training_date_value is not None:
-        training_date = canonical_date(
-            training_date_value,
-            "model_training_max_date",
+    match_day = date.fromisoformat(match_date)
+    if (
+        prediction_as_of_utc is not None
+        and pd.Timestamp(prediction_as_of_utc).date() > match_day
+    ):
+        reasons.append("prediction_created_after_match_date")
+    if (
+        source_retrieved_at_utc is not None
+        and pd.Timestamp(source_retrieved_at_utc).date() > match_day
+    ):
+        reasons.append("source_captured_after_match_date")
+    if model_training_max_date is None:
+        reasons.append("model_training_max_date_missing")
+    if model_training_available_max_date is None:
+        reasons.append("model_training_available_max_date_missing")
+    else:
+        available_day = date.fromisoformat(
+            model_training_available_max_date
         )
-        if not date.fromisoformat(training_date) < date.fromisoformat(
-            match_date
+        if not available_day < match_day:
+            reasons.append("model_results_not_available_before_match")
+        if (
+            model_training_max_date is not None
+            and DEFAULT_SOURCE_DATE_POLICY.availability_date(
+                date.fromisoformat(model_training_max_date)
+            )
+            != available_day
         ):
-            reasons.append("model_not_strictly_before_match")
+            reasons.append("model_training_dates_inconsistent")
     return tuple(reasons)
 
 
@@ -296,6 +320,28 @@ def validate_prediction_row(
         "model_probability_b",
         probability=True,
     )
+    training_date_value = optional_scalar(
+        row.get("model_training_max_date")
+    )
+    model_training_max_date = (
+        canonical_date(
+            training_date_value,
+            "model_training_max_date",
+        )
+        if training_date_value is not None
+        else None
+    )
+    available_date_value = optional_scalar(
+        row.get("model_training_available_max_date")
+    )
+    model_training_available_max_date = (
+        canonical_date(
+            available_date_value,
+            "model_training_available_max_date",
+        )
+        if available_date_value is not None
+        else None
+    )
     reasons = _prediction_failure_reasons(
         row,
         match_date=match_date,
@@ -305,6 +351,10 @@ def validate_prediction_row(
         player_b_slug=slug_b,
         probability_a=probability_a,
         probability_b=probability_b,
+        model_training_max_date=model_training_max_date,
+        model_training_available_max_date=(
+            model_training_available_max_date
+        ),
     )
     return PredictionValidity(
         is_valid=not reasons,
@@ -317,6 +367,10 @@ def validate_prediction_row(
         model_probability_raw_a=raw_probability,
         model_probability_a=probability_a,
         model_probability_b=probability_b,
+        model_training_max_date=model_training_max_date,
+        model_training_available_max_date=(
+            model_training_available_max_date
+        ),
     )
 
 
@@ -477,4 +531,3 @@ def validate_source_kind(value: object) -> str:
             "source_kind no puede proceder de predicción, label o resultado."
         )
     return source_kind
-

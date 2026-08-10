@@ -47,6 +47,7 @@ class EventColumns:
     tourney_id: str | None = "tourney_id"
     match_num: str | None = "match_num"
     round: str | None = "round"
+    source_date: str | None = None
 
 
 _DERIVED_COLUMNS = frozenset(
@@ -210,6 +211,8 @@ def _required_columns(
         required.add(columns.source_row)
     if columns.source_record_hash is not None:
         required.add(columns.source_record_hash)
+    if columns.source_date is not None:
+        required.add(columns.source_date)
     return required
 
 
@@ -412,6 +415,11 @@ def events_from_dataframe(
         try:
             event = MatchEvent(
                 date=_normalise_date(row[columns.date]),
+                source_date=(
+                    _normalise_date(row[columns.source_date])
+                    if columns.source_date is not None
+                    else _normalise_date(row[columns.date])
+                ),
                 gender=_normalise_gender(row[columns.gender]),
                 winner_id=_normalise_player_id(
                     row[columns.winner_id],

@@ -10,7 +10,7 @@ después de verificar todos los artefactos.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 import json
 import os
 from pathlib import Path
@@ -28,6 +28,7 @@ from ..config import (
 )
 from .artifacts import (
     PublishedRun,
+    activate_published_run,
     create_staging_directory,
     dump_joblib_artifact,
     find_verified_run,
@@ -103,6 +104,7 @@ def _parameter_payload(
     lightgbm: LightGBMParameters,
     evaluation: TemporalEvaluationParameters,
     script_path: Path | None,
+    training_as_of_date: date,
 ) -> Mapping[str, object]:
     """Construye la identidad completa del run antes de entrenar."""
 
@@ -124,6 +126,7 @@ def _parameter_payload(
             "historical_odds_available": (
                 feature_source.historical_odds_available
             ),
+            "source_date_policy": feature_source.source_date_policy.as_dict(),
             "datasets": [
                 {
                     "gender": item.gender,
@@ -141,6 +144,7 @@ def _parameter_payload(
             "columns": list(contract.columns_for(profile)),  # type: ignore[arg-type]
         },
         "parameters": {
+            "training_as_of_date": training_as_of_date.isoformat(),
             "logistic": dict(logistic.as_dict()),
             "lightgbm": dict(lightgbm.as_dict()),
             "temporal_evaluation": dict(evaluation.as_dict()),
@@ -212,6 +216,7 @@ def _serialize_gender_models(
     models: GenderFinalModels,
     *,
     staging: Path,
+    feature_source: FeatureSourceManifest,
 ) -> Mapping[str, object]:
     """Guarda principal, baseline, calibradores y bundle de inferencia."""
 
@@ -243,7 +248,16 @@ def _serialize_gender_models(
         "estimator": models.lightgbm,
         "calibrator": models.lightgbm_calibrator,
         "training_rows": models.training_rows,
+        "training_source_rows": models.training_source_rows,
+        "training_excluded_unavailable": (
+            models.training_excluded_unavailable
+        ),
         "training_max_date": models.training_max_date.isoformat(),
+        "training_available_max_date": (
+            models.training_available_max_date.isoformat()
+        ),
+        "training_as_of_date": models.training_as_of_date.isoformat(),
+        "source_date_policy": feature_source.source_date_policy.as_dict(),
         "calibration_source": "temporal OOF predictions",
         "calibration_rows": models.calibration_rows,
     }
@@ -253,7 +267,15 @@ def _serialize_gender_models(
     return {
         "gender": models.gender,
         "training_rows": models.training_rows,
+        "training_source_rows": models.training_source_rows,
+        "training_excluded_unavailable": (
+            models.training_excluded_unavailable
+        ),
         "training_max_date": models.training_max_date.isoformat(),
+        "training_available_max_date": (
+            models.training_available_max_date.isoformat()
+        ),
+        "training_as_of_date": models.training_as_of_date.isoformat(),
         "calibration_rows": models.calibration_rows,
         "primary_model": "lightgbm",
         "calibration": "Platt sobre predicciones OOF temporales",
@@ -269,14 +291,23 @@ def _gender_summary(
     metadata: TrainingDatasetMetadata,
     evaluation: GenderEvaluationResult,
     fold_count: int,
+    models: GenderFinalModels,
 ) -> Mapping[str, object]:
     """Resume volumen final, OOF y cobertura de mercado."""
 
     return {
         "gender": metadata.gender,
-        "training_rows": metadata.rows,
+        "training_rows": models.training_rows,
+        "training_source_rows": models.training_source_rows,
+        "training_excluded_unavailable": (
+            models.training_excluded_unavailable
+        ),
         "training_min_date": metadata.min_date.isoformat(),
-        "training_max_date": metadata.max_date.isoformat(),
+        "training_max_date": models.training_max_date.isoformat(),
+        "training_available_max_date": (
+            models.training_available_max_date.isoformat()
+        ),
+        "training_as_of_date": models.training_as_of_date.isoformat(),
         "evaluation_rows": int(
             evaluation.market_audit.total_rows
         ),
@@ -359,6 +390,7 @@ def retrain_models(
     ),
     script_path: Path | None = None,
     progress: Callable[[str], None] | None = None,
+    training_as_of_date: date | None = None,
 ) -> ModelTrainingRun:
     """Ejecuta o reutiliza el reentreno canónico de ambos géneros.
 
@@ -371,11 +403,23 @@ def retrain_models(
         evaluation_parameters: Temporadas y umbrales del backtest.
         script_path: Script que debe entrar en el fingerprint del código.
         progress: Callback opcional de progreso.
+        training_as_of_date: Corte civil del reentreno final; por defecto hoy
+            UTC. Solo se ajusta con ``result_available_date <`` ese corte.
 
     Returns:
         Run publicado/reutilizado y sus tablas principales.
     """
 
+    resolved_training_cutoff = (
+        datetime.now(UTC).date()
+        if training_as_of_date is None
+        else training_as_of_date
+    )
+    if (
+        isinstance(resolved_training_cutoff, datetime)
+        or not isinstance(resolved_training_cutoff, date)
+    ):
+        raise TrainingError("training_as_of_date debe ser date estricto.")
     feature_source = load_feature_source_manifest(manifest_path)
     contract = load_feature_contract(feature_source.raw_payload)
     resolved_profile = contract.resolve_profile(profile)
@@ -392,6 +436,7 @@ def retrain_models(
         lightgbm=lightgbm_parameters,
         evaluation=evaluation_parameters,
         script_path=script_path,
+        training_as_of_date=resolved_training_cutoff,
     )
     fingerprint = fingerprint_payload(identity_payload)
     canonical_output = (
@@ -400,6 +445,10 @@ def retrain_models(
     existing = find_verified_run(fingerprint, output_dir=output_dir)
     if existing is not None:
         if canonical_output:
+            existing = activate_published_run(
+                existing,
+                output_dir=output_dir,
+            )
             _sync_active_documentation(existing)
         summaries, metrics, market, suspicious = _load_run_tables(existing)
         return ModelTrainingRun(
@@ -428,8 +477,29 @@ def retrain_models(
                 feature_columns=contract.columns_for(resolved_profile),
                 manifest_path=manifest_path,
             )
+            available_dates = pd.to_datetime(
+                loaded.frame["result_available_date"],
+                errors="raise",
+            ).dt.date
+            causal_mask = available_dates.map(
+                lambda value: value < resolved_training_cutoff
+            )
+            causal_frame = loaded.frame.loc[causal_mask].copy()
+            if causal_frame.empty:
+                raise TrainingError(
+                    f"{gender}: el corte no deja resultados disponibles."
+                )
+            if not (
+                pd.to_datetime(
+                    causal_frame["result_available_date"], errors="raise"
+                ).dt.date
+                < resolved_training_cutoff
+            ).all():
+                raise TrainingError(
+                    f"{gender}: el subset causal no reconcilia con el corte."
+                )
             backtest = run_gender_backtest(
-                loaded.frame,
+                causal_frame,
                 gender=gender,
                 contract=contract,
                 profile=resolved_profile,
@@ -442,17 +512,23 @@ def retrain_models(
                 backtest, parameters=evaluation_parameters
             )
             final_models = fit_final_gender_models(
-                loaded.frame,
+                causal_frame,
                 gender=gender,
                 contract=contract,
-                backtest_predictions=backtest.predictions,
+                backtest=backtest,
                 profile=resolved_profile,
                 logistic_parameters=logistic_parameters,
                 lightgbm_parameters=lightgbm_parameters,
                 progress=progress,
+                training_as_of_date=resolved_training_cutoff,
+                source_training_rows=len(loaded.frame),
             )
             model_summaries.append(
-                _serialize_gender_models(final_models, staging=staging)
+                _serialize_gender_models(
+                    final_models,
+                    staging=staging,
+                    feature_source=feature_source,
+                )
             )
             evaluation_dir = staging / "evaluation"
             evaluation_dir.mkdir(parents=True, exist_ok=True)
@@ -478,9 +554,10 @@ def retrain_models(
                     metadata=dataset_metadata,
                     evaluation=evaluation,
                     fold_count=len(backtest.folds),
+                    models=final_models,
                 )
             )
-            del loaded, backtest, evaluation, final_models
+            del loaded, causal_frame, backtest, evaluation, final_models
 
         metrics = pd.concat(all_metrics, ignore_index=True)
         reliability = pd.concat(all_reliability, ignore_index=True)
@@ -547,12 +624,15 @@ def retrain_models(
             "artifact_version": MODEL_ARTIFACT_VERSION,
             "created_at_utc": datetime.now(UTC).isoformat(),
             "identity": identity_payload,
+            "code_inventory": identity_payload["code"],
             "feature_fingerprint": feature_source.fingerprint,
             "source_commit": feature_source.source_commit,
             "feature_profile": resolved_profile,
             "historical_odds_available": (
                 feature_source.historical_odds_available
             ),
+            "source_date_policy": feature_source.source_date_policy.as_dict(),
+            "training_as_of_date": resolved_training_cutoff.isoformat(),
             "gender_summaries": list(summaries),
             "models": model_summaries,
             "global_metrics": _json_records(global_metrics),

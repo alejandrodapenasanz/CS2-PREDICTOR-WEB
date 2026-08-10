@@ -11,18 +11,12 @@ RAW_DATA_DIR: Final[Path] = DATA_DIR / "raw"
 PROCESSED_DATA_DIR: Final[Path] = DATA_DIR / "processed"
 ELO_PROCESSED_DIR: Final[Path] = PROCESSED_DATA_DIR / "elo"
 ELO_DATABASE_PATH: Final[Path] = ELO_PROCESSED_DIR / "elo.sqlite3"
-FEATURES_PROCESSED_DIR: Final[Path] = PROCESSED_DATA_DIR / "features"
-TRAINING_DATASET_M_PATH: Final[Path] = (
-    FEATURES_PROCESSED_DIR / "training_M.parquet"
-)
-TRAINING_DATASET_F_PATH: Final[Path] = (
-    FEATURES_PROCESSED_DIR / "training_F.parquet"
-)
+# ``features`` contiene cuatro artefactos heredados con una ACL de Windows
+# irrecuperable tras la migración del repositorio. La ruta activa se mantiene
+# separada para que ningún build dependa de poder sobrescribir esos archivos.
+FEATURES_PROCESSED_DIR: Final[Path] = PROCESSED_DATA_DIR / "features_active"
 FEATURE_DATASET_MANIFEST_PATH: Final[Path] = (
     FEATURES_PROCESSED_DIR / "manifest.json"
-)
-RANKING_CONFLICTS_PATH: Final[Path] = (
-    FEATURES_PROCESSED_DIR / "ranking_conflicts.csv"
 )
 PREDICTIONS_PROCESSED_DIR: Final[Path] = (
     PROCESSED_DATA_DIR / "predictions"

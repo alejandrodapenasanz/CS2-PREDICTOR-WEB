@@ -18,7 +18,9 @@ from src.daily_pipeline import (
     publish_predictions_csv,
     rebuild_history_state,
 )
+from src.daily_pipeline.pipeline import _prediction_timestamp_after_snapshot
 from src.features import FeatureParameters
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY
 
 
 def _history_frame(include_future: bool = True) -> pd.DataFrame:
@@ -29,6 +31,7 @@ def _history_frame(include_future: bool = True) -> pd.DataFrame:
             "record_id": "r1",
             "gender": "M",
             "match_date": date(2024, 1, 1),
+            "result_available_date": date(2024, 1, 22),
             "player_a_id": 1,
             "player_b_id": 2,
             "surface": "Hard",
@@ -38,6 +41,7 @@ def _history_frame(include_future: bool = True) -> pd.DataFrame:
             "record_id": "r2",
             "gender": "M",
             "match_date": date(2024, 1, 2),
+            "result_available_date": date(2024, 1, 23),
             "player_a_id": 3,
             "player_b_id": 1,
             "surface": "Clay",
@@ -49,7 +53,8 @@ def _history_frame(include_future: bool = True) -> pd.DataFrame:
             {
                 "record_id": "future",
                 "gender": "M",
-                "match_date": date(2024, 1, 3),
+                "match_date": date(2024, 2, 1),
+                "result_available_date": date(2024, 2, 22),
                 "player_a_id": 1,
                 "player_b_id": 2,
                 "surface": "Hard",
@@ -84,8 +89,8 @@ def _mapped_frame() -> pd.DataFrame:
                 "player_2_slug": f"b-{len(rows)}",
                 "player_1_id": first_id,
                 "player_2_id": second_id,
-                "player_1_odds": 2.0,
-                "player_2_odds": 2.0,
+                "player_1_odds": 1.5,
+                "player_2_odds": 3.0,
                 "mapping_status": mapping,
                 "retrieved_at_utc": pd.Timestamp(
                     "2024-02-01T08:00:00Z"
@@ -141,8 +146,12 @@ class _FakeBuilder:
                 "ranking_age_days_b": 5,
                 "age_missing_a": False,
                 "age_missing_b": False,
-                "market_probability_a": 0.5,
-                "market_probability_b": 0.5,
+                "market_probability_a": (
+                    0.5 if request.odds_a is not None else None
+                ),
+                "market_probability_b": (
+                    0.5 if request.odds_b is not None else None
+                ),
             }
         )
 
@@ -150,16 +159,29 @@ class _FakeBuilder:
 class _FakeModel:
     """Modelo calibrado falso con el contrato mínimo del servicio real."""
 
-    def __init__(self, training_max_date: str = "2024-01-20") -> None:
+    def __init__(self, training_max_date: str = "2024-01-01") -> None:
         """Configura un corte causal o no causal para cada prueba."""
 
         self.gender = "M"
         self.training_max_date = training_max_date
+        self.training_available_max_date = (
+            DEFAULT_SOURCE_DATE_POLICY.availability_date(
+                date.fromisoformat(training_max_date)
+            ).isoformat()
+        )
         self.run_fingerprint = "f" * 64
         self.estimator = SimpleNamespace(profile="sports_only")
 
-    def predict(self, frame: pd.DataFrame) -> pd.DataFrame:
+    def predict(
+        self,
+        frame: pd.DataFrame,
+        *,
+        as_of_date: date,
+    ) -> pd.DataFrame:
         """Devuelve probabilidades deterministas preservando el índice."""
+
+        if date.fromisoformat(self.training_max_date) >= as_of_date:
+            raise AssertionError("El doble recibió un corte no causal.")
 
         return pd.DataFrame(
             {
@@ -186,6 +208,25 @@ def _feature_context() -> object:
     )
 
 
+class DailyTimestampTests(unittest.TestCase):
+    """Verifica el orden lógico captura-predicción en relojes de baja resolución."""
+
+    def test_equal_wall_clock_ticks_receive_one_microsecond_order(self) -> None:
+        """Impide que una captura anterior quede inválida por timestamp igual."""
+
+        captured_at = pd.Timestamp("2026-08-09T08:00:00Z")
+        scraped = pd.DataFrame({"retrieved_at_utc": [captured_at]})
+        prediction_at = _prediction_timestamp_after_snapshot(
+            captured_at.to_pydatetime(),
+            scraped,
+        )
+
+        self.assertEqual(
+            prediction_at,
+            (captured_at + pd.Timedelta(microseconds=1)).to_pydatetime(),
+        )
+
+
 class DailyHistoryRebuildTests(unittest.TestCase):
     """Comprueba reconstrucción dirigida y corte estricto por fecha."""
 
@@ -198,9 +239,10 @@ class DailyHistoryRebuildTests(unittest.TestCase):
             state = rebuild_history_state(
                 _history_frame(include_future),
                 gender="M",
-                as_of_date=date(2024, 1, 3),
+                as_of_date=date(2024, 2, 1),
                 target_player_ids=frozenset({1, 2}),
                 feature_parameters=parameters,
+                source_date_policy=DEFAULT_SOURCE_DATE_POLICY,
             )
             snapshots.append(
                 state.snapshot(
@@ -208,14 +250,14 @@ class DailyHistoryRebuildTests(unittest.TestCase):
                     1,
                     2,
                     surface="Hard",
-                    as_of_date=date(2024, 1, 3),
+                    as_of_date=date(2024, 2, 1),
                 )
             )
         self.assertEqual(snapshots[0], snapshots[1])
         self.assertEqual(snapshots[0].recent_n_matches_a, 2)
         self.assertAlmostEqual(snapshots[0].recent_n_win_rate_a, 0.5)
         self.assertEqual(snapshots[0].h2h_global_matches, 1)
-        self.assertEqual(snapshots[0].rest_days_a, 1)
+        self.assertEqual(snapshots[0].rest_days_a, 30)
 
 
 class DailyConfidenceTests(unittest.TestCase):
@@ -280,6 +322,8 @@ class DailyPredictionTableTests(unittest.TestCase):
             output.loc[0, "market_comparison_status"],
             "prestart_unverified",
         )
+        self.assertAlmostEqual(output.loc[0, "market_probability_a"], 2 / 3)
+        self.assertAlmostEqual(output.loc[0, "market_probability_b"], 1 / 3)
         self.assertIn(
             "market_prestart_unverified",
             output.loc[0, "confidence_flags"],

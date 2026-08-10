@@ -87,6 +87,9 @@ _SCHEDULED_PATTERN: Final[re.Pattern[str]] = re.compile(
 _SUPPORTED_SURFACES: Final[frozenset[str]] = frozenset(
     {"Hard", "Clay", "Grass", "Carpet"}
 )
+_AMBIGUOUS_SURFACE_LABELS: Final[frozenset[str]] = frozenset(
+    {"Indoors"}
+)
 _TERMINAL_SET_RESULTS: Final[frozenset[tuple[int, int]]] = frozenset(
     {
         (2, 0),
@@ -299,10 +302,12 @@ def _parse_surface_catalog(
 ) -> dict[str, Surface]:
     """Extrae superficies explícitas del catálogo incluido en el mismo HTML.
 
-    La agenda diaria no repite la superficie en cada cabecera, pero el bloque
-    ``This week's tournaments`` enlaza el mismo ``tournament_href`` y publica
-    un ``td.s-color``. Una ausencia permanece ausente; un título nuevo o dos
-    superficies contradictorias para el mismo enlace detienen el parser.
+    La agenda diaria no repite la superficie en cada cabecera, pero el catálogo
+    semanal enlaza el mismo tournament_href y publica un td.s-color. Una
+    ausencia permanece ausente; un título nuevo o dos superficies
+    contradictorias para el mismo enlace detienen el parser. Indoors describe
+    recinto, no material: se conserva como superficie ausente para que
+    confianza marque el caso y nunca se invente Hard.
     """
 
     surfaces: dict[str, Surface] = {}
@@ -347,6 +352,8 @@ def _parse_surface_catalog(
                 f"La superficie de {raw_href!r} no es texto."
             )
         surface_text = _normalise_text(raw_surface)
+        if surface_text in _AMBIGUOUS_SURFACE_LABELS:
+            continue
         if surface_text not in _SUPPORTED_SURFACES:
             raise TennisExplorerSchemaError(
                 f"Superficie no reconocida en el catálogo: {surface_text!r}."

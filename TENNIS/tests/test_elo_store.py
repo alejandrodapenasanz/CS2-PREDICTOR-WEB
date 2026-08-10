@@ -15,9 +15,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.elo.service import EloQuery, get_elo, get_elos  # noqa: E402
+from src.artifact_integrity import build_code_inventory  # noqa: E402
+from src.elo.build import ELO_CODE_PATHS  # noqa: E402
 from src.elo.store import (  # noqa: E402
     EloRunNotAvailableError,
     EloStore,
+    EloStoreError,
     EloValidationError,
     RatingHistoryRow,
 )
@@ -49,6 +52,11 @@ def _create_run(
         source_commit=SOURCE_COMMIT,
         algorithm_version="test-v1",
         input_fingerprint=f"fingerprint-{run_id}",
+        parameters={
+            "artifact_code_inventory": list(
+                build_code_inventory(PROJECT_ROOT, ELO_CODE_PATHS)
+            )
+        },
         initial_rating=initial_rating,
         surface_weight=surface_weight,
         created_at=datetime(2026, 7, 30, tzinfo=UTC),
@@ -157,6 +165,62 @@ class EloStoreSchemaTest(unittest.TestCase):
                     db_path=db_path,
                     run_id="building-m",
                 )
+
+    def test_complete_run_without_code_inventory_is_not_consumable(self) -> None:
+        """Rechaza un run completo si no acredita el código que lo produjo."""
+
+        with _temporary_test_directory() as temporary_directory:
+            db_path = Path(temporary_directory) / "elo.sqlite3"
+            store = EloStore(db_path)
+            store.initialize()
+            store.create_run(
+                run_id="legacy-m",
+                gender="M",
+                source_commit=SOURCE_COMMIT,
+                algorithm_version="test-v1",
+                input_fingerprint="legacy-fingerprint",
+                initial_rating=1500.0,
+                surface_weight=0.5,
+                created_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+            store.activate_run(
+                run_id="legacy-m",
+                completed_at=datetime(2026, 7, 30, 1, tzinfo=UTC),
+            )
+
+            with self.assertRaisesRegex(EloStoreError, "código actual"):
+                store.resolve_complete_run(gender="M")
+
+    def test_complete_run_with_changed_code_hash_is_not_consumable(self) -> None:
+        """Rechaza un inventario bien formado cuyo SHA ya no coincide."""
+
+        with _temporary_test_directory() as temporary_directory:
+            db_path = Path(temporary_directory) / "elo.sqlite3"
+            store = EloStore(db_path)
+            store.initialize()
+            inventory = [
+                dict(entry)
+                for entry in build_code_inventory(PROJECT_ROOT, ELO_CODE_PATHS)
+            ]
+            inventory[0]["sha256"] = "0" * 64
+            store.create_run(
+                run_id="stale-m",
+                gender="M",
+                source_commit=SOURCE_COMMIT,
+                algorithm_version="test-v1",
+                input_fingerprint="stale-fingerprint",
+                parameters={"artifact_code_inventory": inventory},
+                initial_rating=1500.0,
+                surface_weight=0.5,
+                created_at=datetime(2026, 7, 30, tzinfo=UTC),
+            )
+            store.activate_run(
+                run_id="stale-m",
+                completed_at=datetime(2026, 7, 30, 1, tzinfo=UTC),
+            )
+
+            with self.assertRaisesRegex(EloStoreError, "código actual"):
+                store.resolve_complete_run(gender="M")
 
 
 class EloTemporalServiceTest(unittest.TestCase):

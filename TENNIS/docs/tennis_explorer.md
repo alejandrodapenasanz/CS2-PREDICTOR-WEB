@@ -288,9 +288,11 @@ se asigna un torneo o una superficie inventados.
 
 La superficie se obtiene únicamente del catálogo incluido en el mismo HTML y
 se une por el `tournament_href` exacto. Una celda vacía, un torneo ausente del
-catálogo o una cabecera sin enlace produce `surface=null`. Un título distinto
-de `Hard`, `Clay`, `Grass` o `Carpet`, o dos valores contradictorios para el
-mismo enlace, se trata como cambio de esquema.
+catálogo o una cabecera sin enlace produce `surface=null`. El rótulo observado
+`Indoors` describe el recinto, no el material: también produce
+`surface=null` y el diario añade baja confianza, sin asumir `Hard`. Cualquier
+otro título nuevo, o dos valores contradictorios para el mismo enlace, se
+trata como cambio de esquema.
 
 En la captura real del 30 de julio de 2026 hay superficie para 180 de 313
 partidos: cobertura completa de ATP, WTA, Challenger e ITF femenino. Los 133

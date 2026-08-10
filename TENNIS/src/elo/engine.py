@@ -13,7 +13,8 @@ from datetime import date, datetime, timedelta
 from itertools import groupby
 import math
 import re
-from typing import Iterable, Iterator, Sequence, cast
+from types import MappingProxyType
+from typing import Iterable, Iterator, Mapping, Sequence, cast
 
 from .parameters import DEFAULT_ELO_PARAMETERS, EloParameters
 from .types import (
@@ -27,6 +28,7 @@ from .types import (
     MatchEvent,
     PlayerEloState,
     PlayerPreMatchRating,
+    PreviewBlockResult,
     RatedMatch,
     Surface,
 )
@@ -34,6 +36,9 @@ from .types import (
 
 SURFACES: tuple[Surface, ...] = ("Hard", "Clay", "Grass", "Carpet")
 EXCLUDED_LEVELS = frozenset({"E", "J"})
+IDENTITY_EXCLUSION_RULE = (
+    "evidence_available_date_strictly_before_event_source_date"
+)
 _NON_MATCH_STATUS_PATTERN = re.compile(
     r"(?<![A-Z0-9])(?:W\s*/\s*O|WALKOVER|BYE)"
     r"(?![A-Z0-9])",
@@ -54,6 +59,49 @@ class EloEngineError(RuntimeError):
 
 class DateBlockError(EloEngineError):
     """Indica que un bloque no contiene una única fecha posterior."""
+
+
+def normalise_identity_exclusion_after_dates(
+    rules: Mapping[tuple[Gender, int], date] | None,
+) -> Mapping[tuple[Gender, int], date]:
+    """Valida y copia cortes causales de identidad como mapping inmutable.
+
+    Cada valor representa la fecha en que termina el embargo de la primera
+    evidencia. La igualdad se conserva: solo se excluye si esa disponibilidad
+    es estrictamente anterior a la fecha fuente del evento objetivo.
+    """
+
+    if rules is None:
+        raw_rules: Mapping[tuple[Gender, int], date] = {}
+    elif not isinstance(rules, Mapping):
+        raise TypeError(
+            "identity_exclusion_after_dates debe ser un mapping."
+        )
+    else:
+        raw_rules = rules
+    checked_rules: dict[tuple[Gender, int], date] = {}
+    for key, first_evidence_date in raw_rules.items():
+        if (
+            not isinstance(key, tuple)
+            or len(key) != 2
+            or key[0] not in {"M", "F"}
+            or isinstance(key[1], bool)
+            or not isinstance(key[1], int)
+            or key[1] < 0
+        ):
+            raise ValueError(
+                "identity_exclusion_after_dates debe contener pares "
+                "(gender, player_id) válidos."
+            )
+        if (
+            isinstance(first_evidence_date, datetime)
+            or not isinstance(first_evidence_date, date)
+        ):
+            raise ValueError(
+                "Cada corte de identidad debe ser datetime.date estricto."
+            )
+        checked_rules[(cast(Gender, key[0]), key[1])] = first_evidence_date
+    return MappingProxyType(checked_rules)
 
 
 @dataclass
@@ -152,13 +200,15 @@ def _exclusive_as_of_date(state_date: date) -> date:
 
 def _event_exclusion_reason(
     event: MatchEvent,
-    excluded_player_keys: frozenset[tuple[Gender, int]],
+    identity_exclusion_after_dates: Mapping[tuple[Gender, int], date],
 ) -> ExclusionReason | None:
     """Aplica exclusiones auditables antes de deduplicar.
 
     ``RET``, ``DEF``, ``ABD`` y ``ABN`` conservan el ganador oficial. Usarlos
     para excluir después del partido produciría un backtest más limpio que el
-    universo que se intenta predecir.
+    universo que se intenta predecir. Una identidad conflictiva solo se
+    excluye si su primera evidencia tiene fecha estrictamente anterior al
+    evento; el bloque donde aparece la evidencia no se reescribe.
     """
 
     if event.tour_level.strip().upper() in EXCLUDED_LEVELS:
@@ -168,11 +218,15 @@ def _event_exclusion_reason(
         and _NON_MATCH_STATUS_PATTERN.search(event.score)
     ):
         return "excluded_status"
-    if (
-        (event.gender, event.winner_id) in excluded_player_keys
-        or (event.gender, event.loser_id) in excluded_player_keys
-    ):
-        return "excluded_identity"
+    for player_id in (event.winner_id, event.loser_id):
+        evidence_available_date = identity_exclusion_after_dates.get(
+            (event.gender, player_id)
+        )
+        if (
+            evidence_available_date is not None
+            and evidence_available_date < event.result_source_date
+        ):
+            return "excluded_identity"
     if event.winner_id == event.loser_id:
         return "self_match"
     return None
@@ -180,7 +234,7 @@ def _event_exclusion_reason(
 
 def _filter_events(
     events: Sequence[MatchEvent],
-    excluded_player_keys: frozenset[tuple[Gender, int]],
+    identity_exclusion_after_dates: Mapping[tuple[Gender, int], date],
 ) -> tuple[tuple[MatchEvent, ...], tuple[EventDecision, ...]]:
     """Filtra y deduplica eventos con un keeper fijado por procedencia."""
 
@@ -188,7 +242,10 @@ def _filter_events(
     decisions: list[EventDecision] = []
     seen_keys: set[tuple[object, ...]] = set()
     for event in sorted(events, key=lambda item: item.sort_key):
-        reason = _event_exclusion_reason(event, excluded_player_keys)
+        reason = _event_exclusion_reason(
+            event,
+            identity_exclusion_after_dates,
+        )
         if reason is None:
             if event.logical_key in seen_keys:
                 reason = "duplicate"
@@ -214,9 +271,16 @@ class EloEngine:
         *,
         run_id: str | None = None,
         source_commit: str | None = None,
-        excluded_player_keys: Iterable[tuple[Gender, int]] = (),
+        identity_exclusion_after_dates: (
+            Mapping[tuple[Gender, int], date] | None
+        ) = None,
     ) -> None:
-        """Inicializa estado, metadatos y cuarentena de identidad."""
+        """Inicializa estado, metadatos y reglas causales de identidad.
+
+        Cada valor de ``identity_exclusion_after_dates`` es la primera fecha
+        de evidencia. La exclusión se activa únicamente para eventos
+        posteriores; la igualdad no basta.
+        """
 
         if not isinstance(parameters, EloParameters):
             raise TypeError("parameters debe ser EloParameters.")
@@ -233,22 +297,11 @@ class EloEngine:
         self.source_commit = (
             source_commit.strip() if source_commit is not None else None
         )
-        checked_keys: set[tuple[Gender, int]] = set()
-        for key in excluded_player_keys:
-            if (
-                not isinstance(key, tuple)
-                or len(key) != 2
-                or key[0] not in {"M", "F"}
-                or isinstance(key[1], bool)
-                or not isinstance(key[1], int)
-                or key[1] < 0
-            ):
-                raise ValueError(
-                    "excluded_player_keys debe contener pares "
-                    "(gender, player_id) válidos."
-                )
-            checked_keys.add((cast(Gender, key[0]), key[1]))
-        self.excluded_player_keys = frozenset(checked_keys)
+        self.identity_exclusion_after_dates = (
+            normalise_identity_exclusion_after_dates(
+                identity_exclusion_after_dates
+            )
+        )
         self._players: dict[tuple[Gender, int], _PlayerState] = {}
         self._last_date: date | None = None
 
@@ -548,6 +601,44 @@ class EloEngine:
                 )
         return tuple(snapshots)
 
+    def preview_date_block(
+        self,
+        match_date: date,
+        events: Iterable[MatchEvent],
+    ) -> PreviewBlockResult:
+        """Calcula ratings prepartido sin incorporar ningún resultado.
+
+        El estado ya aplicado debe terminar estrictamente antes de
+        ``match_date``. Esta operación permite crear features en la fecha
+        fuente y posponer la actualización hasta la fecha de disponibilidad.
+        """
+
+        validated_date = _validate_block_date(match_date)
+        materialised = tuple(events)
+        if not materialised:
+            raise DateBlockError("Un bloque de fecha no puede estar vacío.")
+        if self._last_date is not None and validated_date <= self._last_date:
+            raise DateBlockError(
+                "El preview requiere un corte posterior al último estado."
+            )
+        for event in materialised:
+            if not isinstance(event, MatchEvent):
+                raise TypeError("events debe contener solo MatchEvent.")
+            if event.date != validated_date:
+                raise DateBlockError(
+                    "Todos los eventos preview deben coincidir con match_date."
+                )
+        included, decisions = _filter_events(
+            materialised,
+            self.identity_exclusion_after_dates,
+        )
+        return PreviewBlockResult(
+            date=validated_date,
+            rated_matches=tuple(self._rate_event(event) for event in included),
+            decisions=decisions,
+            audit=_audit_from_decisions(decisions),
+        )
+
     def process_date_block(
         self,
         match_date: date,
@@ -579,7 +670,7 @@ class EloEngine:
 
         included, decisions = _filter_events(
             materialised,
-            self.excluded_player_keys,
+            self.identity_exclusion_after_dates,
         )
         rated_matches = tuple(self._rate_event(event) for event in included)
         affected = self._apply_rated_matches(

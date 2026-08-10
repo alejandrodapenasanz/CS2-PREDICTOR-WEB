@@ -2,13 +2,14 @@
 
 Qué hace:
     Sincroniza el mirror histórico Sackmann y Match Charting Project por commit,
-    y consulta los dos informes Elo públicos de Tennis Abstract respetando su
-    cuota local de dos GET cada 24 horas.
+    y consulta secuencialmente los dos informes Elo públicos de Tennis
+    Abstract. La frecuencia la decide el operador; el cliente conserva
+    peticiones condicionales y un cortacircuitos de 24 horas tras un fallo.
 
 Qué recibe:
     ``--force`` autoriza reparar divergencias Sackmann y revalida snapshots Elo
-    locales; nunca salta la cuota web. Los tres ``--skip-*`` permiten omitir una
-    fuente concreta durante una ejecución de diagnóstico.
+    locales; no desactiva las defensas ante fallos. Los tres ``--skip-*``
+    permiten omitir una fuente concreta durante una ejecución de diagnóstico.
 
 Cómo se ejecuta:
     Desde ``TENNIS/``:
@@ -64,8 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help=(
-            "Repara divergencias Sackmann y revalida Elo local; no salta "
-            "la cuota web de 24 horas."
+            "Repara divergencias Sackmann y revalida Elo local; no desactiva "
+            "el cortacircuitos posterior a fallos."
         ),
     )
     parser.add_argument(

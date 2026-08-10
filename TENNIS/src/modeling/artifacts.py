@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 import platform
 import tempfile
-from typing import Mapping, Sequence
+from typing import Final, Mapping, Sequence
 
 import joblib
 import lightgbm
@@ -26,6 +26,11 @@ import pyarrow
 import sklearn
 
 from ..config import PHASE7_MODELS_DIR, PROJECT_ROOT
+from ..artifact_integrity import (
+    CodeInventoryError,
+    build_code_inventory,
+    verify_code_inventory,
+)
 from .data import sha256_file
 
 
@@ -34,6 +39,37 @@ _MATPLOTLIB_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MATPLOTLIB_CACHE))
 
 import matplotlib  # noqa: E402
+
+
+# Lista deliberadamente explicita: un archivo nuevo no entra en produccion
+# por el efecto lateral de un glob. Cualquier cambio en entrenamiento,
+# serializacion o inferencia diaria invalida el fingerprint del modelo.
+MODEL_CODE_PATHS: Final[tuple[str, ...]] = (
+    "src/artifact_integrity.py",
+    "src/temporal.py",
+    "src/modeling/__init__.py",
+    "src/modeling/artifacts.py",
+    "src/modeling/backtest.py",
+    "src/modeling/baselines.py",
+    "src/modeling/calibration.py",
+    "src/modeling/data.py",
+    "src/modeling/estimators.py",
+    "src/modeling/evaluation.py",
+    "src/modeling/metrics.py",
+    "src/modeling/orientation.py",
+    "src/modeling/parameters.py",
+    "src/modeling/plots.py",
+    "src/modeling/preprocessing.py",
+    "src/modeling/reporting.py",
+    "src/modeling/service.py",
+    "src/modeling/splits.py",
+    "src/modeling/training.py",
+    "scripts/retrain_models.py",
+    "src/daily_pipeline/__init__.py",
+    "src/daily_pipeline/confidence.py",
+    "src/daily_pipeline/context.py",
+    "src/daily_pipeline/pipeline.py",
+)
 
 
 class ArtifactError(RuntimeError):
@@ -105,30 +141,51 @@ def modeling_source_inventory(
     *,
     extra_paths: Sequence[Path] = (),
 ) -> tuple[Mapping[str, object], ...]:
-    """Hashea el código de modelado y scripts explícitos del run."""
+    """Hashea el contrato explícito de entrenamiento e inferencia.
 
-    modeling_dir = PROJECT_ROOT / "src" / "modeling"
-    paths = sorted(modeling_dir.glob("*.py"))
-    paths.extend(Path(path) for path in extra_paths)
-    inventory: list[Mapping[str, object]] = []
-    seen: set[Path] = set()
-    for candidate in paths:
+    ``extra_paths`` se conserva por compatibilidad con la API de reentreno,
+    pero solo admite rutas ya incluidas en :data:`MODEL_CODE_PATHS`. Así el
+    consumidor conoce de antemano exactamente qué debe volver a verificar.
+    """
+
+    allowed = frozenset(MODEL_CODE_PATHS)
+    for candidate in extra_paths:
         resolved = _ensure_project_path(candidate, "source_path")
-        if resolved in seen:
-            continue
-        seen.add(resolved)
-        if not resolved.is_file():
-            raise ArtifactError(f"No existe el código fuente {resolved}.")
-        inventory.append(
-            {
-                "path": resolved.relative_to(PROJECT_ROOT).as_posix(),
-                "size": resolved.stat().st_size,
-                "sha256": sha256_file(resolved),
-            }
+        relative = resolved.relative_to(PROJECT_ROOT).as_posix()
+        if relative not in allowed:
+            raise ArtifactError(
+                "source_path no pertenece al contrato explícito de código: "
+                f"{relative}."
+            )
+    try:
+        return tuple(build_code_inventory(PROJECT_ROOT, MODEL_CODE_PATHS))
+    except CodeInventoryError as exc:
+        raise ArtifactError(
+            "No se pudo construir el inventario explícito del modelo."
+        ) from exc
+
+
+def verify_model_code_inventory(
+    persisted_inventory: object,
+) -> tuple[dict[str, object], ...]:
+    """Exige coincidencia exacta entre código persistido y código actual.
+
+    La comprobación se ejecuta antes de cualquier deserialización Joblib. Un
+    run antiguo sigue siendo inmutable, pero deja de ser ejecutable si cambia
+    cualquiera de sus productores o consumidores contractuales.
+    """
+
+    try:
+        return verify_code_inventory(
+            PROJECT_ROOT,
+            MODEL_CODE_PATHS,
+            persisted_inventory,
         )
-    if not inventory:
-        raise ArtifactError("No se encontró código para versionar el run.")
-    return tuple(inventory)
+    except CodeInventoryError as exc:
+        raise ArtifactError(
+            "El run fue producido por código distinto del runtime actual; "
+            "reentrene antes de cargarlo."
+        ) from exc
 
 
 def create_staging_directory(
@@ -305,6 +362,45 @@ def _publish_active_manifest(
             f"No se pudo activar el manifiesto {active_path}."
         ) from exc
     return active_path
+
+
+def activate_published_run(
+    published: PublishedRun,
+    *,
+    output_dir: Path = PHASE7_MODELS_DIR,
+) -> PublishedRun:
+    """Activa de nuevo un run inmutable después de verificar sus hashes.
+
+    Reutilizar un fingerprint no significa necesariamente que ya sea el run
+    activo: otro entrenamiento pudo publicarse después. Esta operación vuelve
+    a verificar el manifiesto y todos los artefactos antes de reemplazar el
+    puntero activo, evitando que la CLI anuncie un run distinto al que cargará
+    producción.
+    """
+
+    if not isinstance(published, PublishedRun):
+        raise TypeError("published debe ser PublishedRun.")
+    output = _ensure_project_path(output_dir, "output_dir")
+    run_dir = _ensure_project_path(published.run_dir, "run_dir")
+    expected_parent = output / "runs"
+    if run_dir.parent != expected_parent:
+        raise ArtifactError("El run reutilizado no pertenece al output_dir.")
+    verified = verify_published_run(run_dir)
+    fingerprint = verified.get("fingerprint")
+    if fingerprint != published.fingerprint:
+        raise ArtifactError(
+            "El fingerprint reutilizado no coincide con su manifiesto."
+        )
+    active_payload = dict(verified)
+    active_payload["active_run"] = run_dir.relative_to(output).as_posix()
+    active_path = _publish_active_manifest(active_payload, output)
+    return PublishedRun(
+        fingerprint=published.fingerprint,
+        run_dir=run_dir,
+        manifest_path=active_path,
+        skipped=True,
+        manifest=verified,
+    )
 
 
 def publish_staged_run(

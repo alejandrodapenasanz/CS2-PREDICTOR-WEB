@@ -22,7 +22,7 @@ class IdentityIntegrityTests(unittest.TestCase):
     """Valida el corte conservador, el commit y los hashes de cuarentena."""
 
     def test_detection_flags_only_match_before_tenth_birthday(self) -> None:
-        """No intenta dividir carreras: pone en cuarentena la clave completa."""
+        """Detecta la primera evidencia sin dividir carreras ni IDs."""
 
         manifest = type(
             "Manifest",
@@ -96,11 +96,56 @@ class IdentityIntegrityTests(unittest.TestCase):
             )
             self.assertEqual(report.keys, frozenset({("F", 99)}))
             self.assertEqual(loaded.conflicts, (conflict,))
+            self.assertEqual(
+                dict(loaded.exclusion_after_dates),
+                {("F", 99): date(1999, 1, 1)},
+            )
 
             csv_path.write_bytes(csv_path.read_bytes() + b"\n")
             with self.assertRaises(IdentityIntegrityError):
                 load_identity_quarantine(
                     expected_source_commit="b" * 40,
+                    csv_path=csv_path,
+                    manifest_path=manifest_path,
+                )
+
+    def test_manifest_requires_noncausal_diagnostic_contract(self) -> None:
+        """Rechaza activar retrospectivamente metadata biográfica actual."""
+
+        conflict = IdentityConflict(
+            gender="M",
+            player_id=7,
+            player_name=None,
+            birth_date=date(2000, 1, 1),
+            first_match_date=date(2005, 1, 1),
+            last_match_date=date(2020, 1, 1),
+            earliest_age_years=5.0,
+            appearances=2,
+        )
+        with TemporaryDirectory(dir=PROJECT_ROOT / "tests") as temporary:
+            root = Path(temporary)
+            csv_path = root / "identity.csv"
+            manifest_path = root / "identity.manifest.json"
+            with patch(
+                "src.identity_integrity.detect_identity_conflicts",
+                return_value=("c" * 40, (conflict,)),
+            ):
+                publish_identity_quarantine(
+                    csv_path=csv_path,
+                    quarantine_manifest_path=manifest_path,
+                    clock=lambda: datetime(2026, 8, 1, tzinfo=UTC),
+                )
+            payload = manifest_path.read_text(encoding="utf-8")
+            manifest_path.write_text(
+                payload.replace(
+                    '"diagnostic_current_inference_only_no_historical_selection"',
+                    '"retroactive_historical_selection"',
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(IdentityIntegrityError):
+                load_identity_quarantine(
+                    expected_source_commit="c" * 40,
                     csv_path=csv_path,
                     manifest_path=manifest_path,
                 )

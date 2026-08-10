@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 from typing import Final, Mapping
 
 
-FEATURE_SCHEMA_VERSION: Final[str] = "tennis-features-v1"
+FEATURE_SCHEMA_VERSION: Final[str] = "tennis-features-v2"
 
 
 @dataclass(frozen=True, slots=True)

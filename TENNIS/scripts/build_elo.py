@@ -7,8 +7,9 @@ Qué hace:
 
 Qué recibe:
     ``--gender`` selecciona ``M``, ``F`` o ambos; ``--force`` obliga a
-    reconstruir un fingerprint ya activo. Las rutas y el tamaño de chunk se
-    pueden sobrescribir para tests o diagnósticos.
+    reconstruir un fingerprint ya activo. ``--result-embargo-days`` configura
+    el retraso causal desde ``tourney_date``. Las rutas y el tamaño de chunk
+    se pueden sobrescribir para tests o diagnósticos.
 
 Cómo se ejecuta:
     Desde ``TENNIS/``:
@@ -42,6 +43,10 @@ from src.elo.build import (  # noqa: E402
     load_verified_manifest,
 )
 from src.identity_integrity import load_identity_quarantine  # noqa: E402
+from src.temporal import (  # noqa: E402
+    DEFAULT_RESULT_EMBARGO_DAYS,
+    SourceDatePolicy,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +91,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_CHUNKSIZE,
         help="Filas máximas leídas por chunk CSV/SQLite.",
+    )
+    parser.add_argument(
+        "--result-embargo-days",
+        type=int,
+        default=DEFAULT_RESULT_EMBARGO_DAYS,
+        help=(
+            "Días desde tourney_date hasta availability_date; la igualdad "
+            "con el corte sigue excluida."
+        ),
     )
     return parser
 
@@ -167,7 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         gender=args.gender,
         chunksize=args.chunksize,
         force=args.force,
-        excluded_player_keys=quarantine.keys,
+        identity_exclusion_after_dates={},
+        source_date_policy=SourceDatePolicy(args.result_embargo_days),
     )
     _print_report(
         report,

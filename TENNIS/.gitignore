@@ -13,6 +13,8 @@ data/processed/elo/**
 # Datasets de features generados, salvo el marcador de estructura
 data/processed/features/**
 !data/processed/features/.gitkeep
+data/processed/features_active/**
+!data/processed/features_active/.gitkeep
 
 # Predicciones diarias publicadas, salvo el marcador de estructura
 data/processed/predictions/**

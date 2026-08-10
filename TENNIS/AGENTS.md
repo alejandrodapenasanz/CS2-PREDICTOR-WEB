@@ -5,16 +5,22 @@ Estas reglas se aplican en todas las fases y sesiones del proyecto.
 ## Alcance del repositorio
 
 - Todo el proyecto vive dentro de la carpeta `TENNIS/` situada en la raíz del repositorio.
-- Nunca se debe crear, editar ni borrar nada fuera de `TENNIS/`.
-- En particular, no se debe modificar `start.ps1` ni ningún código de CS:GO existente en la raíz.
+- Nunca se debe crear, editar ni borrar nada fuera de `TENNIS/`, salvo las
+  excepciones explícitas documentadas debajo.
+- No se debe modificar ningún código de CS:GO. El `start.ps1` de la raíz solo
+  puede cambiar dentro de la excepción de orquestación autorizada debajo.
 
-### Excepción explícita y limitada de la fase 9
+### Excepciones explícitas y limitadas autorizadas por el usuario
 
 - El usuario autorizó expresamente que la fase 9 adapte de forma mínima
   `WEB/build_web.py`, `WEB/index.html` y el `WEB/data.js` generado para mostrar
   los partidos de tenis, su ganador previsto, probabilidad y fiabilidad.
 - Esta excepción no autoriza ningún rediseño general de la web ni cambios en
-  `start.ps1`, `CS2/` o cualquier otro archivo situado fuera de `TENNIS/`.
+  `CS2/` o cualquier otro archivo situado fuera de `TENNIS/`.
+- Tras la fase 9, el usuario autorizó expresamente adaptar el `start.ps1` de la
+  raíz únicamente para ejecutar primero `CS2/start.ps1`, después
+  `TENNIS/run_tennis.ps1` y propagar `-Retrain` a ambos. Esta autorización no
+  permite modificar `CS2/start.ps1` ni ningún otro archivo de CS2.
 
 ## Dudas y ambigüedades
 

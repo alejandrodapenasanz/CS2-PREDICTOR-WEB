@@ -41,6 +41,7 @@ from .types import (
     MatchEvent,
     PlayerEloState,
     PlayerPreMatchRating,
+    PreviewBlockResult,
     RatedMatch,
     Surface,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "MatchEvent",
     "PlayerEloState",
     "PlayerPreMatchRating",
+    "PreviewBlockResult",
     "RatedMatch",
     "SURFACES",
     "Surface",

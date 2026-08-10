@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import date
 import hashlib
 import json
 from pathlib import Path
@@ -22,6 +23,7 @@ from src.data_loaders import (  # noqa: E402
     PLAYER_SOURCE_COLUMNS,
 )
 from src.elo.build import EXPECTED_SOURCE_REPOSITORY  # noqa: E402
+from src.elo.engine import IDENTITY_EXCLUSION_RULE  # noqa: E402
 from src.config import FEATURES_PROCESSED_DIR  # noqa: E402
 from src.features.dataset import (  # noqa: E402
     FeatureDatasetError,
@@ -274,6 +276,17 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
                 chunksize=1,
                 parquet_buffer_rows=1,
             )
+            active_manifest = json.loads(
+                (report.datasets[0].output_path.parent / "manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            code_inventory = active_manifest.get("code_inventory")
+            self.assertIsInstance(code_inventory, list)
+            self.assertIn(
+                "scripts/build_features.py",
+                {entry["path"] for entry in code_inventory},
+            )
             baseline = pd.read_parquet(report.datasets[0].output_path)
             skipped = build_training_datasets(
                 manifest_path=manifest_path,
@@ -358,6 +371,102 @@ class FeatureDatasetIntegrationTest(unittest.TestCase):
         self.assertNotIn("swapped", dataset.columns)
         self.assertNotIn("orientation_hash", dataset.columns)
         self.assertEqual(set(dataset["y"].unique()), {0, 1})
+
+    def test_dob_quarantine_metadata_never_selects_historical_rows(
+        self,
+    ) -> None:
+        """Publica sospechas DOB pero no reescribe ningún resultado histórico."""
+
+        matches = [
+            _match_row(
+                match_date="20240101",
+                match_num=1,
+                winner_id=1,
+                loser_id=2,
+            ),
+            _match_row(
+                match_date="20240102",
+                match_num=2,
+                winner_id=1,
+                loser_id=3,
+            ),
+            _match_row(
+                match_date="20240103",
+                match_num=3,
+                winner_id=1,
+                loser_id=4,
+            ),
+        ]
+        with self._temporary_project() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_dir, manifest_path = _write_fixture_snapshot(
+                root,
+                matches=matches,
+            )
+            baseline_report = build_training_datasets(
+                manifest_path=manifest_path,
+                raw_dir=raw_dir,
+                output_dir=root / "baseline",
+                gender="M",
+                chunksize=1,
+                parquet_buffer_rows=1,
+            )
+            causal_report = build_training_datasets(
+                manifest_path=manifest_path,
+                raw_dir=raw_dir,
+                output_dir=root / "causal",
+                gender="M",
+                chunksize=2,
+                parquet_buffer_rows=2,
+                identity_exclusion_after_dates={
+                    ("M", 1): date(2024, 1, 2)
+                },
+            )
+            baseline = pd.read_parquet(
+                baseline_report.datasets[0].output_path
+            )
+            causal = pd.read_parquet(
+                causal_report.datasets[0].output_path
+            )
+            manifest = json.loads(
+                (
+                    causal_report.datasets[0].output_path.parent
+                    / "manifest.json"
+                ).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        comparable = baseline.loc[
+            baseline["record_id"].isin(set(causal["record_id"]))
+        ].sort_values("record_id").reset_index(drop=True)
+        expected = causal.sort_values("record_id").reset_index(drop=True)
+        pd.testing.assert_frame_equal(comparable, expected)
+        self.assertEqual(len(baseline), 3)
+        self.assertEqual(len(causal), 3)
+        self.assertNotEqual(
+            baseline_report.fingerprint,
+            causal_report.fingerprint,
+        )
+        self.assertEqual(
+            manifest["identity_quarantine"],
+            {
+                "historical_exclusion_rule": (
+                    "disabled_noncausal_dob_metadata"
+                ),
+                "keys": [["M", 1]],
+                "rows": 1,
+                "diagnostic_first_match_dates": [
+                    {
+                        "causal_evidence_date": None,
+                        "first_match_date": "2024-01-02",
+                        "gender": "M",
+                        "player_id": 1,
+                    }
+                ],
+                "usage_contract": "current_inference_block_only",
+            },
+        )
 
 
 if __name__ == "__main__":

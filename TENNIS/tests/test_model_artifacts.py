@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -14,6 +15,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.modeling.artifacts import (  # noqa: E402
     ArtifactError,
+    activate_published_run,
     create_staging_directory,
     find_verified_run,
     fingerprint_payload,
@@ -86,6 +88,44 @@ class ModelArtifactsTest(unittest.TestCase):
                 ArtifactError, "tamaño|SHA-256"
             ):
                 verify_published_run(published.run_dir)
+
+    def test_reactivates_a_verified_older_run(self) -> None:
+        """Reutilizar A después de B actualiza el puntero activo a A."""
+
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT / "tests"
+        ) as temporary:
+            output = Path(temporary) / "models"
+            published_runs = []
+            for label in ("A", "B"):
+                staging = create_staging_directory(output)
+                (staging / "model.txt").write_text(label, encoding="utf-8")
+                fingerprint = fingerprint_payload({"run": label})
+                published_runs.append(
+                    publish_staged_run(
+                        staging,
+                        fingerprint=fingerprint,
+                        manifest_payload={"artifact_version": "test-v1"},
+                        output_dir=output,
+                    )
+                )
+
+            first = find_verified_run(
+                published_runs[0].fingerprint,
+                output_dir=output,
+            )
+            assert first is not None
+            activated = activate_published_run(first, output_dir=output)
+            active = json.loads(
+                (output / "manifest.json").read_text(encoding="utf-8")
+            )
+
+            self.assertTrue(activated.skipped)
+            self.assertEqual(active["fingerprint"], first.fingerprint)
+            self.assertEqual(
+                active["active_run"],
+                f"runs/{first.fingerprint}",
+            )
 
 
 if __name__ == "__main__":

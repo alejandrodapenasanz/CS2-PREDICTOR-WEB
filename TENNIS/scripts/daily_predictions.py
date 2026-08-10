@@ -3,10 +3,14 @@
 Qué hace:
     Encadena scraper cacheado, mapping de slugs, features estrictamente as-of,
     LightGBM del género correcto, calibración Platt, comparación con mercado y
-    publicación CSV. Conserva sin probabilidad los partidos no elegibles.
+    publicación CSV y registro append-only en ``BBDD/tennis.sqlite3``.
+    Después observa una sola jornada anterior pendiente y concilia resultados
+    por slug estable. Conserva sin probabilidad los partidos no elegibles.
 
 Qué recibe:
     ``--date YYYY-MM-DD`` es opcional; si se omite usa la fecha local actual.
+    ``--retrained`` lo usa el lanzador para auditar que antes ejecutó el ciclo
+    completo de actualización y reentreno.
 
 Cómo se ejecuta:
     Desde ``TENNIS/``:
@@ -29,7 +33,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.daily_pipeline import run_daily_prediction_pipeline  # noqa: E402
+from src.config import OPERATIONS_DATABASE_PATH  # noqa: E402
+from src.operations import run_operational_daily_pipeline  # noqa: E402
 
 
 CONSOLE_MAX_ROWS = 50
@@ -78,6 +83,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=_parse_iso_date,
         default=None,
         help="Fecha YYYY-MM-DD; por defecto se usa hoy.",
+    )
+    parser.add_argument(
+        "--retrained",
+        action="store_true",
+        help="Anota que run_tennis.ps1 completó antes el ciclo de reentreno.",
     )
     return parser
 
@@ -154,7 +164,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     args = build_parser().parse_args(argv)
     try:
-        run = run_daily_prediction_pipeline(args.date)
+        operational = run_operational_daily_pipeline(
+            args.date,
+            retrained=args.retrained,
+        )
     except Exception as exc:
         print(
             f"ERROR [{type(exc).__name__}]: {exc}",
@@ -162,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
 
+    run = operational.daily_run
     print(f"\nFecha de cartelera: {run.match_date.isoformat()}")
     print(
         "Predicción generada: "
@@ -171,6 +185,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     _print_summary(run.predictions)
     if run.output_path is not None:
         print(f"\nCSV publicado: {run.output_path}")
+    prediction = operational.prediction_registration
+    statistics = operational.statistics_registration
+    print(f"Base operativa: {OPERATIONS_DATABASE_PATH}")
+    print(
+        "Registro: "
+        f"{prediction.predictions_inserted} filas, "
+        f"{prediction.official_predictions_selected} nuevas oficiales, "
+        f"{statistics.statistics_inserted} estadísticas prepartido"
+    )
+    if operational.result_date is None:
+        print("Conciliación: no hay una jornada anterior pendiente.")
+    elif operational.reconciliation_warning is not None:
+        print(
+            "ADVERTENCIA de conciliación "
+            f"[{operational.result_date.isoformat()}]: "
+            f"{operational.reconciliation_warning}",
+            file=sys.stderr,
+        )
+    else:
+        reconciliation = operational.observation_reconciliation
+        assert reconciliation is not None
+        print(
+            f"Conciliación {operational.result_date.isoformat()}: "
+            f"{reconciliation.observations_inserted} observaciones nuevas, "
+            f"{reconciliation.settlements_inserted} resultados cerrados, "
+            f"{reconciliation.conflicts_inserted} conflictos"
+        )
     return 0
 
 

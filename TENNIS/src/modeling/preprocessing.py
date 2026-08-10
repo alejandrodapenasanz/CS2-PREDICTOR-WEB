@@ -25,6 +25,10 @@ from src.features import (
     MODEL_FEATURE_COLUMNS,
     TARGET_COLUMN,
 )
+from src.features.artifacts import (
+    FeatureArtifactError,
+    resolve_feature_manifest_path,
+)
 
 
 FeatureProfile = Literal["auto", "sports_only", "market_enhanced"]
@@ -119,6 +123,12 @@ def _load_manifest_mapping(
     if isinstance(manifest, Mapping):
         return manifest
     path = Path(manifest)
+    try:
+        path = resolve_feature_manifest_path(path)
+    except FeatureArtifactError as exc:
+        raise FeatureContractError(
+            f"No se pudo resolver el manifiesto de features {path}: {exc}"
+        ) from exc
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:

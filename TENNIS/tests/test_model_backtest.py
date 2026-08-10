@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 import sys
 import unittest
@@ -14,8 +15,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.config import FEATURE_DATASET_MANIFEST_PATH  # noqa: E402
-from src.modeling.backtest import run_gender_backtest  # noqa: E402
+from src.features import (  # noqa: E402
+    FEATURE_SCHEMA_VERSION,
+    MODEL_FEATURE_COLUMNS,
+)
+from src.modeling.backtest import (  # noqa: E402
+    BacktestError,
+    fit_final_gender_models,
+    run_gender_backtest,
+)
 from src.modeling.evaluation import evaluate_gender_backtest  # noqa: E402
 from src.modeling.parameters import (  # noqa: E402
     LightGBMParameters,
@@ -26,12 +34,31 @@ from src.modeling.preprocessing import (  # noqa: E402
     CATEGORICAL_FEATURE_COLUMNS,
     load_feature_contract,
 )
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY  # noqa: E402
+
+
+FEATURE_CONTRACT_FIXTURE = {
+    "fingerprint": "f" * 64,
+    "schema_version": FEATURE_SCHEMA_VERSION,
+    "historical_odds_available": False,
+    "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
+    "training_columns": [
+        "record_id",
+        "gender",
+        "match_date",
+        "result_available_date",
+        "rank_a",
+        "rank_b",
+        *MODEL_FEATURE_COLUMNS,
+        "y",
+    ],
+}
 
 
 def _synthetic_history(last_year: int) -> pd.DataFrame:
     """Crea temporadas completas pequeñas con todas las features deportivas."""
 
-    contract = load_feature_contract(FEATURE_DATASET_MANIFEST_PATH)
+    contract = load_feature_contract(FEATURE_CONTRACT_FIXTURE)
     feature_columns = contract.columns_for("sports_only")
     rows: list[dict[str, object]] = []
     for year in range(2017, last_year + 1):
@@ -53,6 +80,13 @@ def _synthetic_history(last_year: int) -> pd.DataFrame:
                 "market_probability_b": np.nan,
                 "y": y,
             }
+            match_date = row["match_date"]
+            assert isinstance(match_date, pd.Timestamp)
+            row["result_available_date"] = (
+                DEFAULT_SOURCE_DATE_POLICY.availability_date(
+                    match_date.date()
+                )
+            )
             for column in feature_columns:
                 if column == "surface":
                     value: object = "Hard" if match_index % 2 else "Clay"
@@ -82,7 +116,7 @@ class ModelBacktestTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         """Carga una única vez el contrato real de columnas."""
 
-        cls.contract = load_feature_contract(FEATURE_DATASET_MANIFEST_PATH)
+        cls.contract = load_feature_contract(FEATURE_CONTRACT_FIXTURE)
         cls.logistic = LogisticParameters(max_iter=300)
         cls.lightgbm = LightGBMParameters(
             n_estimators=8,
@@ -169,6 +203,49 @@ class ModelBacktestTest(unittest.TestCase):
         self.assertFalse(temporal.empty)
         self.assertEqual(set(temporal["test_season"]), {2020})
         self.assertTrue(temporal["small_sample"].all())
+
+    def test_final_calibrator_rejects_tampered_oof_labels(self) -> None:
+        """El Platt final no acepta labels OOF ajenos al histórico causal."""
+
+        history = _synthetic_history(2020)
+        backtest = self._run(2020)
+        changed = backtest.predictions.copy()
+        changed.loc[0, "y"] = 1 - int(changed.loc[0, "y"])
+        tampered = replace(backtest, predictions=changed)
+
+        with self.assertRaisesRegex(BacktestError, "etiquetas OOF"):
+            fit_final_gender_models(
+                history,
+                gender="M",
+                contract=self.contract,
+                backtest=tampered,
+                profile="sports_only",
+                logistic_parameters=self.logistic,
+                lightgbm_parameters=self.lightgbm,
+                training_as_of_date=pd.Timestamp("2021-03-01").date(),
+            )
+
+    def test_final_calibrator_rejects_missing_interior_oof_row(self) -> None:
+        """No basta conservar extremos: cada ID del test debe reconciliar."""
+
+        history = _synthetic_history(2020)
+        backtest = self._run(2020)
+        changed = backtest.predictions.drop(
+            index=backtest.predictions.index[len(backtest.predictions) // 2]
+        ).reset_index(drop=True)
+        tampered = replace(backtest, predictions=changed)
+
+        with self.assertRaisesRegex(BacktestError, "inventario OOF"):
+            fit_final_gender_models(
+                history,
+                gender="M",
+                contract=self.contract,
+                backtest=tampered,
+                profile="sports_only",
+                logistic_parameters=self.logistic,
+                lightgbm_parameters=self.lightgbm,
+                training_as_of_date=pd.Timestamp("2021-03-01").date(),
+            )
 
 
 if __name__ == "__main__":

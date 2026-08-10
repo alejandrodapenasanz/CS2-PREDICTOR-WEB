@@ -193,6 +193,37 @@ class TennisExplorerParserTests(unittest.TestCase):
                 )
                 self.assertEqual(observed, {expected})
 
+    def test_indoors_is_missing_material_not_assumed_hard(self) -> None:
+        """Conserva un recinto indoor sin inventar su superficie material."""
+
+        soup = self._fixture_soup()
+        tournament_link = next(
+            (
+                link
+                for link in soup.select(
+                    'a[href="/washington/2026/atp-men/"]'
+                )
+                if link.find_parent("tr").select_one(
+                    "td.s-color span[title]"
+                )
+                is not None
+            ),
+            None,
+        )
+        self.assertIsNotNone(tournament_link)
+        catalog_row = tournament_link.find_parent("tr")
+        surface_span = catalog_row.select_one("td.s-color span[title]")
+        self.assertIsNotNone(surface_span)
+        surface_span["title"] = "Indoors"
+
+        frame = parse_daily_matches_html(str(soup), FIXTURE_DATE)
+        washington = frame.loc[
+            frame["tournament"].eq("Washington")
+            & frame["gender"].eq("M")
+        ]
+        self.assertGreater(len(washington), 0)
+        self.assertTrue(washington["surface"].isna().all())
+
     def test_unmarked_wta_tournament_uses_approved_wta_convention(self) -> None:
         """Clasifica Targu Mures como WTA al no tener marcador ITF explícito."""
 

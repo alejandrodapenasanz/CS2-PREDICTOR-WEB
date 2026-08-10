@@ -154,11 +154,13 @@ El loader conserva los ocho campos reales y añade dos columnas explícitas:
 ## Nota temporal
 
 `tourney_date` identifica normalmente el inicio de la semana del torneo. No
-permite ordenar con seguridad las rondas dentro del mismo día o evento. En las
-fases de Elo y features, el estado se congela para todos los partidos con la
-misma fecha `D` y se actualiza después del bloque. Una consulta para `D` solo
-puede recuperar estados con `state_date < D`; no se infiere orden a partir de
-la ronda, `match_num`, el orden del CSV ni el nombre del archivo.
+permite ordenar con seguridad las rondas dentro del mismo día o evento. Elo y
+features conservan esa fecha como `source_date`, pero el resultado solo se
+vuelve utilizable en `result_available_date=source_date+21 días` y únicamente
+si `result_available_date < D`. Los partidos con la misma fecha de
+disponibilidad se congelan y aplican como un bloque; una consulta para `D` solo
+recupera estados efectivos con `state_date < D`. No se infiere orden a partir
+de la ronda, `match_num`, el orden del CSV ni el nombre del archivo.
 
 ## Excepción fuente aprobada
 
@@ -281,7 +283,7 @@ operativas `ATP`, `WTA`, `Challenger` e `ITF`.
 | `tournament_href` | `string` | Ruta relativa del torneo; nula cuando la fuente no publica enlace. |
 | `tour_level` | `string` | Nivel diario normalizado: `ATP`, `WTA`, `Challenger` o `ITF`. |
 | `gender` | `string` | `M` para singles masculino o `F` para singles femenino, derivado del marcador HTML del torneo. |
-| `surface` | `string` | `Hard`, `Clay`, `Grass` o `Carpet`, anulable. Se une por `tournament_href` desde el catálogo del mismo HTML; nunca se infiere por calendario. |
+| `surface` | `string` | `Hard`, `Clay`, `Grass` o `Carpet`, anulable. Se une por `tournament_href` desde el catálogo del mismo HTML; nunca se infiere por calendario. `Indoors` queda nulo porque acredita recinto, no material. |
 | `scheduled_time` | `string` | Hora local visible, anulable. No se convierte a UTC porque la celda no aporta una zona inequívoca. |
 | `player_1_name`, `player_2_name` | `string` | Textos visibles de las dos anclas de jugador, sin añadir la cabeza de serie situada fuera del enlace. |
 | `player_1_href`, `player_2_href` | `string` | Rutas relativas `/player/<slug>/`; nulas cuando la fuente no enlaza al participante. |
@@ -454,8 +456,8 @@ fechas históricas anteriores.
 
 La fase 6 publica dos archivos con el mismo esquema Arrow:
 
-- `data/processed/features/training_M.parquet`;
-- `data/processed/features/training_F.parquet`.
+- `data/processed/features_active/runs/<fingerprint>/training_M.parquet`;
+- `data/processed/features_active/runs/<fingerprint>/training_F.parquet`.
 
 Cada fila representa un partido elegible y se calcula antes de incorporar
 cualquier resultado cuya `tourney_date` sea `D`. `MODEL_FEATURE_COLUMNS`
@@ -576,11 +578,13 @@ nulas; no se completan retroactivamente con una captura web posterior.
 
 ### Manifiesto e inventario de conflictos
 
-`data/processed/features/manifest.json` registra el esquema, fingerprint,
-fuentes, parámetros, columnas de modelo, hashes SHA-256, tamaños, recuentos,
-rangos, exclusiones, balance de `y` y auditoría de rankings.
+`data/processed/features_active/manifest.json` es el puntero atómico al run
+activo. El `manifest.json` dentro de `runs/<fingerprint>/` registra el esquema,
+fingerprint, fuentes, parámetros, columnas de modelo, hashes SHA-256, tamaños,
+recuentos, rangos, exclusiones, balance de `y` y auditoría de rankings.
 
-`data/processed/features/ranking_conflicts.csv` contiene:
+`data/processed/features_active/runs/<fingerprint>/ranking_conflicts.csv`
+contiene:
 
 | Columna | Tipo CSV | Descripción |
 |---|---|---|
@@ -650,7 +654,8 @@ rellenar log-loss, Brier o AUC.
   evaluable/no evaluable.
 - `suspicious_segments.csv`: todo segmento con accuracy `>0,85`, soporte,
   flag de muestra pequeña y comprobaciones estructurales. El run actual tiene
-  cero filas sospechosas.
+  30 filas auditadas; todas tienen `n<200` y se clasifican como muestra pequeña,
+  no como evidencia de rendimiento extraordinario.
 
 ### Bundles y manifiesto
 
@@ -680,14 +685,14 @@ favorito, ranking o resultado.
 | Columna | Tipo CSV | Descripción |
 |---|---|---|
 | `prediction_date` | fecha ISO | Fecha civil `D` de la cartelera. |
-| `prediction_as_of_utc` | timestamp UTC | Instante en que comenzó la inferencia; debe ser posterior a la captura de mercado usada. |
-| `source_retrieved_at_utc` | timestamp UTC | Instante acreditado del snapshot de Tennis Explorer. |
+| `prediction_as_of_utc` | timestamp UTC | Instante en que comenzó la inferencia; debe ser posterior a la captura usada y su fecha civil no puede superar `prediction_date` para ser oficial. |
+| `source_retrieved_at_utc` | timestamp UTC | Instante acreditado del snapshot de Tennis Explorer; su fecha civil no puede superar `prediction_date` para ser oficial. |
 | `source_snapshot_sha256` | SHA-256 | Hash de los bytes HTML validados. |
 | `tournament` | texto | Torneo visible, conservado desde el scraper. |
 | `tour_level` | texto | Etiqueta diaria literal `ATP`, `WTA`, `Challenger` o `ITF`. |
 | `canonical_tour_level` | texto nullable | Categoría de modelado `ATP Tour`, `WTA Tour`, `Challenger` o `ITF`; nula en filas no predichas. |
 | `gender` | texto | Universo `M` o `F` que determina Elo y modelo. |
-| `surface` | texto nullable | Superficie explícita del mismo HTML; nula si la fuente no la publicó. |
+| `surface` | texto nullable | Superficie material explícita del mismo HTML; nula si la fuente no la publicó o solo indicó `Indoors`. |
 | `scheduled_time` | texto nullable | Hora local visible sin zona inferida. |
 | `status` | texto | Estado conservador de fase 4. Solo `scheduled` es elegible. |
 | `player_a_name`, `player_b_name` | texto | Nombres visibles en el orden de la fuente. |
@@ -699,14 +704,14 @@ favorito, ranking o resultado.
 | `model_probability_a` | probabilidad nullable | `P(A gana)` calibrada. |
 | `model_probability_b` | probabilidad nullable | Complemento exacto `1 - model_probability_a`. |
 | `market_probability_a`, `market_probability_b` | probabilidad nullable | Probabilidades de-vigadas; ambas nulas si falta una cuota. |
-| `edge_a` | decimal nullable | `model_probability_a - market_probability_a`. |
-| `edge_b` | decimal nullable | `model_probability_b - market_probability_b`; es `-edge_a` salvo redondeo. |
+| `edge_a` | decimal nullable | `model_probability_a - market_probability_a`, solo si `market_comparison_status=strictly_pre_date`; nulo para `prestart_unverified`. |
+| `edge_b` | decimal nullable | `model_probability_b - market_probability_b` bajo el mismo corte causal; es `-edge_a` salvo redondeo y queda nulo para cuotas del propio día. |
 | `confidence` | texto | `HIGH`, `MEDIUM`, `LOW` o `UNAVAILABLE`; mide inputs, no extremidad de la probabilidad. |
 | `confidence_flags` | texto | Razones únicas separadas por `|`; siempre poblado cuando `confidence=UNAVAILABLE`. |
 | `prediction_status` | texto | `predicted` o `not_predicted`. |
 | `model_profile` | texto nullable | Perfil del bundle; actualmente `sports_only`. |
 | `model_fingerprint` | SHA-256 nullable | Run inmutable de fase 7 utilizado. |
-| `model_training_max_date` | fecha nullable | Última fecha incluida al entrenar; debe cumplir `< prediction_date`. |
+| `model_training_max_date` | fecha nullable | Máxima fecha fuente incluida al entrenar; una fila oficial exige este corte y el corte disponible descrito abajo. |
 | `feature_history_max_date` | fecha nullable | Última fecha disponible en el Parquet causal del género. |
 | `ranking_source_max_date` | fecha nullable | Última fecha global de rankings disponible en la fuente compatible. |
 | `feature_fingerprint` | SHA-256 nullable | Identidad del dataset de fase 6 verificado antes de inferir. |
@@ -714,3 +719,14 @@ favorito, ranking o resultado.
 Los modelos actuales son `sports_only`: `odds_*` y
 `market_probability_*` no entran al estimador, aunque se conservan para
 comparar el resultado calibrado con el mercado.
+
+### Correcciones de contrato diario de fase 9
+
+| Columna | Tipo | Contrato vigente |
+|---|---|---|
+| `result_available_date` | fecha | `match_date + 21 dias`; un resultado solo se usa si esta fecha es `< D`. |
+| `market_probability_a`, `market_probability_b` | probabilidad nullable | Probabilidades de-vigadas para presentacion siempre que existan dos cuotas validas, incluso en una captura del propio dia. |
+| `market_comparison_status` | texto | `missing`, `prestart_unverified` o `strictly_pre_date`. |
+| `edge_a`, `edge_b` | decimal nullable | Solo se calculan con estado `strictly_pre_date`; quedan nulos para `prestart_unverified`. |
+| `model_training_max_date` | fecha nullable | Maxima `tourney_date` fuente considerada al entrenar. |
+| `model_training_available_max_date` | fecha nullable | Debe ser exactamente el corte fuente mas 21 dias y ser `< prediction_date` para una oficial. |

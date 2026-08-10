@@ -1,10 +1,12 @@
-"""Detecta y persiste identidades Sackmann temporalmente incompatibles.
+"""Detecta y persiste identidades Sackmann incompatibles con la biografía.
 
 Una misma clave ``(gender, player_id)`` no puede representar con seguridad a
 un jugador cuyo histórico contiene partidos antes de cumplir diez años. El
-módulo no intenta adivinar dónde cambia la identidad ni crea IDs sintéticos:
-pone la clave completa en cuarentena para que Elo, features e inferencia
-fallen de forma conservadora hasta que exista un override por intervalos.
+módulo no intenta adivinar dónde cambia la identidad ni crea IDs sintéticos.
+La fecha de nacimiento procede del maestro actual y no acredita cuándo se
+conoció el conflicto; por ello la cuarentena NO selecciona ni elimina filas de
+un backtest histórico. Su lista de claves solo sirve para degradar o bloquear
+la inferencia operativa actual, donde la incompatibilidad ya es conocida.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import json
 import os
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from types import MappingProxyType
 from typing import Callable, Final, Iterable, Mapping
 
 import pandas as pd
@@ -28,10 +31,11 @@ from .config import (
 )
 from .data_loaders import load_players
 from .elo.build import VerifiedManifest, load_verified_manifest
-
-
 IDENTITY_QUARANTINE_SCHEMA_VERSION: Final[str] = (
-    "tennis-identity-quarantine-v1"
+    "tennis-identity-quarantine-v3"
+)
+IDENTITY_QUARANTINE_USAGE: Final[str] = (
+    "diagnostic_current_inference_only_no_historical_selection"
 )
 MIN_PLAUSIBLE_MATCH_AGE_YEARS: Final[int] = 10
 QUARANTINE_COLUMNS: Final[tuple[str, ...]] = (
@@ -86,11 +90,30 @@ class IdentityQuarantineReport:
 
     @property
     def keys(self) -> frozenset[tuple[str, int]]:
-        """Expone las claves completas sin mezclar universos de género."""
+        """Expone claves completas para degradación conservadora actual."""
 
         return frozenset(
             (conflict.gender, conflict.player_id)
             for conflict in self.conflicts
+        )
+
+    @property
+    def exclusion_after_dates(self) -> Mapping[tuple[str, int], date]:
+        """Expone la primera aparición como metadato diagnóstico no causal.
+
+        Este mapping se conserva por compatibilidad de esquema y para poder
+        auditar los artefactos existentes. No debe pasarse como selector de
+        filas históricas: ``first_match_date`` se reconstruye con el snapshot
+        completo y la DOB actual, no con evidencia fechada de aquel momento.
+        """
+
+        return MappingProxyType(
+            {
+                (conflict.gender, conflict.player_id): (
+                    conflict.first_match_date
+                )
+                for conflict in self.conflicts
+            }
         )
 
 
@@ -327,6 +350,8 @@ def publish_identity_quarantine(
         "minimum_plausible_match_age_years": (
             MIN_PLAUSIBLE_MATCH_AGE_YEARS
         ),
+        "historical_exclusion_rule": "disabled_noncausal_current_metadata",
+        "usage_contract": IDENTITY_QUARANTINE_USAGE,
         "rows": len(conflicts),
         "csv": {
             "path": resolved_csv.name,
@@ -384,6 +409,9 @@ def load_identity_quarantine(
         or payload.get("source_commit") != expected_source_commit
         or payload.get("minimum_plausible_match_age_years")
         != MIN_PLAUSIBLE_MATCH_AGE_YEARS
+        or payload.get("historical_exclusion_rule")
+        != "disabled_noncausal_current_metadata"
+        or payload.get("usage_contract") != IDENTITY_QUARANTINE_USAGE
     ):
         raise IdentityIntegrityError(
             "La cuarentena no corresponde al commit o contrato activo."
@@ -433,22 +461,33 @@ def load_identity_quarantine(
     conflicts: list[IdentityConflict] = []
     for record in frame.to_dict(orient="records"):
         try:
+            gender = str(record["gender"])
+            player_id = int(record["player_id"])
+            birth_date = date.fromisoformat(str(record["birth_date"]))
+            first_match_date = date.fromisoformat(
+                str(record["first_match_date"])
+            )
+            last_match_date = date.fromisoformat(
+                str(record["last_match_date"])
+            )
+            if (
+                gender not in {"M", "F"}
+                or player_id < 0
+                or first_match_date > last_match_date
+            ):
+                raise ValueError("Registro diagnóstico de identidad inválido.")
             conflicts.append(
                 IdentityConflict(
-                    gender=str(record["gender"]),
-                    player_id=int(record["player_id"]),
+                    gender=gender,
+                    player_id=player_id,
                     player_name=(
                         None
                         if pd.isna(record["player_name"])
                         else str(record["player_name"])
                     ),
-                    birth_date=date.fromisoformat(str(record["birth_date"])),
-                    first_match_date=date.fromisoformat(
-                        str(record["first_match_date"])
-                    ),
-                    last_match_date=date.fromisoformat(
-                        str(record["last_match_date"])
-                    ),
+                    birth_date=birth_date,
+                    first_match_date=first_match_date,
+                    last_match_date=last_match_date,
                     earliest_age_years=float(
                         record["earliest_age_years"]
                     ),
@@ -468,6 +507,11 @@ def load_identity_quarantine(
     ):
         raise IdentityIntegrityError(
             "El recuento declarado de identidades no coincide."
+        )
+    keys = [(conflict.gender, conflict.player_id) for conflict in conflicts]
+    if len(keys) != len(set(keys)):
+        raise IdentityIntegrityError(
+            "El CSV de cuarentena contiene reglas duplicadas."
         )
     return IdentityQuarantineReport(
         source_commit=expected_source_commit,

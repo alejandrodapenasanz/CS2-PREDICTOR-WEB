@@ -106,8 +106,8 @@ test        = temporada Y
 Los tres conjuntos son disjuntos y cumplen:
 
 ```text
-max(train_date) < min(calibration_date)
-max(calibration_date) < min(test_date)
+max(train_result_available_date) < min(calibration_match_date)
+max(calibration_result_available_date) < min(test_match_date)
 ```
 
 Se repite el proceso para cada `Y` y se acumulan únicamente sus predicciones
@@ -144,7 +144,16 @@ Para despliegue:
 
 1. se ajusta el modelo base final con todo el histórico causal disponible;
 2. el calibrador final se ajusta con las probabilidades crudas OOF temporales
-   de 2016–2025, nunca con predicciones in-sample del modelo final.
+   de 2016–2025, nunca con predicciones in-sample del modelo final;
+3. antes del ajuste se reconcilian género, `record_id`, fecha, label,
+   temporada, límites de cada fold y rango de probabilidades contra el dataset
+   original. Una tabla OOF inyectada o manipulada falla cerrada.
+
+Las métricas `*_platt` del informe evalúan calibradores independientes por
+fold (`Y-1 → Y`). El Platt final agrupado es causal para partidos posteriores
+a todo el OOF, pero no es exactamente uno de esos calibradores y todavía no
+tiene un tramo futuro independiente propio. No se atribuyen al bundle final
+unas métricas que no fueron medidas sobre él.
 
 ## Baselines
 
@@ -240,14 +249,24 @@ models/phase7/runs/<fingerprint>/
 ```
 
 El fingerprint incorpora los Parquet y su manifiesto, parámetros, perfil,
-versiones de librerías, código del paquete y script de reentreno. El run se
+versiones de librerías y un inventario explícito del código de entrenamiento
+y del runtime diario. Ese inventario incluye `src/temporal.py`, todos los
+módulos de modelado, `scripts/retrain_models.py` y los consumidores de
+`src/daily_pipeline`; no se descubre mediante glob. El run se
 publica desde staging, no se sobrescribe y todos sus archivos quedan
 inventariados con tamaño y SHA-256. Una segunda ejecución idéntica verifica y
-reutiliza el run.
+reutiliza el run. Si ese run ya no era el activo porque se publicó otro después,
+se verifican de nuevo todos sus hashes y se reactiva explícitamente el puntero;
+CLI, documentación y deployment no pueden divergir silenciosamente.
 
 `src.modeling.service.load_active_deployment_model()` verifica todos los hashes
-antes de deserializar el bundle y devuelve la probabilidad cruda, la calibrada
-y, cuando existe mercado, `edge = p_modelo - p_mercado`.
+y exige que el inventario persistido coincida exactamente con el código actual
+antes de deserializar el bundle. Si cambia el productor o consumidor, falla
+cerrado y exige reentreno. Su método `predict(..., as_of_date=D)` exige
+en la propia API `training_available_max_date < D`. Si recibe mercado, también exige
+`market_retrieved_at_utc.date() < D`; sin esa procedencia no calcula edge.
+El pipeline diario repite estas comprobaciones y conserva nula toda comparación
+de mercado no acreditada.
 
 Las métricas reales y las limitaciones están en
 [`model_report.md`](model_report.md).

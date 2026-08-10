@@ -30,10 +30,19 @@ import pandas as pd
 
 from src.config import (
     ELO_DATABASE_PATH,
+    PROJECT_ROOT,
     RAW_DATA_DIR,
     SACKMANN_MANIFEST_PATH,
 )
+from src.artifact_integrity import (
+    build_code_inventory,
+    canonicalise_code_inventory,
+)
 from src.data_loaders import MATCH_SOURCE_COLUMNS
+from src.temporal import (
+    DEFAULT_SOURCE_DATE_POLICY,
+    SourceDatePolicy,
+)
 
 
 Gender = Literal["M", "F"]
@@ -50,6 +59,19 @@ PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
     "source_commit",
     "source_path",
     "source_row_number",
+)
+ELO_CODE_PATHS: Final[tuple[str, ...]] = (
+    "scripts/build_elo.py",
+    "src/artifact_integrity.py",
+    "src/data_loaders.py",
+    "src/elo/build.py",
+    "src/elo/engine.py",
+    "src/elo/events.py",
+    "src/elo/parameters.py",
+    "src/elo/store.py",
+    "src/elo/types.py",
+    "src/identity_integrity.py",
+    "src/temporal.py",
 )
 
 MATCH_PATH_LAYOUT: Final[
@@ -197,27 +219,25 @@ def _normalise_gender_selection(
     raise ValueError("gender debe ser exactamente 'M', 'F' o 'all'.")
 
 
-def _normalise_excluded_player_keys(
-    keys: Iterable[tuple[Gender, int]],
-) -> frozenset[tuple[Gender, int]]:
-    """Valida y deduplica la cuarentena antes de crear fingerprints."""
+def _normalise_identity_exclusion_after_dates(
+    rules: Mapping[tuple[Gender, int], date] | None,
+) -> Mapping[tuple[Gender, int], date]:
+    """Valida reglas causales mediante el mismo contrato que el motor."""
 
-    result: set[tuple[Gender, int]] = set()
-    for key in keys:
-        if (
-            not isinstance(key, tuple)
-            or len(key) != 2
-            or key[0] not in {"M", "F"}
-            or isinstance(key[1], bool)
-            or not isinstance(key[1], int)
-            or key[1] < 0
-        ):
-            raise ValueError(
-                "excluded_player_keys debe contener (gender, player_id) "
-                "válidos."
-            )
-        result.add((cast(Gender, key[0]), key[1]))
-    return frozenset(result)
+    from .engine import normalise_identity_exclusion_after_dates
+
+    return normalise_identity_exclusion_after_dates(rules)
+
+
+def _identity_rule_payload(
+    rules: Mapping[tuple[Gender, int], date],
+) -> list[list[object]]:
+    """Serializa reglas causales en orden estable para hash y manifiesto."""
+
+    return [
+        [gender, player_id, exclusion_after_date.isoformat()]
+        for (gender, player_id), exclusion_after_date in sorted(rules.items())
+    ]
 
 
 def _load_manifest_payload(manifest_path: Path) -> Mapping[str, Any]:
@@ -562,16 +582,34 @@ def compute_input_fingerprint(
     manifest: VerifiedManifest,
     parameters_mapping: Mapping[str, Any] | object,
     algorithm_version: str,
-    excluded_player_keys: Iterable[tuple[Gender, int]] = (),
+    identity_exclusion_after_dates: (
+        Mapping[tuple[Gender, int], date] | None
+    ) = None,
+    code_inventory: Iterable[Mapping[str, object]] | None = None,
+    source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
 ) -> str:
-    """Calcula SHA-256 de fuentes, parámetros, algoritmo y cuarentena."""
+    """Calcula SHA-256 de fuentes, parámetros, código y cuarentena.
+
+    El inventario es inyectable para pruebas sintéticas. En producción se
+    calcula sobre :data:`ELO_CODE_PATHS`, de modo que un cambio de fórmula
+    invalida el artefacto aunque se olvide actualizar ``algorithm_version``.
+    """
 
     if not isinstance(manifest, VerifiedManifest):
         raise TypeError("manifest debe ser VerifiedManifest.")
     if not isinstance(algorithm_version, str) or not algorithm_version:
         raise ValueError("algorithm_version debe ser texto no vacío.")
+    if not isinstance(source_date_policy, SourceDatePolicy):
+        raise TypeError("source_date_policy debe ser SourceDatePolicy.")
     parameters = _parameter_mapping(parameters_mapping)
-    quarantine = _normalise_excluded_player_keys(excluded_player_keys)
+    quarantine = _normalise_identity_exclusion_after_dates(
+        identity_exclusion_after_dates
+    )
+    resolved_code_inventory = canonicalise_code_inventory(
+        build_code_inventory(PROJECT_ROOT, ELO_CODE_PATHS)
+        if code_inventory is None
+        else code_inventory
+    )
     payload = {
         "source_commit": manifest.source_commit,
         "match_files": [
@@ -586,10 +624,9 @@ def compute_input_fingerprint(
         ],
         "parameters": parameters,
         "algorithm_version": algorithm_version,
-        "excluded_player_keys": [
-            [gender, player_id]
-            for gender, player_id in sorted(quarantine)
-        ],
+        "code_inventory": list(resolved_code_inventory),
+        "identity_exclusion_after_dates": _identity_rule_payload(quarantine),
+        "source_date_policy": source_date_policy.as_dict(),
     }
     try:
         canonical = json.dumps(
@@ -772,6 +809,7 @@ def _create_spool(path: Path) -> sqlite3.Connection:
             CREATE TABLE {SPOOL_TABLE} (
                 gender TEXT NOT NULL,
                 event_date TEXT NOT NULL,
+                source_event_date TEXT NOT NULL,
                 winner_id INTEGER NOT NULL,
                 loser_id INTEGER NOT NULL,
                 surface TEXT,
@@ -800,8 +838,9 @@ def _spool_manifest_events(
     gender: GenderSelection,
     chunksize: int,
     spool_path: Path,
+    source_date_policy: SourceDatePolicy,
 ) -> Mapping[Gender, int]:
-    """Normaliza cada chunk y vuelca eventos mínimos al spool ordenable."""
+    """Vuelca eventos ordenados por su fecha causal de disponibilidad."""
 
     from .events import (
         EventColumns,
@@ -821,6 +860,7 @@ def _spool_manifest_events(
         INSERT INTO {SPOOL_TABLE} (
             gender,
             event_date,
+            source_event_date,
             winner_id,
             loser_id,
             surface,
@@ -834,7 +874,7 @@ def _spool_manifest_events(
             match_num,
             round_name
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     try:
         for raw_frame in iter_manifest_match_frames(
@@ -860,7 +900,10 @@ def _spool_manifest_events(
                 (
                     (
                         event.gender,
-                        event.date.isoformat(),
+                        source_date_policy.availability_date(
+                            event.date
+                        ).isoformat(),
+                        event.result_source_date.isoformat(),
                         event.winner_id,
                         event.loser_id,
                         event.surface,
@@ -914,6 +957,7 @@ def _iter_spooled_date_frames(
         SELECT
             gender,
             event_date AS tourney_date,
+            source_event_date,
             winner_id,
             loser_id,
             surface,
@@ -963,11 +1007,21 @@ def _iter_spooled_date_frames(
                     format="%Y-%m-%d",
                     errors="raise",
                 )
+                result["source_event_date"] = pd.to_datetime(
+                    result["source_event_date"],
+                    format="%Y-%m-%d",
+                    errors="raise",
+                )
                 yield result
         if pending is not None and not pending.empty:
             pending = pending.reset_index(drop=True)
             pending["tourney_date"] = pd.to_datetime(
                 pending["tourney_date"],
+                format="%Y-%m-%d",
+                errors="raise",
+            )
+            pending["source_event_date"] = pd.to_datetime(
+                pending["source_event_date"],
                 format="%Y-%m-%d",
                 errors="raise",
             )
@@ -1062,7 +1116,10 @@ def build_elo_database(
     chunksize: int = DEFAULT_CHUNKSIZE,
     force: bool = False,
     parameters: object | None = None,
-    excluded_player_keys: Iterable[tuple[Gender, int]] = (),
+    identity_exclusion_after_dates: (
+        Mapping[tuple[Gender, int], date] | None
+    ) = None,
+    source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
 ) -> EloBuildReport:
     """Construye y publica la base Elo mediante los contratos core/store.
 
@@ -1079,7 +1136,10 @@ def build_elo_database(
         chunksize: Tamaño de lectura de cada CSV.
         force: Reconstruye aunque el fingerprint activo ya exista.
         parameters: ``EloParameters`` opcional; usa sus defaults aprobados.
-        excluded_player_keys: Claves ambiguas que no deben contaminar ratings.
+        identity_exclusion_after_dates: Primera evidencia por identidad; solo
+            excluye eventos con fecha estrictamente posterior.
+        source_date_policy: Embargo causal aplicado a ``tourney_date`` antes
+            de que un resultado pueda modificar un estado Elo.
 
     Returns:
         Informe reproducible de runs, auditoría e idempotencia.
@@ -1089,7 +1149,7 @@ def build_elo_database(
         EloBuildError: Ante manifiesto, fuente, cálculo o persistencia inválidos.
     """
 
-    from .engine import EloEngine
+    from .engine import IDENTITY_EXCLUSION_RULE, EloEngine
     from .events import (
         EventColumns,
         EventValidationError,
@@ -1113,13 +1173,15 @@ def build_elo_database(
         raise ValueError("chunksize debe ser positivo.")
     if not isinstance(force, bool):
         raise TypeError("force debe ser booleano.")
+    if not isinstance(source_date_policy, SourceDatePolicy):
+        raise TypeError("source_date_policy debe ser SourceDatePolicy.")
     resolved_parameters = (
         DEFAULT_ELO_PARAMETERS if parameters is None else parameters
     )
     if not isinstance(resolved_parameters, EloParameters):
         raise TypeError("parameters debe ser EloParameters o None.")
-    checked_quarantine = _normalise_excluded_player_keys(
-        excluded_player_keys
+    checked_quarantine = _normalise_identity_exclusion_after_dates(
+        identity_exclusion_after_dates
     )
 
     verified = load_verified_manifest(
@@ -1130,17 +1192,38 @@ def build_elo_database(
         selected_gender: verified.select_gender(selected_gender)
         for selected_gender in selected_genders
     }
-    parameter_payload = resolved_parameters.as_dict()
+    elo_parameter_payload = resolved_parameters.as_dict()
+    code_inventory = build_code_inventory(PROJECT_ROOT, ELO_CODE_PATHS)
+    persisted_parameter_payload = {
+        **elo_parameter_payload,
+        "artifact_code_inventory": list(code_inventory),
+        "source_date_policy": source_date_policy.as_dict(),
+    }
+    gender_quarantine_rules = {
+        selected_gender: {
+            key: exclusion_after_date
+            for key, exclusion_after_date in checked_quarantine.items()
+            if key[0] == selected_gender
+        }
+        for selected_gender in selected_genders
+    }
+    gender_effective_quarantine_rules = {
+        selected_gender: {
+            key: source_date_policy.availability_date(source_date)
+            for key, source_date in gender_quarantine_rules[
+                selected_gender
+            ].items()
+        }
+        for selected_gender in selected_genders
+    }
     fingerprints: dict[Gender, str] = {
         selected_gender: compute_input_fingerprint(
             gender_manifests[selected_gender],
-            parameter_payload,
+            elo_parameter_payload,
             ALGORITHM_VERSION,
-            (
-                key
-                for key in checked_quarantine
-                if key[0] == selected_gender
-            ),
+            gender_quarantine_rules[selected_gender],
+            code_inventory,
+            source_date_policy,
         )
         for selected_gender in selected_genders
     }
@@ -1231,6 +1314,7 @@ def build_elo_database(
             gender=gender,
             chunksize=chunksize,
             spool_path=spool_path,
+            source_date_policy=source_date_policy,
         )
         LOGGER.info(
             "Spool Elo validado: M=%d, F=%d.",
@@ -1245,6 +1329,7 @@ def build_elo_database(
             source_path="source_path",
             source_row="source_row_number",
             source_record_hash="source_record_hash",
+            source_date="source_event_date",
         )
         for selected_gender in selected_genders:
             source_rows = int(source_counts.get(selected_gender, 0))
@@ -1259,13 +1344,26 @@ def build_elo_database(
                 source_commit=verified.source_commit,
                 algorithm_version=ALGORITHM_VERSION,
                 input_fingerprint=fingerprints[selected_gender],
-                parameters=parameter_payload,
+                parameters={
+                    **persisted_parameter_payload,
+                    "identity_exclusion_rule": IDENTITY_EXCLUSION_RULE,
+                    "identity_exclusion_after_dates": _identity_rule_payload(
+                        gender_quarantine_rules[selected_gender]
+                    ),
+                    "identity_exclusion_effective_after_dates": (
+                        _identity_rule_payload(
+                            gender_effective_quarantine_rules[selected_gender]
+                        )
+                    ),
+                },
             )
             engine = EloEngine(
                 resolved_parameters,
                 run_id=run_id,
                 source_commit=verified.source_commit,
-                excluded_player_keys=checked_quarantine,
+                identity_exclusion_after_dates=(
+                    gender_effective_quarantine_rules[selected_gender]
+                ),
             )
             included_events = 0
             excluded_events = 0

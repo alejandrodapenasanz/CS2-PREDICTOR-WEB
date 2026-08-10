@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 import math
 import os
 from pathlib import Path
@@ -129,6 +129,7 @@ PREDICTION_OUTPUT_COLUMNS: Final[tuple[str, ...]] = (
     "model_profile",
     "model_fingerprint",
     "model_training_max_date",
+    "model_training_available_max_date",
     "feature_history_max_date",
     "ranking_source_max_date",
     "feature_fingerprint",
@@ -199,6 +200,37 @@ def _read_clock(clock: Callable[[], datetime] | None) -> datetime:
     if observed.tzinfo is None or observed.utcoffset() is None:
         raise DailyPredictionError("clock debe devolver un instante con zona.")
     return observed.astimezone(UTC)
+
+
+def _prediction_timestamp_after_snapshot(
+    observed: datetime,
+    scraped: pd.DataFrame,
+) -> datetime:
+    """Garantiza orden lógico estricto pese a la resolución del reloj.
+
+    La captura ya terminó antes de que esta función sea llamada, pero Windows
+    puede devolver el mismo tick para ambos eventos. En ese único caso se usa
+    el microtick siguiente a la evidencia fuente; nunca se mueve una captura
+    hacia atrás ni se relaja la validación estricta de la BBDD.
+    """
+
+    if scraped.empty or "retrieved_at_utc" not in scraped.columns:
+        return observed
+    retrieved = pd.to_datetime(
+        scraped["retrieved_at_utc"],
+        errors="raise",
+        utc=True,
+    )
+    if retrieved.isna().any():
+        raise DailyPredictionError(
+            "retrieved_at_utc no puede ser nulo en un snapshot poblado."
+        )
+    latest_source = retrieved.max()
+    observed_timestamp = pd.Timestamp(observed)
+    if observed_timestamp > latest_source:
+        return observed
+    logical_timestamp = latest_source + timedelta(microseconds=1)
+    return logical_timestamp.to_pydatetime().astimezone(UTC)
 
 
 def _optional_text(value: object) -> str | None:
@@ -411,6 +443,7 @@ def _base_output(
         dtype="string",
     )
     result["model_training_max_date"] = pd.NaT
+    result["model_training_available_max_date"] = pd.NaT
     result["feature_history_max_date"] = pd.NaT
     result["ranking_source_max_date"] = pd.NaT
     result["feature_fingerprint"] = pd.Series(
@@ -526,6 +559,17 @@ def _model_training_date(model: LoadedDeploymentModel) -> date:
         ) from exc
 
 
+def _model_training_available_date(model: LoadedDeploymentModel) -> date:
+    """Parsea el último resultado causalmente disponible del bundle."""
+
+    try:
+        return date.fromisoformat(model.training_available_max_date)
+    except ValueError as exc:
+        raise DailyPredictionError(
+            f"training_available_max_date inválida para {model.gender}."
+        ) from exc
+
+
 def _target_ids(
     mapped_matches: pd.DataFrame,
     eligible_indexes: Sequence[object],
@@ -610,10 +654,15 @@ def predict_mapped_matches(
                 )
                 continue
         training_date = _model_training_date(model)
+        training_available_date = _model_training_available_date(model)
         output.at[row_index, "model_training_max_date"] = pd.Timestamp(
             training_date
         )
-        if training_date >= match_date:
+        output.at[
+            row_index,
+            "model_training_available_max_date",
+        ] = pd.Timestamp(training_available_date)
+        if training_available_date >= match_date:
             _write_assessment(
                 output,
                 row_index,
@@ -647,6 +696,10 @@ def predict_mapped_matches(
         vector_indexes: list[object] = []
         vector_values: dict[object, dict[str, object]] = {}
         market_statuses: dict[object, str] = {}
+        presentation_markets: dict[
+            object,
+            tuple[float | None, float | None],
+        ] = {}
         for row_index in row_indexes:
             row = mapped_matches.loc[row_index]
             odds_a = _optional_float(row["player_1_odds"])
@@ -704,7 +757,7 @@ def predict_mapped_matches(
                 ),
             )
             values = gender_context.builder.build(request).to_dict()
-            if market is not None:
+            if market is not None and use_market_as_feature:
                 values["market_probability_a"] = (
                     market.market_probability_a_devig
                 )
@@ -717,8 +770,16 @@ def predict_mapped_matches(
             vector_indexes.append(row_index)
             vector_values[row_index] = values
             market_statuses[row_index] = market_status
+            presentation_markets[row_index] = (
+                (
+                    market.market_probability_a_devig,
+                    market.market_probability_b_devig,
+                )
+                if market is not None
+                else (None, None)
+            )
         model_frame = pd.DataFrame(vector_rows, index=vector_indexes)
-        predictions = model.predict(model_frame)
+        predictions = model.predict(model_frame, as_of_date=match_date)
         if not predictions.index.equals(model_frame.index):
             raise DailyPredictionError(
                 f"El modelo {gender} alteró el índice de las filas."
@@ -741,18 +802,7 @@ def predict_mapped_matches(
                     f"El modelo {gender} devolvió una probabilidad inválida."
                 )
             values = vector_values[row_index]
-            market_a_value = values["market_probability_a"]
-            market_b_value = values["market_probability_b"]
-            market_a = (
-                None
-                if market_a_value is None
-                else float(market_a_value)
-            )
-            market_b = (
-                None
-                if market_b_value is None
-                else float(market_b_value)
-            )
+            market_a, market_b = presentation_markets[row_index]
             output.at[row_index, "canonical_tour_level"] = values[
                 "tour_level"
             ]
@@ -797,7 +847,15 @@ def predict_mapped_matches(
             output.at[row_index, "best_of"] = values.get("best_of")
             output.at[row_index, "round"] = values.get("round")
             for column in _VECTOR_AUDIT_COLUMNS:
-                output.at[row_index, column] = values.get(column)
+                value = values.get(column)
+                if column in {
+                    "ranking_date_a",
+                    "ranking_date_b",
+                    "birth_date_a",
+                    "birth_date_b",
+                }:
+                    value = pd.NaT if value is None else pd.Timestamp(value)
+                output.at[row_index, column] = value
             output.at[row_index, "prediction_status"] = "predicted"
             output.at[row_index, "feature_history_max_date"] = pd.Timestamp(
                 gender_context.training_metadata.max_date
@@ -808,8 +866,11 @@ def predict_mapped_matches(
             output.at[row_index, "feature_fingerprint"] = (
                 feature_context.feature_fingerprint
             )
+            confidence_values = dict(values)
+            confidence_values["market_probability_a"] = market_a
+            confidence_values["market_probability_b"] = market_b
             assessment = assess_vector_confidence(
-                values,
+                confidence_values,
                 match_date=match_date,
                 history_max_date=gender_context.training_metadata.max_date,
                 ranking_max_date=gender_context.ranking_max_date,
@@ -932,7 +993,10 @@ def run_daily_prediction_pipeline(
         raise DailyPredictionError("match_date debe ser datetime.date o None.")
 
     scraped = get_daily_matches(match_date=selected_date)
-    prediction_as_of_utc = _read_clock(clock)
+    prediction_as_of_utc = _prediction_timestamp_after_snapshot(
+        _read_clock(clock),
+        scraped,
+    )
     mapped = resolve_scraped_matches(
         scraped,
         as_of_date=selected_date,
@@ -972,7 +1036,7 @@ def run_daily_prediction_pipeline(
     causal_genders = {
         gender
         for gender, model in models.items()
-        if _model_training_date(model) < selected_date
+        if _model_training_available_date(model) < selected_date
     }
     causal_indexes = mapped.index[
         eligible_identity

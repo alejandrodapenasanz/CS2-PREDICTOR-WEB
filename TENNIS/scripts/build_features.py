@@ -7,12 +7,13 @@ Qué hace:
 
 Qué recibe:
     Opcionalmente género, rutas dentro de ``TENNIS/``, tamaños de chunk/buffer
-    y ``--force`` para reconstruir un fingerprint ya publicado.
+    y ``--force`` para recomprobar un fingerprint ya publicado sin
+    sobrescribir su run inmutable.
 
 Cómo se ejecuta, desde ``TENNIS/``:
     ``python scripts/build_features.py``
     ``python scripts/build_features.py --gender M --output-dir
-    data/processed/features/diagnostic_M --force``
+    data/processed/features_active/diagnostic_M --force``
 """
 
 from __future__ import annotations
@@ -39,6 +40,10 @@ from src.features import (  # noqa: E402
 )
 from src.elo.build import load_verified_manifest  # noqa: E402
 from src.identity_integrity import load_identity_quarantine  # noqa: E402
+from src.temporal import (  # noqa: E402
+    DEFAULT_RESULT_EMBARGO_DAYS,
+    SourceDatePolicy,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -92,6 +97,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="Reconstruye aunque el fingerprint activo coincida.",
+    )
+    parser.add_argument(
+        "--result-embargo-days",
+        type=int,
+        default=DEFAULT_RESULT_EMBARGO_DAYS,
+        help="Días causales desde tourney_date; igualdad aún se excluye.",
     )
     return parser
 
@@ -154,7 +165,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         chunksize=args.chunksize,
         parquet_buffer_rows=args.parquet_buffer_rows,
         force=args.force,
-        excluded_player_keys=quarantine.keys,
+        identity_exclusion_after_dates=quarantine.exclusion_after_dates,
+        source_date_policy=SourceDatePolicy(args.result_embargo_days),
     )
     _print_report(report)
     return 0

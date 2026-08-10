@@ -4,10 +4,14 @@
 
 Construir por fases un sistema profesional, modular y testeable para estimar probabilidades de resultados de partidos de tenis. El diseño debe preservar el orden temporal de la información: para predecir un partido con fecha `D`, únicamente se podrá usar información anterior a `D`.
 
-Las fases 1 a 8 están implementadas. El proyecto puede descubrir, actualizar,
+Las nueve fases están implementadas y la auditoría final está cerrada en
+[`docs/audit.md`](docs/audit.md). El modelo activo v3 tiene fingerprint
+`e827272ef3e55f36f9c048850e2e61b19241533464499fb070e28d300f7ef690` y
+la suite final obtuvo 329/329 tests correctos. El proyecto puede descubrir, actualizar,
 validar y cargar el histórico de singles de Jeff Sackmann separado por género.
 También versiona Match Charting Project como fuente auxiliar y captura dos
-referencias Elo públicas con una cuota estricta. Además, calcula y persiste un
+referencias Elo públicas con acceso secuencial y cortacircuitos. Además,
+calcula y persiste un
 Elo propio general y por superficie con consultas históricas estrictamente
 anteriores a cada fecha, y obtiene la cartelera diaria de Tennis Explorer con
 identidades web, cuotas, trazabilidad y caché. La fase 5 resuelve esas
@@ -18,12 +22,21 @@ estable, rankings en cuarentena cuando la fuente es contradictoria y un
 allowlist explícito de features. Entrena y calibra temporalmente un LightGBM
 por género y ya dispone de un pipeline diario que conserva todos los partidos,
 publica probabilidades calibradas y compara de forma honesta con el mercado.
+La auditoría final añade inferencia simétrica A/B, un diagnóstico reproducible
+de IDs incompatibles para bloquear o degradar la inferencia actual —nunca para
+filtrar retrospectivamente el histórico—, pruebas end-to-end y una base SQLite
+append-only que conserva predicciones oficiales, estadísticas prepartido y
+resultados conciliados por slug estable. La web solo lee esa evidencia oficial.
+La BBDD operativa sirve para seguimiento prospectivo y no entra
+automáticamente en Elo, features ni reentreno.
 
 ## Estructura
 
 ```text
 TENNIS/
 ├── .venv/                 # Entorno virtual local (ignorado por Git)
+├── BBDD/
+│   └── tennis.sqlite3     # Predicciones, stats y resultados append-only
 ├── data/
 │   ├── raw/
 │   │   ├── atp/           # CSV masculinos conservando la ruta del mirror
@@ -35,7 +48,7 @@ TENNIS/
 │   │   └── tennis_explorer/             # Carteleras, metadata y control de red
 │   ├── processed/
 │   │   ├── elo/           # SQLite Elo generado, ignorado por Git
-│   │   ├── features/      # Parquet por género, manifiesto y cuarentenas
+│   │   ├── features_active/ # Puntero y runs inmutables de features
 │   │   ├── predictions/   # CSV diarios timestamped, ignorados por Git
 │   │   ├── player_mapping.sqlite3 # Caché y auditoría de identidades
 │   │   └── unresolved_players.csv # Cola actual de revisión manual
@@ -51,7 +64,9 @@ TENNIS/
 │   ├── phase6_report.md   # Recuentos, balance y auditoría del dataset real
 │   ├── phase8_report.md   # Ejecución real, cobertura y flags diarios
 │   ├── daily_pipeline.md  # Contrato causal, confianza y output diario
-│   ├── integracion.md     # Línea no invasiva para el start.ps1 raíz
+│   ├── audit.md           # Evidencia y valoración final anti-fugas
+│   ├── operations_database.md # Esquema, conciliación y límites de la BBDD
+│   ├── integracion.md     # Orquestación conjunta desde el start.ps1 raíz
 │   ├── features.md        # Fórmulas y contrato causal de las features
 │   ├── tennis_explorer.md # Contrato, límites y política del scraper diario
 │   └── source_freshness.md
@@ -72,6 +87,7 @@ TENNIS/
 │   ├── features/          # Estado causal, rankings, vector, spool y dataset
 │   ├── daily_pipeline/    # Contexto dirigido, confianza y orquestador
 │   ├── modeling/          # Entrenamiento, evaluación y servicio de inferencia
+│   ├── operations/        # SQLite operativo, reglas y orquestación diaria
 │   ├── player_mapping/    # Matcher causal, caché, overrides y revisión
 │   ├── match_charting_download.py
 │   ├── sackmann_download.py
@@ -105,7 +121,7 @@ TENNIS/
 Los directorios que aún no contienen código o artefactos conservan un archivo `.gitkeep` para que Git pueda versionar la estructura.
 
 Los datos de `data/raw`, la base Elo de `data/processed/elo`, los Parquet y
-manifiestos generados de `data/processed/features`, la caché SQLite de mappings
+manifiestos generados de `data/processed/features_active`, la caché SQLite de mappings
 y la cola de no resueltos se ignoran en Git. Sus `.gitkeep`, la tabla manual
 `data/overrides.csv`, el código, los tests y la documentación sí se versionan.
 
@@ -172,6 +188,19 @@ python scripts\build_features.py
 python scripts\retrain_models.py
 ```
 
+El lanzador ejecuta ese mismo orden y después la predicción diaria con el flag
+semanal solicitado:
+
+```powershell
+.\TENNIS\run_tennis.ps1 -Retrain
+.\TENNIS\run_tennis.ps1 -Retrain -Date 2026-07-30
+```
+
+`-Retrain` no incorpora predicciones ni resultados operativos al dataset: solo
+actualiza las fuentes aprobadas, regenera la cuarentena de identidades, Elo,
+features y modelos. La BBDD se reserva para seguimiento prospectivo hasta que
+exista una política de incorporación de labels auditada por separado.
+
 `update_sources.py` consulta los commits remotos y conserva lo ya verificado.
 Elo, features y modelos son idempotentes por fingerprint. Si el commit
 Sackmann no cambió, no hay que forzar una reconstrucción. Si sí cambió, deben
@@ -191,11 +220,24 @@ Desde cualquier ruta de PowerShell:
 & 'C:\ruta\al\repositorio\TENNIS\run_tennis.ps1'
 ```
 
-Desde la raíz del repositorio basta con:
+Para ejecutar únicamente tenis desde la raíz del repositorio basta con:
 
 ```powershell
 .\TENNIS\run_tennis.ps1
 ```
+
+El lanzador raíz ya ejecuta ambos deportes en orden. Sin argumentos realiza
+los dos pipelines diarios; con `-Retrain` reentrena el modelo de CS2 y los dos
+modelos de tenis antes de sus predicciones:
+
+```powershell
+.\start.ps1
+.\start.ps1 -Retrain
+```
+
+Los flags distintos de `-Retrain` pertenecen a CS2 y no se reenvían a tenis.
+`-DryRun` y `-WhatIf` omiten tenis para mantener el carácter no mutante de la
+comprobación.
 
 Si Windows bloquea scripts por la política local, puede ejecutarse una sola
 vez sin cambiar la configuración permanente:
@@ -207,18 +249,21 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\TENNIS\run_tennis.ps1
 Sin argumentos usa hoy; para una fecha explícita:
 
 ```powershell
-.\TENNIS\run_tennis.ps1 --date 2026-07-30
+.\TENNIS\run_tennis.ps1 -Date 2026-07-30
 ```
 
-Una fecha histórica solo se predice si el modelo fue entrenado con un corte
-estrictamente anterior. Si no, las filas se conservan como
-`UNAVAILABLE/model_not_causal_for_date`, evitando una evaluación retrospectiva
-con fuga.
+Una fecha explícita puede producir un CSV diagnóstico si el modelo fue
+entrenado con un corte estrictamente anterior. La BBDD solo la convierte en
+predicción oficial si captura y predicción tienen fecha civil no posterior a
+la jornada, el snapshot aún dice `scheduled` y no existe una observación
+previa. Por tanto, ejecutar hoy una fecha pasada nunca crea rendimiento
+retrospectivo: el replay se conserva, pero queda no oficial.
 
-La ejecución diaria no reentrena: hacerlo cada mañana sería costoso e
-innecesario si la fuente no cambió. La rutina recomendada es ejecutar solo
-`run_tennis.ps1` cada día y repetir el bloque de actualización/reentreno cuando
-`update_sources.py` detecte un commit histórico nuevo.
+La ejecución diaria no reentrena salvo que se pase `-Retrain`. La rutina
+recomendada es ejecutar `run_tennis.ps1` cada mañana y `-Retrain` una vez por
+semana o cuando `update_sources.py` detecte un commit histórico nuevo. Cada
+ejecución registra la cartelera en `BBDD/tennis.sqlite3` y consulta una jornada
+anterior pendiente; no hay un contador ni un límite diario artificial.
 
 ## Ingesta histórica Sackmann
 
@@ -353,7 +398,9 @@ La ingesta web se limita a los informes públicos
 [ATP](https://www.tennisabstract.com/reports/atp_elo_ratings.html) y
 [WTA](https://www.tennisabstract.com/reports/wta_elo_ratings.html). El módulo:
 
-- permite como máximo dos GET en una ventana deslizante de 24 horas;
+- deja la frecuencia de ejecución en manos del operador y no impone un cupo
+  diario artificial;
+- realiza como máximo un GET secuencial por género en cada invocación;
 - usa `ETag` y `Last-Modified` en peticiones condicionales;
 - no sigue redirecciones ni reintenta fallos;
 - se detiene ante el primer error;
@@ -362,8 +409,9 @@ La ingesta web se limita a los informes públicos
 - nunca consulta `/jsfrags/`, `/jsmatches/` ni `/jsplayers/`.
 
 La ejecución inicial guardó 548 filas ATP y 544 WTA, ambas con fecha Elo
-2026-07-27. Una segunda ejecución inmediata realizó cero GET por el límite de
-24 horas.
+2026-07-27. Las respuestas condicionales evitan volver a descargar contenido
+sin cambios. Un error HTTP/red/esquema abre un cortacircuitos persistente de 24
+horas, pero una ejecución correcta no bloquea la siguiente.
 
 Uso programático de un snapshot ya validado:
 
@@ -386,8 +434,8 @@ separadas:
 
 - `parameters.py` valida y versiona la configuración matemática;
 - `events.py` convierte las filas canónicas en eventos con procedencia y hash;
-- `engine.py` congela el estado por `tourney_date`, calcula deltas y mantiene
-  universos independientes `M` y `F`;
+- `engine.py` congela cada bloque efectivo, permite previsualizar sin mutación,
+  calcula deltas y mantiene universos independientes `M` y `F`;
 - `store.py` persiste ejecuciones y estados históricos en SQLite;
 - `service.py` expone las consultas temporales `get_elo()` y `get_elos()`;
 - `build.py` verifica el manifiesto y los blobs fuente y coordina una
@@ -401,10 +449,25 @@ ese peso; sin superficie, coincide con el general. La fórmula, los criterios de
 elegibilidad y el bloqueo por fecha se especifican en
 [`docs/elo.md`](docs/elo.md).
 
-La versión activa `sackmann-elo-v2` calcula la identidad de una copia exacta
+La versión activa `sackmann-elo-v5` calcula la identidad de una copia exacta
 sobre las 49 cadenas crudas del CSV antes de tipar fechas o identificadores.
 Así, dos filas que solo se vuelven iguales después de normalizarlas no se
-colapsan silenciosamente.
+colapsan silenciosamente. También conserva resultados oficiales `RET`, `DEF`,
+`ABD` y `ABN`, excluye solo partidos no iniciados (`W/O`, `Walkover`, `BYE`) y
+no usa la cuarentena DOB como selector histórico.
+
+Como `tourney_date` es normalmente el inicio aproximado del torneo, Elo v5
+aplica el contrato versionado `sackmann-tourney-start-embargo-v1`:
+
+```text
+result_available_date = tourney_date + 21 días
+resultado utilizable en D ⇔ result_available_date < D
+```
+
+La igualdad se excluye; un resultado fuente `T` puede afectar por primera vez
+a `T+22`. La DOB del maestro actual solo genera una lista diagnóstica para
+bloquear o degradar identidades incompatibles en inferencia actual. No elimina
+filas de Elo, features, backtest ni reentreno.
 
 ### Construcción y artefacto
 
@@ -451,9 +514,11 @@ batch = get_elos(
 )
 ```
 
-Ambas APIs consultan exclusivamente el último estado que cumpla
+Ambas APIs consultan exclusivamente el último estado efectivo que cumpla
 `state_date < as_of_date`; el estado de la propia fecha `D` nunca es visible en
-una consulta para `D`. `as_of_date` debe ser un `datetime.date` estricto.
+una consulta para `D`. Ese `state_date` es la disponibilidad embargada, mientras
+que la fecha Sackmann original se conserva como procedencia. `as_of_date` debe
+ser un `datetime.date` estricto.
 `surface` admite `Hard`, `Clay`, `Grass`, `Carpet` o `None` sin distinguir
 capitalización. Si no hay historia anterior, se devuelve el rating inicial del
 run con `is_cold_start=True`. `get_elos()` conserva el orden de entrada y
@@ -572,12 +637,13 @@ en [`docs/data_dictionary.md`](docs/data_dictionary.md).
 
 ## Features causales y datasets de entrenamiento
 
-La fase 6 recorre los 1.749.872 registros fuente en bloques completos de
-`tourney_date`. Para una fecha `D`, primero calcula todas las filas contra el
-estado que solo contiene fechas `< D` y después incorpora los resultados de
-`D`. Como Sackmann usa habitualmente la fecha de inicio del torneo, no se
-inventa un orden entre rondas de la misma fecha: ninguna ronda de ese bloque
-alimenta otra. Es una decisión deliberadamente conservadora contra fugas.
+La fase 6 recorre los registros fuente por `tourney_date`, que Sackmann usa
+habitualmente como inicio aproximado del torneo. Cada fila conserva
+`result_available_date=tourney_date+21 días`. Para construir un partido de
+fecha `D`, previsualiza el vector sin mutar el estado y solo incorpora resultados
+cuya `result_available_date < D`; la igualdad sigue excluida. Así no inventa un
+orden entre rondas ni presenta como pasado una ronda que quizá aún no se había
+disputado. El esquema activo es `tennis-features-v2`.
 
 El vector incluye, con orientación A menos B:
 
@@ -599,7 +665,13 @@ Los rankings aplican siempre `ranking_date < D`. Los 599 conflictos ATP y 226
 WTA encontrados para una misma clave jugador-fecha se omiten completos; la
 consulta retrocede al snapshot limpio anterior y expone cuántas fechas
 conflictivas saltó. El inventario íntegro queda en
-`data/processed/features/ranking_conflicts.csv`.
+`data/processed/features_active/runs/<fingerprint>/ranking_conflicts.csv`.
+
+La cuarentena DOB se publica como diagnóstico operativo actual, pero no
+selecciona ejemplos históricos. Sus fechas proceden del maestro presente y no
+son evidencia causal disponible en el pasado. Una clave incompatible se marca
+como no disponible o baja confianza en la predicción actual; sus filas no se
+eliminan retrospectivamente de Elo, features, validación o reentreno.
 
 Sackmann no contiene cuotas históricas. Por tanto, `odds_*`,
 `market_probability_*`, `model_probability_a` y `edge` permanecen nulas en los
@@ -613,17 +685,24 @@ Desde `TENNIS/`:
 ```powershell
 python scripts\build_features.py
 python scripts\build_features.py --gender M `
-  --output-dir data\processed\features\diagnostic_M --force
+  --output-dir data\processed\features_active\diagnostic_M --force
 ```
 
 La ejecución es idempotente mediante un fingerprint de fuentes, parámetros,
 esquema y fórmulas. Publica:
 
-- `data/processed/features/training_M.parquet`: 929.149 filas;
-- `data/processed/features/training_F.parquet`: 751.126 filas;
-- `data/processed/features/manifest.json`: hashes, parámetros y auditorías;
-- `data/processed/features/ranking_conflicts.csv`: 1.650 observaciones
-  conflictivas en cuarentena.
+- `data/processed/features_active/manifest.json`: puntero activo atómico;
+- `data/processed/features_active/runs/<fingerprint>/training_M.parquet`;
+- `data/processed/features_active/runs/<fingerprint>/training_F.parquet`;
+- `data/processed/features_active/runs/<fingerprint>/manifest.json`: hashes,
+  parámetros y auditorías inmutables;
+- `data/processed/features_active/runs/<fingerprint>/ranking_conflicts.csv`:
+  inventario de observaciones conflictivas en cuarentena.
+
+El cálculo usa un workspace separado para SQLite y CSV intermedios. Solo el
+subdirectorio publicable se mueve a `runs/<fingerprint>` en una operación; el
+puntero cambia después de verificar hashes y tamaños. Si esa activación falla,
+el run anterior sigue íntegro y el nuevo puede reactivarse sin recalcular.
 
 El contrato matemático y temporal completo está en
 [`docs/features.md`](docs/features.md); el resultado reproducible de la
@@ -636,30 +715,26 @@ LightGBM principal para hombres y mujeres. No existe split aleatorio. El
 backtest acumulado de 2016–2025 usa, para cada temporada `Y`:
 
 ```text
-train <= Y-2
-calibración = Y-1
-test = Y
+train: temporadas <= Y-2 con result_available_date < inicio de calibración
+calibración: Y-1 con result_available_date < inicio del test Y
+test: Y
 ```
 
 La imputación, el escalado, las categorías y el modelo se ajustan solo con
 `train`. El calibrador Platt recibe exclusivamente probabilidades generadas
 para `Y-1` y queda congelado antes de predecir `Y`. Los modelos finales usan
-todo el histórico causal disponible; sus calibradores se ajustan con
-predicciones OOF temporales, nunca con probabilidades in-sample.
+solo filas con `result_available_date < training_as_of_date`; sus calibradores
+se ajustan con predicciones OOF temporales que cumplen el mismo corte, nunca
+con probabilidades in-sample.
 
-El run activo produjo:
+Las métricas anteriores a Elo v5/features v2 quedaron superseded y no deben
+citarse como rendimiento actual. El run activo posterior a la reconstrucción
+publica las cifras definitivas globales y por segmento en
+[`docs/model_report.md`](docs/model_report.md), y el cierre independiente las
+contrasta en [`docs/audit.md`](docs/audit.md).
 
-| Género | Predicciones OOF | Accuracy LightGBM calibrado | Log-loss | Brier | AUC |
-|---|---:|---:|---:|---:|---:|
-| M | 266.980 | 0,7025 | 0,563036 | 0,191690 | 0,7780 |
-| F | 262.315 | 0,7176 | 0,543717 | 0,183847 | 0,7966 |
-
-En soporte idéntico de ranking, LightGBM alcanza 0,6904 M y 0,6946 F frente a
-0,6544 y 0,6484 del favorito por ranking. No apareció ningún segmento con
-accuracy superior al 85 %.
-
-El mercado no es evaluable todavía: las 1.680.275 filas históricas tienen
-cobertura de cuotas 0 %. El perfil `auto` utiliza `sports_only` y
+El mercado no es evaluable todavía en el histórico Sackmann porque no contiene
+cuotas con timestamp causal. El perfil `auto` utiliza `sports_only` y
 `market_enhanced` falla expresamente hasta que exista histórico causal; no se
 imputan cuotas. El evaluador ya está preparado para comparar modelo y mercado
 sobre soporte común cuando se acumulen observaciones.
@@ -679,19 +754,26 @@ está en [`docs/modeling.md`](docs/modeling.md) y las métricas reales en
 ## Pipeline diario e interpretación del output
 
 El lanzador `run_tennis.ps1` funciona desde cualquier directorio, activa el
-entorno virtual del proyecto y ejecuta `scripts/daily_predictions.py`. El
-pipeline conserva las 313 filas del snapshot real de referencia; solo llama al
-modelo para partidos `scheduled` con dos IDs resueltos. En la ejecución del 30
-de julio de 2026 produjo 204 predicciones calibradas de 228 partidos
-programados y dejó 109 filas totales sin probabilidad por estado terminal,
-estado desconocido o mapping incompleto.
+entorno virtual del proyecto y ejecuta `scripts/daily_predictions.py`. Solo
+llama al modelo para partidos `scheduled` con dos IDs resueltos. Como snapshot
+histórico de fase 8, la ejecución del 30 de julio de 2026 conservó 313 filas,
+produjo 204 predicciones calibradas de 228 partidos programados y dejó 109
+filas sin probabilidad por estado terminal, estado desconocido o mapping
+incompleto; esas cifras no describen el cierre actual.
+
+La ejecución final de fase 9 publicó 429 filas: 130 partidos programados, 83
+predicciones calibradas y 346 filas degradadas sin inventar probabilidades. Las
+83 predicciones oficiales se registraron en la BBDD y se publicaron en la web.
 
 Jugador A es siempre el primer jugador visible y B el segundo. El CSV incluye
-`model_probability_a/b`, `market_probability_a/b` de-vigadas y
-`edge_a/b = P_modelo - P_mercado`. Un edge positivo significa únicamente que
-el modelo asigna más probabilidad que la casa después de normalizar el margen;
-no garantiza rentabilidad, no incorpora el precio necesario para decidir una
-apuesta y no debe interpretarse como recomendación.
+`model_probability_a/b`, `market_probability_a/b` de-vigadas,
+`market_comparison_status` y `edge_a/b`. Bajo la regla estricta del proyecto,
+el edge solo se publica si la captura de mercado está acreditada en una fecha
+anterior al partido. Las cuotas obtenidas la misma mañana pueden mostrarse como
+contexto, pero quedan `prestart_unverified` y con edge nulo: no se finge que
+existían antes de `D`. Cuando sea evaluable, un edge positivo significa
+únicamente que el modelo asigna más probabilidad que la casa; no garantiza
+rentabilidad ni constituye una recomendación.
 
 El modelo activo es `sports_only`: las cuotas no fueron feature durante el
 entrenamiento porque el histórico tiene cobertura de mercado 0 %. Las cuotas
@@ -721,11 +803,24 @@ La salida completa se publica atómicamente en:
 data/processed/predictions/predictions_YYYY-MM-DD_<timestamp UTC>.csv
 ```
 
+La misma ejecución guarda evidencia append-only en `BBDD/tennis.sqlite3`.
+Para cada partido se conserva la primera predicción válida como oficial; una
+repetición posterior no puede reemplazarla. Cada mañana se elige una sola fecha
+anterior aún pendiente, se guarda el snapshot final y se liquida únicamente si
+`winner_slug` coincide con uno de los dos slugs oficiales y la observación es
+estrictamente posterior a la predicción. El corte del modelo es obligatorio y
+anterior a la fecha del partido; capturas posteriores a la jornada o con una
+observación ya conocida nunca son oficiales. Walkovers, estados
+parciales, HTML ambiguo o slugs contradictorios se registran o envían a revisión
+sin inventar ganador. `WEB/build_web.py` abre esta base en modo solo lectura y
+la pestaña Tenis muestra ganador previsto, probabilidad, fiabilidad y, cuando
+existe, ganador real como dato separado.
+
 La consola muestra como máximo 50 filas ordenadas por edge absoluto; el CSV
 siempre conserva la cartelera completa, los timestamps, fingerprints, cortes
 de datos y motivos de confianza. El contrato detallado está en
-[`docs/daily_pipeline.md`](docs/daily_pipeline.md). La línea exacta que el
-usuario puede añadir a `start.ps1`, sin que este proyecto lo modifique, está en
+[`docs/daily_pipeline.md`](docs/daily_pipeline.md). El orden del lanzador raíz,
+la propagación de `-Retrain` y los códigos de salida están documentados en
 [`docs/integracion.md`](docs/integracion.md).
 
 ## Tests
@@ -757,8 +852,8 @@ Los tests `test_feature_*.py` y `test_build_features_script.py` cubren el
 freeze diario, estabilidad ante datos futuros, ventanas naturales, H2H,
 descanso, rankings estrictos con cuarentena, edad, niveles auditados, de-vig,
 timestamps, orientación estable y balanceada, esquema/allowlist, spool
-cronológico, Parquet, publicación idempotente y ausencia de roles
-ganador/perdedor entre las columnas persistidas.
+cronológico, Parquet, publicación idempotente, embargo estricto de labels y
+ausencia de roles ganador/perdedor entre las columnas persistidas.
 Los tests `test_model_*.py` y `test_modeling_*.py` cubren contrato de
 allowlist, perfiles con/sin mercado, preprocesamiento ajustado solo con train,
 aislamiento de género, regresión logística, LightGBM, baselines, folds
@@ -767,8 +862,9 @@ futuro, publicación inmutable, hashes, carga segura e idempotencia. La suite
 `test_daily_pipeline.py` añade reconstrucción dirigida, no-fuga al añadir
 futuro, orientación A/B, bloqueo del modelo no causal, degradación por estado
 o mapping, confianza y publicación CSV. `test_daily_documentation.py` fija el
-lanzador y la línea no invasiva de integración. La suite completa de cierre de
-fase 8 obtuvo `258/258`.
+lanzador y la línea no invasiva de integración. La suite final, ejecutada tras
+reconstruir Elo v5, features v2 y modelos v3, obtuvo 329/329 tests correctos; la
+evidencia consolidada está en `docs/audit.md`.
 
 Los recuentos de la ejecución auditada de la fase 2 están en
 [`docs/phase2_report.md`](docs/phase2_report.md).
@@ -793,17 +889,17 @@ La ejecución real, cobertura y flags de fase 8 están en
 - Existen dos universos de rating Elo separados por género; hombres y mujeres nunca se mezclan. Dentro de cada género, todos los niveles comparten el mismo pool.
 - Existe un modelo por género, dos en total. El nivel del torneo, la superficie, el formato `best-of` y la ronda son features, no modelos separados.
 - La evaluación y la calibración se realizan también por segmento de nivel de torneo y superficie, no únicamente de forma global.
-- El contrato reserva las cuotas como feature para un futuro perfil con cobertura histórica. El perfil activo `sports_only` no las usa todavía, pero siempre compara su probabilidad con el mercado cuando hay dos cuotas.
+- El contrato reserva las cuotas como feature para un futuro perfil con cobertura histórica. El perfil activo `sports_only` no las usa; una comparación solo se publica cuando la captura de mercado cumple el corte causal documentado.
 - Toda generación de ratings, features, particiones, validaciones y predicciones cumple la regla anti-fugas: para una fecha `D`, solo consulta información estrictamente anterior a `D`.
 
 ## Roadmap
 
 1. **Andamiaje — completada:** estructura, reglas permanentes, documentación, dependencias, entorno virtual y configuración de rutas.
 2. **Ingesta y vigencia de fuentes — completada:** histórico Sackmann reproducible, actualizaciones incrementales, Match Charting separado y snapshots Elo externos con límite temporal.
-3. **Sistema Elo por superficie y género — completada:** motor causal, ratings generales y por superficie, persistencia SQLite y API histórica estricta.
+3. **Sistema Elo por superficie y género — completada:** motor Elo v5, ratings generales y por superficie, embargo causal, persistencia SQLite y API histórica estricta.
 4. **Scraper Tennis Explorer — completada:** cartelera diaria de singles, slugs estables, cuotas, estados conservadores, caché íntegra y acceso de baja frecuencia.
 5. **Mapeo de jugadores — completada:** resolución exacta y causal de slugs, caché SQLite auditable, overrides y cola honesta de no resueltos.
-6. **Features sin fugas — completada:** vector causal común, orientación A/B estable, rankings temporales, Parquet separados por género y auditoría de publicación.
+6. **Features sin fugas — completada:** esquema v2, embargo de labels, vector causal común, orientación A/B estable, rankings temporales, Parquet separados por género y publicación generacional.
 7. **Modelos, validación temporal y calibración — completada:** LightGBM y baseline logística por género, backtest expansivo, Platt causal, métricas por segmento y artefactos versionados.
-8. **Pipeline diario e integración — completada:** scraper y mapping encadenados, contexto causal dirigido, inferencia calibrada, edge, confianza, CSV timestamped, lanzador autocontenido y guía no invasiva para `start.ps1`.
-9. **Auditoría anti-fugas:** revisión integral y pruebas específicas para demostrar el cumplimiento temporal.
+8. **Pipeline diario e integración — completada:** scraper y mapping encadenados, contexto causal dirigido, inferencia calibrada, edge, confianza, CSV timestamped, lanzador autocontenido y orquestación conjunta desde `start.ps1` con `-Retrain` para ambos deportes.
+9. **Auditoría anti-fugas — completada:** revisión causal integral, corrección de fecha fuente, identidades y retiros, simetría A/B, auditoría de segmentos sospechosos, casos límite, E2E, BBDD prospectiva y verificación reproducible; el cierre está registrado en `docs/audit.md`.

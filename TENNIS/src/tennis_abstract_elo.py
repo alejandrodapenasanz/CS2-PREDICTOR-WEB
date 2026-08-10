@@ -201,7 +201,7 @@ class EloFetchResult:
 
 @dataclass(frozen=True)
 class EloFetchReport:
-    """Resume una ejecución completa, incluida su cuota HTTP y validación local."""
+    """Resume una ejecución, sus GET secuenciales y la validación local."""
 
     results: tuple[EloFetchResult, ...]
     manifest_path: Path

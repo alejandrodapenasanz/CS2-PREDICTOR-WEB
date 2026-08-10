@@ -22,6 +22,9 @@ from src.features import (  # noqa: E402
     FEATURE_SCHEMA_VERSION,
     MODEL_FEATURE_COLUMNS,
 )
+from src.artifact_integrity import build_code_inventory  # noqa: E402
+from src.features.dataset import FEATURE_CODE_PATHS  # noqa: E402
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY  # noqa: E402
 from src.modeling.parameters import (  # noqa: E402
     LightGBMParameters,
     LogisticParameters,
@@ -32,9 +35,11 @@ from src.modeling.preprocessing import (  # noqa: E402
     MARKET_FEATURE_COLUMNS,
 )
 from src.modeling.service import (  # noqa: E402
+    ModelServiceError,
     load_active_deployment_model,
 )
 from src.modeling.training import retrain_models  # noqa: E402
+from src.modeling.artifacts import MODEL_CODE_PATHS  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -56,6 +61,11 @@ def _gender_frame(gender: str) -> pd.DataFrame:
                 "record_id": f"{gender}-{year}-{index}",
                 "gender": gender,
                 "match_date": date(year, 1, index + 1),
+                "result_available_date": (
+                    DEFAULT_SOURCE_DATE_POLICY.availability_date(
+                        date(year, 1, index + 1)
+                    )
+                ),
                 "rank_a": rank_a,
                 "rank_b": rank_b,
                 "y": target,
@@ -110,11 +120,16 @@ def _write_feature_snapshot(root: Path) -> Path:
         "schema_version": FEATURE_SCHEMA_VERSION,
         "source_commit": "c" * 40,
         "historical_odds_available": False,
+        "source_date_policy": DEFAULT_SOURCE_DATE_POLICY.as_dict(),
+        "code_inventory": list(
+            build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
+        ),
         "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
         "training_columns": [
             "record_id",
             "gender",
             "match_date",
+            "result_available_date",
             "rank_a",
             "rank_b",
             *MODEL_FEATURE_COLUMNS,
@@ -156,6 +171,7 @@ class ModelTrainingTest(unittest.TestCase):
                     last_test_season=2020,
                     small_segment_threshold=20,
                 ),
+                "training_as_of_date": date(2021, 3, 1),
             }
 
             first = retrain_models(**kwargs)
@@ -163,6 +179,13 @@ class ModelTrainingTest(unittest.TestCase):
 
             self.assertFalse(first.skipped)
             self.assertTrue(second.skipped)
+            self.assertEqual(
+                [
+                    item["path"]
+                    for item in first.published.manifest["code_inventory"]
+                ],
+                sorted(MODEL_CODE_PATHS),
+            )
             self.assertEqual(
                 first.published.fingerprint,
                 second.published.fingerprint,
@@ -200,11 +223,42 @@ class ModelTrainingTest(unittest.TestCase):
             active = load_active_deployment_model(
                 "M", manifest_path=output / "manifest.json"
             )
-            prediction = active.predict(_gender_frame("M").tail(2))
+            prediction = active.predict(
+                _gender_frame("M").tail(2),
+                as_of_date=date(2025, 1, 1),
+            )
             self.assertTrue(
                 prediction["model_probability_a"].between(0.0, 1.0).all()
             )
             self.assertTrue(prediction["edge"].isna().all())
+            with self.assertRaisesRegex(ModelServiceError, "no es causal"):
+                active.predict(
+                    _gender_frame("M").tail(1),
+                    as_of_date=date.fromisoformat(active.training_max_date),
+                )
+            unverified_market = _gender_frame("M").tail(1).copy()
+            unverified_market["market_probability_a"] = 0.55
+            unverified_market["market_probability_b"] = 0.45
+            with self.assertRaisesRegex(
+                ModelServiceError, "market_retrieved_at_utc"
+            ):
+                active.predict(
+                    unverified_market,
+                    as_of_date=date(2025, 1, 1),
+                )
+
+            published_manifest = first.published.run_dir / "manifest.json"
+            payload = json.loads(
+                published_manifest.read_text(encoding="utf-8")
+            )
+            payload["code_inventory"][0]["sha256"] = "0" * 64
+            published_manifest.write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ModelServiceError, "código distinto"):
+                load_active_deployment_model(
+                    "M", manifest_path=output / "manifest.json"
+                )
 
 
 if __name__ == "__main__":

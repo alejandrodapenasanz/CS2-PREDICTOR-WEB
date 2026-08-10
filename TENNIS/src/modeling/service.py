@@ -8,6 +8,7 @@ incluye una probabilidad de mercado de-vigada válida.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime
 import json
 from pathlib import Path
 from typing import Literal, Mapping
@@ -21,7 +22,11 @@ from ..config import (
     PHASE7_ACTIVE_MANIFEST_PATH,
     PROJECT_ROOT,
 )
-from .artifacts import verify_published_run
+from .artifacts import (
+    ArtifactError,
+    verify_model_code_inventory,
+    verify_published_run,
+)
 from .calibration import PlattCalibrator
 from .estimators import FittedGenderEstimator
 from .parameters import MODEL_ARTIFACT_VERSION
@@ -29,6 +34,7 @@ from .orientation import (
     predict_symmetric_calibrated,
     predict_symmetric_raw,
 )
+from ..temporal import SourceDatePolicy, SourceDatePolicyError
 
 
 Gender = Literal["M", "F"]
@@ -46,13 +52,39 @@ class LoadedDeploymentModel:
     estimator: FittedGenderEstimator
     calibrator: PlattCalibrator
     training_rows: int
+    training_source_rows: int
+    training_excluded_unavailable: int
     training_max_date: str
+    training_available_max_date: str
+    training_as_of_date: str
+    source_date_policy: SourceDatePolicy
     calibration_rows: int
     run_fingerprint: str
     run_dir: Path
 
-    def predict(self, frame: pd.DataFrame) -> pd.DataFrame:
-        """Predice raw, calibrada, mercado y edge conservando el índice."""
+    def predict(
+        self,
+        frame: pd.DataFrame,
+        *,
+        as_of_date: date,
+    ) -> pd.DataFrame:
+        """Predice solo si el modelo termina estrictamente antes del corte."""
+
+        if isinstance(as_of_date, datetime) or not isinstance(as_of_date, date):
+            raise ModelServiceError("as_of_date debe ser datetime.date estricto.")
+        try:
+            training_cutoff = date.fromisoformat(
+                self.training_available_max_date
+            )
+        except ValueError as exc:
+            raise ModelServiceError(
+                "training_available_max_date del bundle no es YYYY-MM-DD."
+            ) from exc
+        if training_cutoff >= as_of_date:
+            raise ModelServiceError(
+                "El modelo no es causal para as_of_date: se exige "
+                "training_available_max_date < as_of_date."
+            )
 
         raw = predict_symmetric_raw(self.estimator, frame)
         calibrated = predict_symmetric_calibrated(
@@ -67,16 +99,70 @@ class LoadedDeploymentModel:
             index=frame.index,
         )
         market = pd.Series(np.nan, index=frame.index, dtype=float)
-        if "market_probability_a" in frame.columns:
+        market_columns = {
+            "market_probability_a",
+            "market_probability_b",
+        }
+        present_columns = market_columns.intersection(frame.columns)
+        if present_columns and present_columns != market_columns:
+            raise ModelServiceError(
+                "El mercado requiere probabilidades A y B conjuntamente."
+            )
+        if present_columns:
             numeric = pd.to_numeric(
                 frame["market_probability_a"], errors="coerce"
             )
-            invalid = numeric.notna() & ~numeric.between(0.0, 1.0)
+            numeric_b = pd.to_numeric(
+                frame["market_probability_b"], errors="coerce"
+            )
+            invalid = (
+                numeric.notna() & ~numeric.between(0.0, 1.0)
+            ) | (
+                numeric_b.notna() & ~numeric_b.between(0.0, 1.0)
+            )
             if invalid.any():
                 raise ModelServiceError(
-                    "market_probability_a presente fuera de [0, 1]."
+                    "Las probabilidades de mercado salen de [0, 1]."
                 )
-            market.loc[numeric.notna()] = numeric.loc[numeric.notna()]
+            mismatched_missing = numeric.isna() ^ numeric_b.isna()
+            if mismatched_missing.any():
+                raise ModelServiceError(
+                    "Las probabilidades de mercado A/B deben faltar juntas."
+                )
+            present = numeric.notna() & numeric_b.notna()
+            non_complementary = present & ~np.isclose(
+                numeric + numeric_b,
+                1.0,
+                rtol=0.0,
+                atol=1e-9,
+            )
+            if non_complementary.any():
+                raise ModelServiceError(
+                    "Las probabilidades de-vigadas A/B deben sumar uno."
+                )
+            if present.any():
+                if "market_retrieved_at_utc" not in frame.columns:
+                    raise ModelServiceError(
+                        "El mercado requiere market_retrieved_at_utc."
+                    )
+                try:
+                    retrieved = pd.to_datetime(
+                        frame["market_retrieved_at_utc"],
+                        errors="raise",
+                        utc=True,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ModelServiceError(
+                        "market_retrieved_at_utc no es un timestamp UTC válido."
+                    ) from exc
+                invalid_time = retrieved.isna() | retrieved.dt.date.map(
+                    lambda value: value >= as_of_date
+                )
+                if (present & invalid_time).any():
+                    raise ModelServiceError(
+                        "El mercado no cumple retrieved_date < as_of_date."
+                    )
+                market.loc[present] = numeric.loc[present]
         output["market_probability_a"] = market
         output["edge"] = output["model_probability_a"] - market
         return output
@@ -153,6 +239,13 @@ def load_active_deployment_model(
         raise ModelServiceError(
             "El fingerprint activo no coincide con el run verificado."
         )
+    try:
+        verify_model_code_inventory(verified.get("code_inventory"))
+    except ArtifactError as exc:
+        raise ModelServiceError(
+            "El modelo activo fue producido por código distinto; "
+            "reentrene antes de deserializarlo."
+        ) from exc
     entry = _model_entry(verified, gender)
     paths = entry.get("paths")
     if not isinstance(paths, Mapping):
@@ -188,18 +281,51 @@ def load_active_deployment_model(
             "El bundle activo no cumple versión, género o tipos esperados."
         )
     training_rows = bundle.get("training_rows")
+    training_source_rows = bundle.get("training_source_rows")
+    training_excluded = bundle.get("training_excluded_unavailable")
     calibration_rows = bundle.get("calibration_rows")
     training_max_date = bundle.get("training_max_date")
+    training_available_max_date = bundle.get(
+        "training_available_max_date"
+    )
+    training_as_of_date = bundle.get("training_as_of_date")
+    raw_date_policy = bundle.get("source_date_policy")
     if (
         isinstance(training_rows, bool)
         or not isinstance(training_rows, int)
         or training_rows <= 0
+        or isinstance(training_source_rows, bool)
+        or not isinstance(training_source_rows, int)
+        or training_source_rows < training_rows
+        or isinstance(training_excluded, bool)
+        or not isinstance(training_excluded, int)
+        or training_excluded != training_source_rows - training_rows
         or isinstance(calibration_rows, bool)
         or not isinstance(calibration_rows, int)
         or calibration_rows <= 0
         or not isinstance(training_max_date, str)
+        or not isinstance(training_available_max_date, str)
+        or not isinstance(training_as_of_date, str)
+        or not isinstance(raw_date_policy, Mapping)
     ):
         raise ModelServiceError("Metadatos de entrenamiento inválidos.")
+    try:
+        source_max = date.fromisoformat(training_max_date)
+        available_max = date.fromisoformat(training_available_max_date)
+        training_cutoff = date.fromisoformat(training_as_of_date)
+        policy = SourceDatePolicy.from_mapping(raw_date_policy)
+    except (ValueError, SourceDatePolicyError) as exc:
+        raise ModelServiceError(
+            "Fechas o source_date_policy del bundle no son válidas."
+        ) from exc
+    if policy.availability_date(source_max) != available_max:
+        raise ModelServiceError(
+            "training_available_max_date no deriva de training_max_date."
+        )
+    if available_max >= training_cutoff:
+        raise ModelServiceError(
+            "El bundle incorporó un resultado no disponible en su corte."
+        )
     fingerprint = verified.get("fingerprint")
     assert isinstance(fingerprint, str)
     return LoadedDeploymentModel(
@@ -207,7 +333,12 @@ def load_active_deployment_model(
         estimator=bundle["estimator"],
         calibrator=bundle["calibrator"],
         training_rows=training_rows,
+        training_source_rows=training_source_rows,
+        training_excluded_unavailable=training_excluded,
         training_max_date=training_max_date,
+        training_available_max_date=training_available_max_date,
+        training_as_of_date=training_as_of_date,
+        source_date_policy=policy,
         calibration_rows=calibration_rows,
         run_fingerprint=fingerprint,
         run_dir=run_dir,

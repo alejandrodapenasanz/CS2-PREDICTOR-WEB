@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 import hashlib
 import math
 from pathlib import Path
@@ -477,24 +477,71 @@ class EloEngineTest(unittest.TestCase):
             ("6-0 RET", "6-0 DEF", "6-0 ABD", "6-0 ABN"),
         )
 
-    def test_quarantined_identity_excludes_the_whole_match(self) -> None:
-        """Una clave ambigua no contamina Elo de ninguno de los dos lados."""
+    def test_identity_quarantine_activates_only_after_prior_evidence(
+        self,
+    ) -> None:
+        """Antes y durante la primera evidencia no aplica una regla futura."""
 
-        match_date = date(2024, 4, 2)
-        event = _event(
-            match_date=match_date,
-            gender="M",
-            winner_id=101,
-            loser_id=202,
-            row=1,
+        conflict_date = date(2024, 4, 2)
+        engine = EloEngine(
+            identity_exclusion_after_dates={("M", 101): conflict_date}
         )
-        engine = EloEngine(excluded_player_keys={("M", 101)})
+        before = engine.process_date_block(
+            date(2024, 4, 1),
+            (
+                _event(
+                    match_date=date(2024, 4, 1),
+                    gender="M",
+                    winner_id=101,
+                    loser_id=201,
+                    row=1,
+                ),
+            ),
+        )
+        same_day = engine.process_date_block(
+            conflict_date,
+            (
+                _event(
+                    match_date=conflict_date,
+                    gender="M",
+                    winner_id=101,
+                    loser_id=202,
+                    row=2,
+                ),
+            ),
+        )
+        after = engine.process_date_block(
+            date(2024, 4, 3),
+            (
+                _event(
+                    match_date=date(2024, 4, 3),
+                    gender="M",
+                    winner_id=203,
+                    loser_id=101,
+                    row=3,
+                ),
+            ),
+        )
 
-        block = engine.process_date_block(match_date, (event,))
+        self.assertEqual(before.audit.included, 1)
+        self.assertEqual(same_day.audit.included, 1)
+        self.assertEqual(after.audit.included, 0)
+        self.assertEqual(after.audit.count("excluded_identity"), 1)
+        self.assertEqual(after.states, ())
 
-        self.assertEqual(block.audit.included, 0)
-        self.assertEqual(block.audit.count("excluded_identity"), 1)
-        self.assertEqual(block.states, ())
+    def test_identity_quarantine_dates_are_strictly_typed(self) -> None:
+        """Impide cortes ambiguos con hora o mappings mal formados."""
+
+        with self.assertRaises(ValueError):
+            EloEngine(
+                identity_exclusion_after_dates={
+                    ("M", 101): datetime(2024, 4, 2)
+                }
+            )
+        with self.assertRaises(TypeError):
+            EloEngine(  # type: ignore[arg-type]
+                identity_exclusion_after_dates={(("M", 101), date.today())}
+            )
 
     def test_null_surface_updates_only_general(self) -> None:
         """Una superficie nula no actualiza ninguno de los cuatro pools."""

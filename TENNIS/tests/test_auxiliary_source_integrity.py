@@ -5,12 +5,18 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sys
 from tempfile import TemporaryDirectory
 import unittest
 
-from src.config import PROJECT_ROOT
-from src.features import verify_auxiliary_source_inventory
-from src.features.dataset import FeatureDatasetSourceError
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config import PROJECT_ROOT  # noqa: E402
+from src.features import verify_auxiliary_source_inventory  # noqa: E402
+from src.features.dataset import FeatureDatasetSourceError  # noqa: E402
 
 
 def _git_blob_sha(content: bytes) -> str:

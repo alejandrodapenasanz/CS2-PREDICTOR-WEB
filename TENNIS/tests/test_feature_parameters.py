@@ -26,7 +26,7 @@ class FeatureParametersTest(unittest.TestCase):
 
         parameters = DEFAULT_FEATURE_PARAMETERS
 
-        self.assertEqual(FEATURE_SCHEMA_VERSION, "tennis-features-v1")
+        self.assertEqual(FEATURE_SCHEMA_VERSION, "tennis-features-v2")
         self.assertEqual(parameters.recent_matches, 10)
         self.assertEqual(parameters.recent_months, 3)
         self.assertEqual(parameters.age_reference_years, 30.0)

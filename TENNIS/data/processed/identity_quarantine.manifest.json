@@ -1,12 +1,14 @@
 {
-  "created_at_utc": "2026-07-30T14:43:25.176664+00:00",
+  "created_at_utc": "2026-08-10T06:53:20.524454+00:00",
   "csv": {
     "path": "identity_quarantine.csv",
     "sha256": "d086b51cd18f82fec92716136c81c258f711a4c905e93d6984ca2bd3b41c70d6",
     "size": 8869
   },
+  "historical_exclusion_rule": "disabled_noncausal_current_metadata",
   "minimum_plausible_match_age_years": 10,
   "rows": 90,
-  "schema_version": "tennis-identity-quarantine-v1",
-  "source_commit": "83733587353df8a41f2fd4f516147d5aa83f5a8d"
+  "schema_version": "tennis-identity-quarantine-v3",
+  "source_commit": "83733587353df8a41f2fd4f516147d5aa83f5a8d",
+  "usage_contract": "diagnostic_current_inference_only_no_historical_selection"
 }

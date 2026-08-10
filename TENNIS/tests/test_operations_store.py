@@ -7,14 +7,16 @@ también la barrera que impide escribir la SQLite fuera del proyecto.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
+import math
+import re
 import sqlite3
 from tempfile import TemporaryDirectory
 from typing import Iterator
+import unittest
 
 import pandas as pd
-import pytest
 
 from src.config import OPERATIONS_DATABASE_PATH, PROJECT_ROOT, TESTS_DIR
 from src.operations import (
@@ -24,9 +26,31 @@ from src.operations import (
     SCHEMA_VERSION,
     derive_source_match_id,
 )
+from src.operations.schema import SCHEMA_SQL
 
 
 FIXED_NOW = datetime(2026, 7, 30, 8, 0, tzinfo=UTC)
+
+
+@contextmanager
+def assert_raises(
+    exception_type: type[BaseException],
+    *,
+    match: str | None = None,
+) -> Iterator[None]:
+    """Comprueba una excepción y, opcionalmente, su mensaje con stdlib."""
+
+    try:
+        yield
+    except exception_type as exc:
+        if match is not None and re.search(match, str(exc)) is None:
+            raise AssertionError(
+                f"El mensaje {str(exc)!r} no coincide con {match!r}."
+            ) from exc
+    else:
+        raise AssertionError(
+            f"No se lanzó la excepción {exception_type.__name__}."
+        )
 
 
 @contextmanager
@@ -88,7 +112,8 @@ def prediction_row(
         "prediction_status": prediction_status,
         "model_profile": "M",
         "model_fingerprint": model_fingerprint,
-        "model_training_max_date": "2026-07-29",
+        "model_training_max_date": "2026-07-01",
+        "model_training_available_max_date": "2026-07-22",
         "feature_fingerprint": "features-v1",
     }
 
@@ -100,6 +125,7 @@ def result_row(
     winner_side: str = "player_1",
     first_sets: int = 2,
     second_sets: int = 0,
+    observed_at_utc: str = "2026-07-30T12:00:00+00:00",
 ) -> dict[str, object]:
     """Construye evidencia terminal explícita para una observación."""
 
@@ -112,7 +138,7 @@ def result_row(
         "winner_side": winner_side,
         "winner_slug": winner_slug,
         "result_evidence": "terminal_sets_and_score",
-        "observed_at_utc": "2026-07-30T12:00:00+00:00",
+        "observed_at_utc": observed_at_utc,
         "source_snapshot_sha256": "b" * 64,
     }
 
@@ -130,7 +156,50 @@ def test_schema_is_versioned_and_default_path_is_inside_tennis() -> None:
         recorded = store.connection.execute(
             "SELECT version FROM schema_versions"
         ).fetchone()[0]
-        assert version == SCHEMA_VERSION == recorded == 1
+        assert version == SCHEMA_VERSION == recorded == 2
+
+
+def test_schema_migrates_v1_and_unversioned_databases() -> None:
+    """Bases v1 o completas sin PRAGMA se elevan a v2 sin perder filas."""
+
+    legacy_sql = SCHEMA_SQL.replace(
+        "    model_training_available_max_date TEXT,\n",
+        "",
+    )
+    for mode in ("v1", "unversioned"):
+        with TemporaryDirectory(dir=TESTS_DIR) as directory:
+            database = Path(directory) / f"{mode}.sqlite3"
+            connection = sqlite3.connect(database)
+            connection.executescript(
+                legacy_sql if mode == "v1" else SCHEMA_SQL
+            )
+            if mode == "v1":
+                connection.execute(
+                    "INSERT INTO schema_versions VALUES (1, ?, ?)",
+                    (FIXED_NOW.isoformat(), "legacy schema"),
+                )
+                connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+            connection.close()
+
+            with OperationsStore(database, clock=lambda: FIXED_NOW) as store:
+                columns = {
+                    str(row[1])
+                    for row in store.connection.execute(
+                        "PRAGMA table_info(predictions)"
+                    )
+                }
+                versions = {
+                    int(row[0])
+                    for row in store.connection.execute(
+                        "SELECT version FROM schema_versions"
+                    )
+                }
+                assert "model_training_available_max_date" in columns
+                assert store.connection.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0] == 2
+                assert 2 in versions
 
 
 def test_empty_runs_are_supported_and_idempotent() -> None:
@@ -192,9 +261,14 @@ def test_first_valid_prediction_is_official_and_immutable() -> None:
         assert first_summary.official_predictions_selected == 1
         assert later_summary.official_predictions_selected == 0
         assert official["run_id"] == "prediction-first-valid"
-        assert official["model_probability_a"] == pytest.approx(0.62)
+        assert math.isclose(
+            float(official["model_probability_a"]),
+            0.62,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        )
 
-        with pytest.raises(sqlite3.IntegrityError, match="inmutables"):
+        with assert_raises(sqlite3.IntegrityError, match="inmutables"):
             store.connection.execute(
                 """
                 UPDATE predictions
@@ -203,7 +277,7 @@ def test_first_valid_prediction_is_official_and_immutable() -> None:
                 """,
                 (official["prediction_id"],),
             )
-        with pytest.raises(sqlite3.IntegrityError, match="inmutables"):
+        with assert_raises(sqlite3.IntegrityError, match="inmutables"):
             store.connection.execute(
                 """
                 DELETE FROM official_predictions
@@ -242,8 +316,8 @@ def test_settlement_uses_winner_slug_not_source_position() -> None:
         assert settlement["actual_outcome_a"] == 1
 
 
-def test_unknown_observation_is_retried_when_prediction_arrives() -> None:
-    """Una observación temprana queda en cola y se concilia después."""
+def test_observation_before_registration_blocks_official_prediction() -> None:
+    """Una observación ya conocida impide crear un backtest postdicto."""
 
     with temporary_store() as store:
         observation = store.reconcile_observations(
@@ -257,12 +331,124 @@ def test_unknown_observation_is_retried_when_prediction_arrives() -> None:
             "prediction-after-observation",
             pd.DataFrame([prediction_row()]),
         )
-        settlement = store.load_settlements().iloc[0]
         queues = store.load_review_queue()
+        stored = store.connection.execute(
+            """
+            SELECT is_valid, invalid_reason FROM predictions
+            WHERE run_id = 'prediction-after-observation'
+            """
+        ).fetchone()
 
-        assert prediction.settlements_inserted == 1
-        assert settlement["actual_outcome_a"] == 1
-        assert set(queues["status"]) == {"resolved"}
+        assert prediction.valid_predictions == 0
+        assert prediction.official_predictions_selected == 0
+        assert prediction.settlements_inserted == 0
+        assert store.load_official_predictions().empty
+        assert store.load_settlements().empty
+        assert stored["is_valid"] == 0
+        assert "observation_already_exists" in stored["invalid_reason"]
+        assert set(queues["status"]) == {"open"}
+
+
+def test_historical_replay_is_stored_but_never_official() -> None:
+    """Captura o predicción posterior al día objetivo queda no oficial."""
+
+    replay = prediction_row(
+        prediction_as_of_utc="2026-07-31T07:05:00+00:00",
+        source_retrieved_at_utc="2026-07-31T07:00:00+00:00",
+    )
+    with temporary_store() as store:
+        summary = store.register_prediction_run(
+            "historical-replay",
+            pd.DataFrame([replay]),
+        )
+        stored = store.connection.execute(
+            "SELECT is_valid, invalid_reason FROM predictions"
+        ).fetchone()
+
+        assert summary.predictions_inserted == 1
+        assert summary.valid_predictions == 0
+        assert summary.official_predictions_selected == 0
+        assert stored["is_valid"] == 0
+        assert "prediction_created_after_match_date" in stored["invalid_reason"]
+        assert "source_captured_after_match_date" in stored["invalid_reason"]
+
+
+def test_model_training_cutoff_is_required_and_strictly_past() -> None:
+    """Sin corte acreditado o con corte en D no hay predicción oficial."""
+
+    missing = prediction_row(source_match_id="te:missing-cutoff")
+    missing["model_training_max_date"] = None
+    same_day = prediction_row(source_match_id="te:same-day-cutoff")
+    same_day["model_training_max_date"] = "2026-07-09"
+    same_day["model_training_available_max_date"] = "2026-07-30"
+    inconsistent = prediction_row(source_match_id="te:inconsistent-cutoff")
+    inconsistent["model_training_available_max_date"] = "2026-07-21"
+    with temporary_store() as store:
+        summary = store.register_prediction_run(
+            "invalid-model-cutoffs",
+            pd.DataFrame([missing, same_day, inconsistent]),
+        )
+        reasons = {
+            row["source_match_id"]: row["invalid_reason"]
+            for row in store.connection.execute(
+                """
+                SELECT source_match_id, invalid_reason
+                FROM predictions ORDER BY source_match_id
+                """
+            )
+        }
+
+        assert summary.valid_predictions == 0
+        assert summary.official_predictions_selected == 0
+        assert "model_training_max_date_missing" in reasons[
+            "te:missing-cutoff"
+        ]
+        assert "model_results_not_available_before_match" in reasons[
+            "te:same-day-cutoff"
+        ]
+        assert "model_training_dates_inconsistent" in reasons[
+            "te:inconsistent-cutoff"
+        ]
+
+    absent = prediction_row()
+    absent.pop("model_training_max_date")
+    with temporary_store() as store:
+        with assert_raises(
+            OperationsValidationError,
+            match="model_training_max_date",
+        ):
+            store.register_prediction_run(
+                "missing-required-column",
+                pd.DataFrame([absent]),
+            )
+
+
+def test_observation_must_be_strictly_after_prediction_to_settle() -> None:
+    """Un resultado con timestamp anterior o igual nunca crea un label."""
+
+    with temporary_store() as store:
+        store.register_prediction_run(
+            "prediction-before-result",
+            pd.DataFrame([prediction_row()]),
+        )
+        summary = store.reconcile_observations(
+            "observation-with-old-clock",
+            pd.DataFrame(
+                [
+                    result_row(
+                        observed_at_utc="2026-07-30T07:05:00+00:00"
+                    )
+                ]
+            ),
+        )
+        queue = store.load_review_queue(status="open")
+
+        assert summary.settlements_inserted == 0
+        assert summary.queued_rows == 1
+        assert store.load_settlements().empty
+        assert set(queue["issue_type"]) == {
+            "observation_not_after_prediction"
+        }
 
 
 def test_winner_outside_official_slugs_is_conflict_not_label() -> None:
@@ -352,7 +538,7 @@ def test_divergent_run_id_is_audited_and_rejected() -> None:
             "same-run",
             pd.DataFrame([prediction_row()]),
         )
-        with pytest.raises(OperationsConflictError):
+        with assert_raises(OperationsConflictError):
             store.register_prediction_run(
                 "same-run",
                 pd.DataFrame(
@@ -433,7 +619,10 @@ def test_statistics_are_append_only_and_reject_prediction_signals() -> None:
 
         assert first.statistics_inserted == 1
         assert second.statistics_inserted == 0
-        with pytest.raises(OperationsValidationError, match="predicción"):
+        with assert_raises(
+            OperationsValidationError,
+            match="predicción",
+        ):
             store.append_player_statistics(
                 "prediction-with-stats",
                 pd.DataFrame([forbidden_statistic]),
@@ -441,7 +630,7 @@ def test_statistics_are_append_only_and_reject_prediction_signals() -> None:
         statistic_id = store.connection.execute(
             "SELECT statistic_id FROM player_statistics"
         ).fetchone()[0]
-        with pytest.raises(sqlite3.IntegrityError, match="inmutables"):
+        with assert_raises(sqlite3.IntegrityError, match="inmutables"):
             store.connection.execute(
                 """
                 DELETE FROM player_statistics WHERE statistic_id = ?
@@ -458,7 +647,7 @@ def test_structural_failure_rolls_back_entire_run() -> None:
     invalid["player_a_id"] = 1.5
 
     with temporary_store() as store:
-        with pytest.raises(OperationsValidationError):
+        with assert_raises(OperationsValidationError):
             store.register_prediction_run(
                 "rollback-run",
                 pd.DataFrame([valid, invalid]),
@@ -475,3 +664,27 @@ def test_structural_failure_rolls_back_entire_run() -> None:
             ).fetchone()[0]
             == 0
         )
+
+
+def load_tests(
+    loader: unittest.TestLoader,
+    standard_tests: unittest.TestSuite,
+    pattern: str | None,
+) -> unittest.TestSuite:
+    """Registra las funciones históricas como casos ``unittest``."""
+
+    del loader, standard_tests, pattern
+    suite = unittest.TestSuite()
+    for name, value in sorted(globals().items()):
+        if name.startswith("test_") and callable(value):
+            suite.addTest(
+                unittest.FunctionTestCase(
+                    value,
+                    description=getattr(value, "__doc__", None),
+                )
+            )
+    return suite
+
+
+if __name__ == "__main__":
+    unittest.main()

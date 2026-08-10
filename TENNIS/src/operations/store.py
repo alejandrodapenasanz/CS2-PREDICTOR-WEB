@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 import sqlite3
 from typing import Any
@@ -189,7 +189,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         )
 
     def _initialize_schema(self) -> None:
-        """Aplica de forma atómica el esquema v1 o rechaza una versión futura."""
+        """Aplica el esquema y migra v1 a v2 de forma atómica y sin pérdida."""
 
         current_version = int(
             self.connection.execute("PRAGMA user_version").fetchone()[0]
@@ -201,13 +201,30 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 f"{current_version} > {SCHEMA_VERSION}."
             )
         escaped_now = self._now().replace("'", "''")
+        prediction_columns = {
+            str(row[1])
+            for row in self.connection.execute(
+                "PRAGMA table_info(predictions)"
+            ).fetchall()
+        }
+        upgrade_sql = ""
+        if (
+            current_version in {0, 1}
+            and bool(prediction_columns)
+            and "model_training_available_max_date" not in prediction_columns
+        ):
+            upgrade_sql = (
+                "ALTER TABLE predictions ADD COLUMN "
+                "model_training_available_max_date TEXT;\n"
+            )
         migration = (
             "BEGIN IMMEDIATE;\n"
             f"{SCHEMA_SQL}\n"
+            f"{upgrade_sql}"
             "INSERT OR IGNORE INTO schema_versions("
             "version, applied_at_utc, description"
             f") VALUES ({SCHEMA_VERSION}, '{escaped_now}', "
-            "'Esquema operativo inicial');\n"
+            "'Embargo causal de resultados y provenance del modelo');\n"
             f"PRAGMA user_version = {SCHEMA_VERSION};\n"
             "COMMIT;"
         )
@@ -833,6 +850,29 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 if match_conflict:
                     queued_rows += 1
                     continue
+                prior_observation = self.connection.execute(
+                    """
+                    SELECT observation_id
+                    FROM observations
+                    WHERE source_match_id = ?
+                    ORDER BY observed_at_utc, observation_id
+                    LIMIT 1
+                    """,
+                    (source_match_id,),
+                ).fetchone()
+                prediction_is_valid = (
+                    validity.is_valid and prior_observation is None
+                )
+                invalid_reason = validity.invalid_reason
+                if prior_observation is not None:
+                    invalid_reason = "|".join(
+                        part
+                        for part in (
+                            invalid_reason,
+                            "observation_already_exists",
+                        )
+                        if part
+                    )
                 prediction_id = _identifier(
                     "prediction",
                     {
@@ -852,12 +892,14 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                         market_probability_a, market_probability_b,
                         edge_a, edge_b, confidence, confidence_flags,
                         prediction_status, model_profile, model_fingerprint,
-                        model_training_max_date, feature_fingerprint,
+                        model_training_max_date,
+                        model_training_available_max_date,
+                        feature_fingerprint,
                         is_valid, invalid_reason, payload_sha256,
                         payload_json, created_at_utc
                     ) VALUES (
                         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                     )
                     """,
                     (
@@ -910,31 +952,22 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                             row.get("model_fingerprint"),
                             "model_fingerprint",
                         ),
-                        (
-                            canonical_date(
-                                row.get("model_training_max_date"),
-                                "model_training_max_date",
-                            )
-                            if optional_scalar(
-                                row.get("model_training_max_date")
-                            )
-                            is not None
-                            else None
-                        ),
+                        validity.model_training_max_date,
+                        validity.model_training_available_max_date,
                         optional_text(
                             row.get("feature_fingerprint"),
                             "feature_fingerprint",
                         ),
-                        int(validity.is_valid),
-                        validity.invalid_reason,
+                        int(prediction_is_valid),
+                        invalid_reason,
                         row_payload_hash,
                         row_payload_json,
                         now,
                     ),
                 )
                 predictions_inserted += 1
-                valid_predictions += int(validity.is_valid)
-                if validity.is_valid:
+                valid_predictions += int(prediction_is_valid)
+                if prediction_is_valid:
                     official_cursor = self.connection.execute(
                         """
                         INSERT OR IGNORE INTO official_predictions(
@@ -946,13 +979,6 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                     )
                     if official_cursor.rowcount == 1:
                         official_selected += 1
-                        settlements_inserted += (
-                            self._settle_pending_observations(
-                                source_match_id,
-                                fallback_run_id=run_key,
-                                now=now,
-                            )
-                        )
             self._complete_run(
                 run_key,
                 accepted_rows=predictions_inserted,
@@ -1038,6 +1064,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         source_system: str = "tennis_explorer",
         metadata: Mapping[str, object] | None = None,
         observed_at_utc: object | None = None,
+        target_date: object | None = None,
     ) -> ObservationReconciliation:
         """Añade observaciones y liquida únicamente mediante ``winner_slug``."""
 
@@ -1050,6 +1077,11 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         )
         rows = _row_dicts(observations)
         metadata_payload = dict(metadata or {})
+        target = (
+            canonical_date(target_date, "target_date")
+            if optional_scalar(target_date) is not None
+            else None
+        )
         observed_argument = (
             canonical_utc_datetime(
                 observed_at_utc,
@@ -1062,7 +1094,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             rows,
             run_type="observation",
             source_system=source,
-            target_date=None,
+            target_date=target,
             metadata=metadata_payload,
             observed_at_utc=observed_argument,
         )
@@ -1085,7 +1117,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 run_id=run_key,
                 run_type="observation",
                 source_system=source,
-                target_date=None,
+                target_date=target,
                 input_rows=len(rows),
                 payload_hash=payload_hash,
                 metadata=metadata_payload,
@@ -1266,8 +1298,10 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 o.observation_id,
                 o.source_match_id,
                 o.winner_slug,
+                o.observed_at_utc,
                 o.is_valid,
                 op.prediction_id AS official_prediction_id,
+                p.prediction_as_of_utc,
                 p.player_a_slug,
                 p.player_b_slug
             FROM observations AS o
@@ -1289,6 +1323,26 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 source_match_id=source_match_id,
                 observation_id=observation_id,
                 payload={"message": "No existe predicción oficial válida."},
+                now=now,
+            )
+            return "queued" if inserted else "already_queued"
+
+        prediction_as_of = row["prediction_as_of_utc"]
+        observed_at = row["observed_at_utc"]
+        if (
+            prediction_as_of is None
+            or observed_at is None
+            or pd.Timestamp(observed_at) <= pd.Timestamp(prediction_as_of)
+        ):
+            inserted = self._queue_issue(
+                issue_type="observation_not_after_prediction",
+                run_id=run_id,
+                source_match_id=source_match_id,
+                observation_id=observation_id,
+                payload={
+                    "prediction_as_of_utc": prediction_as_of,
+                    "observed_at_utc": observed_at,
+                },
                 now=now,
             )
             return "queued" if inserted else "already_queued"
@@ -1382,42 +1436,6 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             (now, source_match_id),
         )
         return "inserted"
-
-    def _settle_pending_observations(
-        self,
-        source_match_id: str,
-        *,
-        fallback_run_id: str,
-        now: str,
-    ) -> int:
-        """Reintenta observaciones válidas recibidas antes de la predicción."""
-
-        rows = self.connection.execute(
-            """
-            SELECT
-                o.observation_id,
-                (
-                    SELECT ro.run_id
-                    FROM run_observations AS ro
-                    WHERE ro.observation_id = o.observation_id
-                    ORDER BY ro.run_id
-                    LIMIT 1
-                ) AS observation_run_id
-            FROM observations AS o
-            WHERE o.source_match_id = ? AND o.is_valid = 1
-            ORDER BY o.observed_at_utc, o.created_at_utc, o.observation_id
-            """,
-            (source_match_id,),
-        ).fetchall()
-        inserted = 0
-        for row in rows:
-            outcome = self._settle_observation(
-                str(row["observation_id"]),
-                run_id=str(row["observation_run_id"] or fallback_run_id),
-                now=now,
-            )
-            inserted += int(outcome == "inserted")
-        return inserted
 
     def _observation_reuse_summary(
         self,
@@ -1634,7 +1652,9 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 p.model_probability_b,
                 p.market_probability_a,
                 p.market_probability_b,
-                p.model_fingerprint
+                p.model_fingerprint,
+                p.model_training_max_date,
+                p.model_training_available_max_date
             FROM official_predictions AS op
             JOIN predictions AS p
                 ON p.prediction_id = op.prediction_id
@@ -1654,6 +1674,73 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             """,
             self.connection,
         )
+
+    def select_pending_result_date(
+        self,
+        *,
+        before_date: object,
+    ) -> date | None:
+        """Selecciona una jornada anterior pendiente sin ocultar reintentos.
+
+        Solo considera fechas con al menos una predicción oficial todavía no
+        liquidada. Primero prioriza jornadas nunca observadas (la más reciente
+        de ellas) y, cuando todas tienen alguna observación, la que lleva más
+        tiempo sin comprobarse. Así cada ejecución hace como máximo una
+        consulta de resultados, sin imponer un límite diario artificial ni
+        atascarse para siempre en un walkover o un resultado ambiguo.
+
+        Parameters
+        ----------
+        before_date:
+            Fecha civil exclusiva; nunca se consulta la propia cartelera que
+            se acaba de predecir.
+        """
+
+        cutoff = canonical_date(before_date, "before_date")
+        row = self.connection.execute(
+            """
+            SELECT
+                m.match_date,
+                CASE
+                    WHEN MAX(r.completed_at_utc) IS NULL
+                        THEN MAX(o.observed_at_utc)
+                    WHEN MAX(o.observed_at_utc) IS NULL
+                        THEN MAX(r.completed_at_utc)
+                    WHEN MAX(r.completed_at_utc) >= MAX(o.observed_at_utc)
+                        THEN MAX(r.completed_at_utc)
+                    ELSE MAX(o.observed_at_utc)
+                END AS last_observed_at_utc
+            FROM matches AS m
+            JOIN official_predictions AS op
+                ON op.source_match_id = m.source_match_id
+            LEFT JOIN settlements AS s
+                ON s.source_match_id = m.source_match_id
+            LEFT JOIN observations AS o
+                ON o.source_match_id = m.source_match_id
+            LEFT JOIN runs AS r
+                ON r.run_type = 'observation'
+               AND r.status = 'complete'
+               AND r.target_date = m.match_date
+            WHERE m.match_date IS NOT NULL
+              AND m.match_date < ?
+              AND s.source_match_id IS NULL
+            GROUP BY m.match_date
+            ORDER BY
+                CASE WHEN last_observed_at_utc IS NULL THEN 0 ELSE 1 END,
+                last_observed_at_utc ASC,
+                m.match_date DESC
+            LIMIT 1
+            """,
+            (cutoff,),
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            return date.fromisoformat(str(row["match_date"]))
+        except ValueError as exc:
+            raise OperationsSchemaError(
+                "La base contiene un match_date no canónico."
+            ) from exc
 
     def load_review_queue(
         self,
@@ -1715,6 +1802,7 @@ def reconcile_observation_dataframe(
     source_system: str = "tennis_explorer",
     metadata: Mapping[str, object] | None = None,
     observed_at_utc: object | None = None,
+    target_date: object | None = None,
 ) -> ObservationReconciliation:
     """Atajo autocontenido para registrar y conciliar observaciones."""
 
@@ -1725,4 +1813,5 @@ def reconcile_observation_dataframe(
             source_system=source_system,
             metadata=metadata,
             observed_at_utc=observed_at_utc,
+            target_date=target_date,
         )

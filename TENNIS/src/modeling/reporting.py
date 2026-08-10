@@ -190,15 +190,23 @@ def render_model_report(
             summary_frame,
             (
                 "gender",
+                "training_source_rows",
                 "training_rows",
+                "training_excluded_unavailable",
                 "training_max_date",
+                "training_available_max_date",
+                "training_as_of_date",
                 "evaluation_rows",
                 "folds",
             ),
             {
                 "gender": "Género",
+                "training_source_rows": "Filas fuente",
                 "training_rows": "Filas entrenamiento final",
-                "training_max_date": "Última fecha",
+                "training_excluded_unavailable": "Excluidas no disponibles",
+                "training_max_date": "Última fecha fuente",
+                "training_available_max_date": "Disponibilidad máxima",
+                "training_as_of_date": "Corte de reentreno",
                 "evaluation_rows": "Predicciones OOF",
                 "folds": "Folds",
             },
@@ -409,18 +417,25 @@ def render_model_report(
             "- No existen cuotas históricas causales: todavía no puede "
             "demostrarse ventaja sobre el mercado ni entrenarse el perfil "
             "`market_enhanced`.",
-            "- `tourney_date` suele ser el inicio del torneo. Congelar el "
-            "bloque completo evita fugas entre rondas, pero pierde señal.",
+            "- `tourney_date` suele ser el inicio del torneo, no la fecha "
+            "real del partido. El sistema aplica un embargo conservador de "
+            "21 días y exige disponibilidad estrictamente anterior al "
+            "corte. Esto evita la fuga conocida entre torneos solapados, "
+            "pero no demuestra causalidad perfecta para una excepción que "
+            "dure más de 21 días; esos casos no deben interpretarse como "
+            "evidencia fuerte.",
             "- El fold de test 2021 se calibra con la temporada atípica 2020. "
             "Se conserva porque mantiene el protocolo y tiene miles de casos.",
             "- La cobertura de rankings, especialmente femenina, varía con el "
             "tiempo. Las comparaciones usan soporte común.",
-            "- Hay colisiones históricas de IDs/fechas de nacimiento, valores "
-            "extremos de descanso y rankings antiguos. Los nulos se señalan; "
-            "no se corrigen biografías ni resultados de forma especulativa.",
+            "- Hay colisiones históricas de IDs/fechas de nacimiento. La DOB "
+            "del maestro actual no se usa como filtro retroactivo porque "
+            "sería información futura; las claves se bloquean en operación "
+            "actual, pero puede quedar contaminación histórica residual. "
+            "Los nulos y rankings antiguos se señalan sin inventar datos.",
             "- 2026 es parcial y no forma parte del backtest principal. Sí "
-            "entra al estimador final, porque ya es pasado para futuras "
-            "predicciones.",
+            "entra al estimador final solo cuando su fecha de disponibilidad "
+            "es estrictamente anterior al corte de reentreno.",
             "- Los hiperparámetros son conservadores y fijos. La fase no "
             "presenta un barrido de hiperparámetros como si fuera evidencia "
             "independiente.",

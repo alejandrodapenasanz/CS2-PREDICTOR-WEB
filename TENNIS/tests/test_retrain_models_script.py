@@ -6,6 +6,7 @@ from datetime import date
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 
 
@@ -17,6 +18,10 @@ from scripts.retrain_models import (  # noqa: E402
     build_parser,
     infer_last_complete_season,
 )
+from src.features import MODEL_FEATURE_COLUMNS  # noqa: E402
+from src.artifact_integrity import build_code_inventory  # noqa: E402
+from src.features.dataset import FEATURE_CODE_PATHS  # noqa: E402
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY  # noqa: E402
 from src.config import (  # noqa: E402
     FEATURE_DATASET_MANIFEST_PATH,
     PHASE7_MODELS_DIR,
@@ -62,21 +67,40 @@ class RetrainModelsScriptTest(unittest.TestCase):
     def test_inferred_end_never_uses_current_incomplete_season(self) -> None:
         """El default se limita a una temporada cerrada y disponible."""
 
-        inferred = infer_last_complete_season(
-            FEATURE_DATASET_MANIFEST_PATH
-        )
-        payload = json.loads(
-            FEATURE_DATASET_MANIFEST_PATH.read_text(encoding="utf-8")
-        )
+        payload = {
+            "fingerprint": "f" * 64,
+            "schema_version": "tennis-features-v2",
+            "source_commit": "a" * 40,
+            "historical_odds_available": False,
+            "source_date_policy": DEFAULT_SOURCE_DATE_POLICY.as_dict(),
+            "code_inventory": list(
+                build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
+            ),
+            "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
+            "datasets": [
+                {"gender": "M", "max_date": "2026-06-30"},
+                {"gender": "F", "max_date": "2025-12-31"},
+            ],
+        }
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT / "tests"
+        ) as temporary:
+            manifest_path = Path(temporary) / "manifest.json"
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+            training_as_of_date = date(2026, 8, 9)
+            inferred = infer_last_complete_season(
+                manifest_path,
+                training_as_of_date,
+            )
         latest_common = min(
             date.fromisoformat(item["max_date"]).year
             for item in payload["datasets"]
             if item["gender"] in {"M", "F"}
         )
 
-        self.assertLessEqual(inferred, date.today().year - 1)
+        self.assertLessEqual(inferred, training_as_of_date.year - 1)
         self.assertEqual(
-            inferred, min(latest_common, date.today().year - 1)
+            inferred, min(latest_common, training_as_of_date.year - 1)
         )
 
 

@@ -23,7 +23,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.tennis_abstract_elo import (  # noqa: E402
     ELO_URLS,
-    MAX_GETS_PER_24_HOURS,
     USER_AGENT,
     EloSchemaError,
     download_tennis_abstract_elo,
@@ -300,7 +299,7 @@ class TennisAbstractEloDownloadTest(unittest.TestCase):
                 clock=lambda: now,
             )
 
-            self.assertEqual(report.get_count, MAX_GETS_PER_24_HOURS)
+            self.assertEqual(report.get_count, 2)
             self.assertEqual(report.downloaded_count, 2)
             self.assertEqual(
                 [call[0] for call in session.calls],
@@ -332,17 +331,15 @@ class TennisAbstractEloDownloadTest(unittest.TestCase):
                 report.manifest_path.read_text(encoding="utf-8")
             )
             self.assertEqual(len(manifest["history"]), 2)
-            self.assertEqual(
-                manifest["max_gets_per_24_hours"],
-                MAX_GETS_PER_24_HOURS,
-            )
+            self.assertTrue(manifest["operator_managed_frequency"])
+            self.assertEqual(manifest["failure_backoff_hours"], 24)
             loaded = load_elo_snapshot(
                 report.results[0].snapshot_path,
                 metadata_path=report.results[0].metadata_path,
             )
             self.assertEqual(len(loaded), 2)
 
-    def test_force_reparses_locally_but_never_bypasses_24h_quota(self) -> None:
+    def test_force_reparses_locally_and_frequency_is_operator_managed(self) -> None:
         """Comprueba que ``force`` consume cero GET durante el cooldown."""
 
         now = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)
@@ -355,23 +352,28 @@ class TennisAbstractEloDownloadTest(unittest.TestCase):
             )
             self.assertEqual(first.get_count, 2)
 
-            no_network = FakeSession([])
+            conditional = FakeSession(
+                [
+                    FakeResponse(304, headers={}),
+                    FakeResponse(304, headers={}),
+                ]
+            )
             forced = download_tennis_abstract_elo(
                 force=True,
                 raw_dir=raw_dir,
-                session=no_network,
+                session=conditional,
                 clock=lambda: now + timedelta(hours=1),
             )
 
-            self.assertEqual(forced.get_count, 0)
-            self.assertEqual(len(no_network.calls), 0)
+            self.assertEqual(forced.get_count, 2)
+            self.assertEqual(len(conditional.calls), 2)
             self.assertEqual(
                 [result.outcome for result in forced.results],
-                ["throttled", "throttled"],
+                ["not_modified", "not_modified"],
             )
             self.assertEqual(len(forced.locally_validated), 2)
 
-    def test_conditional_get_is_sent_only_after_24_hours(self) -> None:
+    def test_conditional_get_reuses_etag_and_last_modified(self) -> None:
         """Usa ETag y Last-Modified tras vencer la ventana, sin más de dos GET."""
 
         now = datetime(2026, 7, 30, 10, 0, tzinfo=UTC)

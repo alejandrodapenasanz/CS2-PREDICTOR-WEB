@@ -1,115 +1,95 @@
 # Informe del sistema Elo de la fase 3
 
-## Ejecución auditada
+> **El informe Elo original queda sustituido por este cierre de fase 9.** El
+> contrato anterior (`sackmann-elo-v2`) usaba `tourney_date` como fecha efectiva
+> inmediata y excluía varios resultados de partidos iniciados. Las cifras de
+> aquel run no describen el sistema activo.
 
-- Fecha de cálculo y auditoría: 30 de julio de 2026.
-- Fuente canónica: `Aneeshers/tennis-sackmann-archive`.
-- Commit fuente: `83733587353df8a41f2fd4f516147d5aa83f5a8d`.
-- Versión del algoritmo: `sackmann-elo-v2`.
-- Base publicada: `data/processed/elo/elo.sqlite3`.
-- Tamaño de la base: 403.329.024 bytes, aproximadamente 384,6 MiB.
-- `PRAGMA integrity_check`: `ok`.
-- Violaciones detectadas por `PRAGMA foreign_key_check`: 0.
-- Segunda ejecución con la misma entrada: omitida de forma idempotente.
+## Contrato activo
 
-Los parámetros activos son rating inicial 1500, escala logística 400,
-`K(n) = 250 / (n + 5) ** 0.4` y mezcla 50/50 entre Elo general y Elo puro de
-superficie. La fórmula, la congelación por fecha y todas las decisiones de
-elegibilidad están en [`elo.md`](elo.md).
+- Algoritmo: `sackmann-elo-v5`.
+- Fuente temporal: `tourney_date` es la fecha aproximada de inicio del torneo,
+  no la fecha real de cada ronda.
+- Política: `sackmann-tourney-start-embargo-v1`, con embargo de 21 días.
+- Disponibilidad: `result_available_date=tourney_date+21 días`; un resultado
+  solo es utilizable si `result_available_date < as_of_date`. La igualdad se
+  excluye y el primer corte utilizable es `tourney_date+22`.
+- `RET`, `DEF`, `ABD` y `ABN` se incluyen cuando el partido se inició y existe
+  un ganador oficial. `W/O`, `Walkover` y `BYE` se excluyen.
+- El diagnóstico DOB de identidades no selecciona eventos históricos. Sus 90
+  claves solo pueden bloquear o degradar inferencia operativa actual.
+- Los universos `M` y `F` son completamente independientes. Dentro de cada
+  género, todos los niveles elegibles alimentan el mismo pool.
 
-## Runs activos
+La fórmula aprobada es rating inicial 1500,
+`K(n)=250/(n+5)^0.4` y mezcla 50/50 entre Elo general y Elo puro de superficie.
+El contrato matemático completo está en [`elo.md`](elo.md).
 
-| Género | `run_id` | Fingerprint de entrada | Rango de eventos |
-|---|---|---|---|
-| M | `elo-m-c94ef28d4994dcda3c94d8e3` | `c94ef28d4994dcda3c94d8e38b0de631a610e677648b8add83c7da7b2b04cc27` | 1967-12-28 a 2026-06-01 |
-| F | `elo-f-4eecb96b73f7f08f40ec2f33` | `4eecb96b73f7f08f40ec2f33b36dfbc74f4486942fc1102bf5c6afd453c2b681` | 1967-12-25 a 2026-06-02 |
+## Ejecución Elo v5 verificada
 
-La base contiene dos runs completos y activos, 8.977 bloques de fecha y
-1.679.231 estados históricos de jugador.
+| Campo | Hombres (`M`) | Mujeres (`F`) |
+|---|---:|---:|
+| Commit Sackmann | `83733587353df8a41f2fd4f516147d5aa83f5a8d` | `83733587353df8a41f2fd4f516147d5aa83f5a8d` |
+| Inicio UTC | 2026-08-09 13:02:58 | 2026-08-09 13:09:33 |
+| Fin UTC | 2026-08-09 13:09:33 | 2026-08-09 13:15:17 |
+| `run_id` | `elo-m-837d7bd8d6c48ae3f17f3e9c` | `elo-f-ec4cffd280c630cab1de03b8` |
+| Fingerprint de entrada | `837d7bd8d6c48ae3f17f3e9c0beb953d79a4bd0da4c0568f7326261914e14fe9` | `ec4cffd280c630cab1de03b8ed276a16b8a63b823111f1e7b6bfdfcb75bc2072` |
+| Rango fuente | 1967-12-28 a 2026-06-01 | 1967-12-25 a 2026-06-02 |
+| Rango efectivo | 1968-01-18 a 2026-06-22 | 1968-01-15 a 2026-06-23 |
+| Bloques efectivos | 4.644 | 4.333 |
+| Partidos incluidos | 959.020 | 769.835 |
+| Filas excluidas | 4.195 | 16.822 |
+| Integridad SQLite | `PRAGMA integrity_check = ok` | `PRAGMA integrity_check = ok` |
 
-## Auditoría de inclusión
+Las exclusiones se reconciliaron con el manifiesto de features generado desde
+el mismo universo: en `M`, 4.188 estados excluidos y 7 autopartidos; en `F`,
+11.882 duplicados, 4.639 estados excluidos, 289 niveles excluidos y 12
+autopartidos. Los contadores de `date_blocks` suman exactamente los partidos
+incluidos de cada género.
 
-| Género | Filas fuente | Incluidas | Excluidas | Duplicados exactos | Nivel `E/J` | Estado del marcador | Mismo jugador | Bloques | Estados |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| M | 963.215 | 929.149 | 34.066 | 0 | 0 | 34.059 | 7 | 4.644 | 897.240 |
-| F | 786.657 | 751.126 | 35.531 | 11.724 | 289 | 23.507 | 11 | 4.333 | 781.991 |
-| **Total** | **1.749.872** | **1.680.275** | **69.597** | **11.724** | **289** | **57.566** | **18** | **8.977** | **1.679.231** |
+## Top 10 de Elo general
 
-Los motivos son mutuamente excluyentes y se asignan por prioridad: nivel,
-estado explícito, mismo jugador y, finalmente, copia exacta. Por eso una copia
-de una fila que ya contiene `RET` se contabiliza como estado, no también como
-duplicado. `sackmann-elo-v2` decide la igualdad sobre las 49 cadenas raw antes
-del tipado.
+Es un top histórico por último estado, sin decaimiento por inactividad. Por eso
+puede contener leyendas retiradas: sirve como prueba de cordura del rating, no
+como ranking de jugadores activos.
 
-## Top 10 de Elo general masculino
+| # | Hombres | Elo | Estado | Mujeres | Elo | Estado |
+|---:|---|---:|---|---|---:|---|
+| 1 | Jannik Sinner | 2832,51 | 2026-06-15 | Aryna Sabalenka | 2757,58 | 2026-06-15 |
+| 2 | Carlos Alcaraz | 2764,66 | 2026-05-04 | Justine Henin | 2728,74 | 2011-02-07 |
+| 3 | Roger Federer | 2654,82 | 2021-07-19 | Ashleigh Barty | 2704,74 | 2022-02-07 |
+| 4 | Novak Djokovic | 2654,46 | 2026-06-15 | Steffi Graf | 2697,98 | 1999-08-23 |
+| 5 | Rafael Nadal | 2585,12 | 2024-12-10 | Elena Rybakina | 2697,82 | 2026-06-15 |
+| 6 | Alexander Zverev | 2585,07 | 2026-06-15 | Lindsay Davenport | 2646,73 | 2008-09-15 |
+| 7 | Juan Martín del Potro | 2540,29 | 2022-02-28 | Iga Swiatek | 2627,75 | 2026-06-15 |
+| 8 | Robin Söderling | 2533,21 | 2011-08-01 | Mirra Andreeva | 2627,29 | 2026-06-15 |
+| 9 | Arthur Fils | 2527,30 | 2026-05-27 | Coco Gauff | 2626,49 | 2026-06-15 |
+| 10 | Jack Draper | 2501,22 | 2026-05-04 | Jessica Pegula | 2621,01 | 2026-06-15 |
 
-Es el top absoluto del último estado disponible de cada jugador, sin filtro de
-actividad ni decaimiento por inactividad.
+## Ejemplo reproducible de `get_elo`
 
-| Puesto | Jugador | ID | Elo general | Partidos | Último estado |
-|---:|---|---:|---:|---:|---:|
-| 1 | Jannik Sinner | 206173 | 2848,145 | 532 | 2026-05-25 |
-| 2 | Carlos Alcaraz | 207989 | 2754,480 | 451 | 2026-04-13 |
-| 3 | Roger Federer | 103819 | 2656,167 | 1.563 | 2021-06-28 |
-| 4 | Novak Djokovic | 104925 | 2656,026 | 1.439 | 2026-05-25 |
-| 5 | Rafael Nadal | 104745 | 2583,098 | 1.377 | 2024-11-19 |
-| 6 | Alexander Zverev | 100644 | 2576,970 | 877 | 2026-05-25 |
-| 7 | Juan Martin del Potro | 105223 | 2549,358 | 719 | 2022-02-07 |
-| 8 | Arthur Fils | 209950 | 2538,284 | 302 | 2026-04-22 |
-| 9 | Robin Soderling | 104417 | 2534,690 | 587 | 2011-07-11 |
-| 10 | Jack Draper | 207733 | 2514,767 | 338 | 2026-03-18 |
+Para Carlos Alcaraz (`player_id=207989`, `M`) sobre hard:
 
-## Top 10 de Elo general femenino
+| `as_of_date` | `state_date` usada | Elo general | Elo hard | Elo combinado | Partidos general/hard |
+|---|---|---:|---:|---:|---:|
+| 2020-01-01 | 2019-10-28 | 1983,7371 | 1696,7762 | 1840,2567 | 31 / 5 |
+| 2026-01-01 | 2025-11-30 | 2764,6241 | 2600,7016 | 2682,6629 | 438 / 205 |
 
-| Puesto | Jugadora | ID | Elo general | Partidos | Último estado |
-|---:|---|---:|---:|---:|---:|
-| 1 | Aryna Sabalenka | 214544 | 2759,521 | 687 | 2026-05-25 |
-| 2 | Justine Henin | 200003 | 2736,862 | 621 | 2011-01-17 |
-| 3 | Ashleigh Barty | 202458 | 2728,607 | 375 | 2022-01-17 |
-| 4 | Steffi Graf | 200414 | 2726,050 | 1.018 | 1999-06-21 |
-| 5 | Elena Rybakina | 214981 | 2707,010 | 542 | 2026-05-25 |
-| 6 | Lindsay Davenport | 200128 | 2673,114 | 928 | 2008-08-25 |
-| 7 | Iga Swiatek | 216347 | 2640,048 | 508 | 2026-05-25 |
-| 8 | Coco Gauff | 221103 | 2634,295 | 412 | 2026-05-25 |
-| 9 | Mirra Andreeva | 259799 | 2625,604 | 237 | 2026-05-25 |
-| 10 | Jessica Pegula | 202468 | 2619,849 | 720 | 2026-05-25 |
-
-Los 20 IDs se resolvieron contra el maestro de jugadores de su propio género.
-La presencia de figuras retiradas es esperable bajo la decisión aprobada de
-mostrar el top absoluto sin regresión por inactividad; no representa un ranking
-de jugadores activos.
-
-## Ejemplo de consulta `get_elo` as-of
-
-Consulta de Novak Djokovic, ID 104925, universo `M`, superficie `Hard`:
-
-| `as_of_date` | Estado recuperado | Elo general | Elo Hard puro | Combinado | Partidos generales | Partidos Hard |
-|---:|---:|---:|---:|---:|---:|---:|
-| 2010-01-01 | 2009-11-22 | 2636,998744 | 2546,323114 | 2591,660929 | 409 | 217 |
-| 2025-01-01 | 2024-12-30 | 2708,915097 | 2628,529786 | 2668,722441 | 1.381 | 830 |
-
-En ambos casos `state_date < as_of_date`. La consulta de 2025 no modifica ni
-reescribe el resultado histórico de 2010.
+En ambos cortes se cumple `state_date < as_of_date`, el `run_id` es
+`elo-m-837d7bd8d6c48ae3f17f3e9c` y el commit coincide con el que consumen las
+features. La consulta se obtiene mediante `src.elo.service.get_elo`; un jugador
+sin estado anterior recibe 1500 y queda marcado como cold start.
 
 ## Validación
 
-La ejecución final de:
+- La política de embargo prueba igualdad excluida y primera disponibilidad en
+  `D+22` (`tests/test_temporal_embargo.py`).
+- La invariancia as-of se prueba calculando el mismo corte antes y después de
+  añadir resultados futuros (`tests/test_elo_engine.py` y
+  `tests/test_elo_pipeline.py`).
+- La separación por género, mezcla de superficie, estados prepartido,
+  persistencia, hashes e inventario de código tienen cobertura focal.
+- Resultado automatizado final, incluidos los tests focales y la suite completa:
+  `329/329 tests correctos`.
 
-```powershell
-python -m unittest discover -s tests -v
-```
-
-produjo 47 tests correctos. Entre ellos:
-
-- añadir partidos futuros deja exactamente igual un Elo `as_of` anterior;
-- todos los partidos con la misma fecha usan el snapshot previo común;
-- una fecha no puede reabrirse ni persistirse fuera de orden;
-- el mismo `player_id` en `M` y `F` permanece aislado;
-- cada superficie mantiene su rating y contador independientes;
-- solo una copia raw exacta se deduplica;
-- un bloque SQLite fallido se revierte como una unidad;
-- un run incompleto nunca sustituye al activo.
-
-La revisión de cordura de los nombres queda expuesta en los dos top 10
-anteriores para validación humana, tal como exige esta fase.
-
+El cierre consolidado y sus limitaciones están en [`audit.md`](audit.md).
