@@ -2,9 +2,15 @@
 Lanzador unificado del repositorio.
 
 - Reenvía todos los argumentos al pipeline de CS2.
-- Si CS2 termina correctamente, ejecuta el pipeline diario de TENNIS.
-- Con -Retrain, ambos pipelines reentrenan sus respectivos modelos.
-- Con -DryRun o -WhatIf, solo se ejecuta el dry-run de CS2 y TENNIS se omite.
+- Si CS2 termina correctamente, publica Telegram y después ejecuta TENNIS.
+- Un fallo de Telegram no impide que TENNIS se ejecute.
+- TENNIS entrena o reutiliza sus modelos en todo arranque operativo completo.
+- Con -Retrain, CS2 también reentrena y TENNIS acepta el flag por compatibilidad.
+- -Retrain no se reenvía al publicador de Telegram.
+- Con -DryRun o -WhatIf, solo se ejecuta el dry-run de CS2; Telegram y
+  TENNIS se omiten.
+- Si TENNIS falla, prevalece su código de salida. Si TENNIS termina bien,
+  se devuelve el código de salida de Telegram.
 
 Puede invocarse desde cualquier ruta porque todos los paths parten de
 $PSScriptRoot.
@@ -44,6 +50,7 @@ $DryRunRequested = (
 )
 
 $Cs2Launcher = Join-Path $PSScriptRoot 'CS2\start.ps1'
+$TelegramLauncher = Join-Path $PSScriptRoot 'TELEGRAM\run_telegram.ps1'
 $TennisLauncher = Join-Path $PSScriptRoot 'TENNIS\run_tennis.ps1'
 $PowerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
     Join-Path $PSHOME 'pwsh.exe'
@@ -54,6 +61,7 @@ $PowerShellExecutable = if ($PSVersionTable.PSEdition -eq 'Core') {
 foreach ($Launcher in @(
     $PowerShellExecutable,
     $Cs2Launcher,
+    $TelegramLauncher,
     $TennisLauncher
 )) {
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
@@ -70,8 +78,18 @@ if ($Cs2ExitCode -ne 0) {
 }
 
 if ($DryRunRequested) {
-    Write-Host '[TENNIS] Omitido porque el lanzador raíz está en modo DryRun/WhatIf.'
+    Write-Host '[TELEGRAM/TENNIS] Omitidos porque el lanzador raíz está en modo DryRun/WhatIf.'
     exit 0
+}
+
+& $PowerShellExecutable -NoProfile -ExecutionPolicy Bypass `
+    -File $TelegramLauncher
+$TelegramExitCode = [int]$LASTEXITCODE
+if ($TelegramExitCode -ne 0) {
+    Write-Warning (
+        "Telegram terminó con código $TelegramExitCode; " +
+        'TENNIS se ejecutará igualmente.'
+    )
 }
 
 $TennisArguments = @()
@@ -82,4 +100,7 @@ if ($RetrainRequested) {
 & $PowerShellExecutable -NoProfile -ExecutionPolicy Bypass `
     -File $TennisLauncher @TennisArguments
 $TennisExitCode = [int]$LASTEXITCODE
-exit $TennisExitCode
+if ($TennisExitCode -ne 0) {
+    exit $TennisExitCode
+}
+exit $TelegramExitCode

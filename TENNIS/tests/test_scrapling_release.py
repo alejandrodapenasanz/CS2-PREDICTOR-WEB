@@ -31,9 +31,7 @@ from src.scrapling_release import (  # noqa: E402
 )
 
 
-RELEASE_URL = (
-    "https://github.com/D4Vinci/Scrapling/releases/tag/v0.4.12"
-)
+RELEASE_URL = "https://github.com/D4Vinci/Scrapling/releases/tag/v0.4.12"
 
 
 class FakeResponse:
@@ -51,9 +49,7 @@ class FakeResponse:
 
         self.status_code = status_code
         self.payload = payload
-        self.headers = headers or {
-            "Content-Type": "application/vnd.github+json; charset=utf-8"
-        }
+        self.headers = headers or {"Content-Type": "application/vnd.github+json; charset=utf-8"}
         self.json_error = json_error
 
     def json(self) -> object:
@@ -74,9 +70,7 @@ class FakeSession:
         """Inicializa la cola de respuestas y el registro de llamadas."""
 
         self.responses = list(responses)
-        self.calls: list[
-            tuple[str, dict[str, str], tuple[float, float], bool]
-        ] = []
+        self.calls: list[tuple[str, dict[str, str], tuple[float, float], bool]] = []
         self.closed = False
 
     def get(
@@ -89,9 +83,7 @@ class FakeSession:
     ) -> FakeResponse:
         """Consume exactamente una respuesta o un error de transporte."""
 
-        self.calls.append(
-            (url, dict(headers), timeout, allow_redirects)
-        )
+        self.calls.append((url, dict(headers), timeout, allow_redirects))
         if not self.responses:
             raise AssertionError("Se realizó un GET offline no previsto.")
         response = self.responses.pop(0)
@@ -191,20 +183,17 @@ class ScraplingReleaseTests(unittest.TestCase):
         self.assertEqual(session.responses, [])
 
     def test_request_session_has_zero_retries(self) -> None:
-        """Configura explícitamente ambos adaptadores con cero reintentos."""
+        """Delega al cliente común con una sola tentativa total."""
 
-        session = build_http_session()
-        try:
-            self.assertEqual(
-                session.get_adapter("https://").max_retries.total,
-                0,
-            )
-            self.assertEqual(
-                session.get_adapter("http://").max_retries.total,
-                0,
-            )
-        finally:
-            session.close()
+        with patch("src.scrapling_release.build_http_client") as factory:
+            session = build_http_session()
+
+        self.assertIs(session, factory.return_value)
+        factory.assert_called_once_with(
+            default_headers={"User-Agent": USER_AGENT},
+            robots_user_agent=USER_AGENT,
+            request_retry_attempts=1,
+        )
 
     def test_transport_error_is_not_retried(self) -> None:
         """Traduce el primer error de red y conserva un único GET."""
@@ -274,9 +263,7 @@ class ScraplingReleaseTests(unittest.TestCase):
                     ScraplingReleaseCheckError,
                     message,
                 ):
-                    check_latest_scrapling_release(
-                        session=FakeSession([response])
-                    )
+                    check_latest_scrapling_release(session=FakeSession([response]))
 
     def test_remote_release_older_than_pin_is_an_error(self) -> None:
         """No interpreta una release remota anterior como estado actualizado."""

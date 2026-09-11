@@ -27,6 +27,7 @@ if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 
 from BBDD import build_db
+from BBDD.round_history_store import ingest_archives as ingest_round_archives
 from cs2model import dataio
 from cs2model.identity import (
     choose_match_team,
@@ -324,6 +325,32 @@ def upsert_match(conn: sqlite3.Connection, record: dict[str, Any], captured_at: 
     return cur.rowcount
 
 
+def _bounded_estimate_float(value: Any, maximum: float) -> float | None:
+    parsed = build_db.safe_float(value)
+    if parsed is None or not math.isfinite(parsed) or not 0.0 <= parsed <= maximum:
+        return None
+    return parsed
+
+
+def _prediction_estimate_values(prediction: dict[str, Any]) -> dict[str, float | str | None]:
+    """Normalize additive estimate metadata before sanctioned persistence."""
+
+    disagreement = prediction.get("ensemble_disagreement")
+    if disagreement is None:
+        disagreement = prediction.get("model_epistemic_std")
+    level = str(prediction.get("estimate_confidence_level") or "").strip().lower()
+    return {
+        "ensemble_disagreement": _bounded_estimate_float(disagreement, 0.5),
+        "estimate_band_half_width": _bounded_estimate_float(
+            prediction.get("estimate_band_half_width"), 0.5
+        ),
+        "estimate_confidence_level": level if level in {"low", "medium", "high"} else None,
+        "estimate_history_coverage": _bounded_estimate_float(
+            prediction.get("estimate_history_coverage"), 1.0
+        ),
+    }
+
+
 def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
     path = run_dir / "predictions_enriched.json"
     payload = read_json(path, [])
@@ -406,6 +433,19 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             ),
             "decision_policy_json": json.dumps(policy, ensure_ascii=False),
             "reliability_score": reliability,
+            "prediction_regime": (
+                pred.get("prediction_regime")
+                if pred.get("prediction_regime") in {"odds", "no_odds"}
+                else "no_odds"
+            ),
+            "prediction_architecture": pred.get("prediction_architecture"),
+            "opening_odds_recovered": int(
+                bool(pred.get("opening_odds_recovered"))
+            ),
+            "opening_odds_captured_at_utc": pred.get(
+                "opening_odds_captured_at_utc"
+            ),
+            **_prediction_estimate_values(pred),
             "opportunity_score": opp_score,
             "opportunity_eligible": int(bool(opp_eligible)),
             "opportunity_rank": pred.get("opportunity_rank"),
@@ -505,6 +545,7 @@ def upsert_prediction_ledger(
     if trace.get("is_fallback") or not trace.get("artifact_sha256"):
         invalid_reasons.append("untraced_or_fallback_artifact")
     status = "invalid" if invalid_reasons else "open"
+    estimate_values = _prediction_estimate_values(pred)
     now = utcnow()
     conn.execute(
         """
@@ -512,10 +553,14 @@ def upsert_prediction_ledger(
             match_id, hltv_match_id, team1_id, team2_id, kickoff_utc,
             predicted_at_utc, model_version, artifact_sha256, config_sha256,
             feature_policy_sha256, prob_team1, decision_prob_team1,
-            reliability_score, prediction_json, features_json, data_quality_json,
-            ledger_status, invalid_reason, created_at_utc, updated_at_utc
+            reliability_score, prediction_regime, prediction_architecture,
+            opening_odds_recovered, opening_odds_captured_at_utc,
+            ensemble_disagreement, estimate_band_half_width,
+            estimate_confidence_level, estimate_history_coverage, prediction_json,
+            features_json, data_quality_json, ledger_status, invalid_reason,
+            created_at_utc, updated_at_utc
         )
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(match_id) DO UPDATE SET
             hltv_match_id=excluded.hltv_match_id,
             team1_id=excluded.team1_id,
@@ -529,6 +574,14 @@ def upsert_prediction_ledger(
             prob_team1=excluded.prob_team1,
             decision_prob_team1=excluded.decision_prob_team1,
             reliability_score=excluded.reliability_score,
+            prediction_regime=excluded.prediction_regime,
+            prediction_architecture=excluded.prediction_architecture,
+            opening_odds_recovered=excluded.opening_odds_recovered,
+            opening_odds_captured_at_utc=excluded.opening_odds_captured_at_utc,
+            ensemble_disagreement=excluded.ensemble_disagreement,
+            estimate_band_half_width=excluded.estimate_band_half_width,
+            estimate_confidence_level=excluded.estimate_confidence_level,
+            estimate_history_coverage=excluded.estimate_history_coverage,
             prediction_json=excluded.prediction_json,
             features_json=excluded.features_json,
             data_quality_json=excluded.data_quality_json,
@@ -536,6 +589,7 @@ def upsert_prediction_ledger(
             invalid_reason=excluded.invalid_reason,
             updated_at_utc=excluded.updated_at_utc
         WHERE prediction_ledger.ledger_status='open'
+          AND excluded.ledger_status='open'
           AND excluded.predicted_at_utc > prediction_ledger.predicted_at_utc
           AND excluded.predicted_at_utc < excluded.kickoff_utc
         """,
@@ -553,6 +607,18 @@ def upsert_prediction_ledger(
             probability,
             build_db.safe_float(pred.get("decision_prob_team1")),
             build_db.safe_float(pred.get("reliability_score")),
+            (
+                pred.get("prediction_regime")
+                if pred.get("prediction_regime") in {"odds", "no_odds"}
+                else "no_odds"
+            ),
+            pred.get("prediction_architecture"),
+            int(bool(pred.get("opening_odds_recovered"))),
+            pred.get("opening_odds_captured_at_utc"),
+            estimate_values["ensemble_disagreement"],
+            estimate_values["estimate_band_half_width"],
+            estimate_values["estimate_confidence_level"],
+            estimate_values["estimate_history_coverage"],
             json.dumps(pred, ensure_ascii=False),
             json.dumps(row.get("features"), ensure_ascii=False),
             json.dumps(row.get("data_quality"), ensure_ascii=False),
@@ -860,6 +926,12 @@ def ingest_run(
         )
         for key, value in asset_counts.items():
             counts[key] += value
+        conn.commit()
+        round_report = ingest_round_archives(conn, run_dir, apply=True)
+        for key, value in round_report["counts"].items():
+            counts[f"round_history_{key}"] += value
+        if round_report["quarantine_reasons"]:
+            print("[round-history] quarantine=" + json.dumps(round_report["quarantine_reasons"]))
         counts["team_ranking_snapshots_rows"] += build_db.insert_team_rankings(conn.cursor(), team_ids_by_hltv)
         conn.execute(
             """

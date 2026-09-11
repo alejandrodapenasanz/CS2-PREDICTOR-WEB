@@ -399,6 +399,106 @@ class CausalHistoryStateTest(unittest.TestCase):
             state.apply_date_block(first, (_result(first, 3, 4),))
         self.assertEqual(state.last_date, first)
 
+    def test_availability_batch_sorts_effective_dates_without_intraday_order(
+        self,
+    ) -> None:
+        """Un lote tardío usa match_date para forma y una sola disponibilidad."""
+
+        first = date(2024, 8, 1)
+        second = date(2024, 8, 3)
+        available = date(2024, 8, 10)
+        results = (
+            _result(second, 2, 1),
+            _result(first, 1, 2),
+            _result(second, 1, 3),
+        )
+        forward = CausalHistoryState()
+        reverse = CausalHistoryState()
+
+        forward.apply_availability_batch(available, results)
+        reverse.apply_availability_batch(available, reversed(results))
+
+        with self.assertRaises(HistoryDateOrderError):
+            forward.snapshot(
+                "M",
+                1,
+                2,
+                surface="Hard",
+                as_of_date=available,
+            )
+        cutoff = date(2024, 8, 11)
+        forward_snapshot = forward.snapshot(
+            "M",
+            1,
+            2,
+            surface="Hard",
+            as_of_date=cutoff,
+        )
+        reverse_snapshot = reverse.snapshot(
+            "M",
+            1,
+            2,
+            surface="Hard",
+            as_of_date=cutoff,
+        )
+
+        self.assertEqual(forward_snapshot, reverse_snapshot)
+        self.assertEqual(forward_snapshot.recent_n_matches_a, 3)
+        self.assertAlmostEqual(forward_snapshot.recent_n_win_rate_a, 2 / 3)
+        self.assertEqual(forward_snapshot.h2h_global_matches, 2)
+        self.assertEqual(forward_snapshot.rest_days_a, 8)
+
+    def test_late_arrival_is_inserted_by_match_date_and_only_visible_later(
+        self,
+    ) -> None:
+        """Una llegada futura no reescribe la vista previa capturada."""
+
+        available = date(2024, 9, 10)
+        state = CausalHistoryState()
+        state.apply_availability_batch(
+            available,
+            (
+                _result(date(2024, 9, 1), 1, 2),
+                _result(date(2024, 9, 3), 2, 1),
+            ),
+        )
+        before = state.snapshot(
+            "M",
+            1,
+            2,
+            surface="Hard",
+            as_of_date=date(2024, 9, 11),
+        )
+
+        late_availability = date(2024, 9, 12)
+        state.apply_availability_batch(
+            late_availability,
+            (_result(date(2024, 9, 2), 1, 2),),
+        )
+        after = state.snapshot(
+            "M",
+            1,
+            2,
+            surface="Hard",
+            as_of_date=date(2024, 9, 13),
+        )
+
+        self.assertEqual(before.recent_n_matches_a, 2)
+        self.assertEqual(before.h2h_global_matches, 2)
+        self.assertEqual(after.recent_n_matches_a, 3)
+        self.assertAlmostEqual(after.recent_n_win_rate_a, 2 / 3)
+        self.assertEqual(after.h2h_global_matches, 3)
+        self.assertEqual(after.rest_days_a, 10)
+        with self.assertRaises(HistoryDateOrderError):
+            state.snapshot(
+                "M",
+                1,
+                2,
+                surface="Hard",
+                as_of_date=date(2024, 9, 11),
+            )
+        self.assertEqual(before.recent_n_matches_a, 2)
+
 
 class HistoricalMatchResultValidationTest(unittest.TestCase):
     """Comprueba que la frontera pública no normaliza valores ambiguos."""

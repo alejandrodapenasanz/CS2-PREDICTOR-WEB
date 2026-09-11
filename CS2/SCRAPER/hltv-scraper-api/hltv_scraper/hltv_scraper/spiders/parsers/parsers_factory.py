@@ -1,25 +1,26 @@
-from .parser import Parser
-from .match import MatchParser
-from .team import TeamParser
-from .team_ranking import TeamRankingParser
-from .upcoming_match_team import UpcomingMatchTeamParser
 from .map_holders import MapHoldersParser
+from .match import MatchParser
 from .match_team import MatchTeamParser
 from .match_teams_box import MatchTeamsBoxParser
-from .table_stats import TableStatsParser
 from .news import NewsParser
+from .parser import Parser
 from .player_profile import PlayerProfileParser
 from .player_profile_link import PlayerProfileLinkParser
+from .player_role_stats import PlayerRoleStatsParser
+from .player_statistics import PlayerStatisticsParser
+from .player_sumary_stats import PlayerSummaryStatParser
 from .players_profile import PlayersProfileParser
 from .results import ResultsParser
-from .team_results import TeamResultsParser
+from .table_stats import TableStatsParser
+from .team import TeamParser
 from .team_profile import TeamProfileParser
+from .team_ranking import TeamRankingParser
+from .team_results import TeamResultsParser
 from .teams_profile_link import TeamProfileLinkParser
 from .upcoming_match import UpcomingMatchParser
+from .upcoming_match_team import UpcomingMatchTeamParser
 from .upcoming_matches import UpcomingMatchesParser
-from .player_sumary_stats import PlayerSummaryStatParser
-from .player_statistics import PlayerStatisticsParser
-from .player_role_stats import PlayerRoleStatsParser
+
 
 class ParsersFactory:
     @staticmethod

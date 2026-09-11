@@ -1,17 +1,31 @@
-flask>=3.1.1
-flasgger==0.9.7.1
-Scrapy==2.14.2
-cloudscraper==1.2.71
-itemadapter==0.11.0
-pytest>=8.0.0
-pytest-flask>=1.3.0
-pytest-cov>=4.0.0
-requests>=2.32.4
-scrapy-impersonate==1.7.0
-nodriver==0.50.3
+# Direct dependency policy for the isolated CS2 scraper environment.
+# Runtime and lock generation target CPython 3.13. The generated
+# requirements.lock.txt is the only installation input used in production.
+#
+# The verified flasgger wheel is stored in wheels/. Installers must pass
+# --find-links wheels so the lock resolves that local artifact.
 
-# Scrapling: fetch por tiers con impersonation TLS/JA3 (curl_cffi) + navegador
-# stealth que resuelve Cloudflare. Requiere Python 3.10-3.13 (NO 3.14).
-# Tras instalar: `python -c "from scrapling.cli import install; install([], standalone_mode=False)"`
-# para descargar los navegadores. Ver LAST change.md.
-scrapling[fetchers]>=0.4.10
+# HTTP API and Scrapy runtime.
+Flask>=3.1.1,<4
+flasgger==0.9.7.1
+Scrapy>=2.14.2,<2.15
+cloudscraper>=1.2.71,<1.3
+itemadapter>=0.11,<0.12
+parsel>=1.10,<2
+requests>=2.32.4,<3
+
+# Impersonation and browser-backed optional tiers.
+scrapy-impersonate>=1.7,<1.8
+curl-cffi>=0.15,<0.16
+nodriver>=0.50.3,<0.51
+scrapling[fetchers]>=0.4.10,<0.5
+
+# Offline/unit test tooling.
+packaging>=24,<27
+pytest>=8,<10
+pytest-flask>=1.3,<2
+pytest-cov>=4,<8
+
+# Local and CI quality gates.
+mypy>=1.19,<2.4
+ruff>=0.15,<0.17

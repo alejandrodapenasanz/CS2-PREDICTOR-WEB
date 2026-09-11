@@ -118,12 +118,8 @@ def economic_backtest(
         if close1 is not None and close2 is not None and close_side is not None:
             closing_market = devig_two_way(close1, close2)
             clv_price = closing_line_value(quoted_odds, close_side)
-            close_probability = closing_market[
-                "fair_prob_team1" if side == "team1" else "fair_prob_team2"
-            ]
-            open_probability = opening_market[
-                "fair_prob_team1" if side == "team1" else "fair_prob_team2"
-            ]
+            close_probability = closing_market["fair_prob_team1" if side == "team1" else "fair_prob_team2"]
+            open_probability = opening_market["fair_prob_team1" if side == "team1" else "fair_prob_team2"]
             clv_probability = close_probability - open_probability
             closing_overround = closing_market["overround"]
 
@@ -152,27 +148,16 @@ def economic_backtest(
 
     wins = sum(1 for bet in bets if bet["won"])
     clv_bets = [bet for bet in bets if bet["clv_price"] is not None]
-    average_clv = (
-        sum(float(bet["clv_price"]) for bet in clv_bets) / len(clv_bets)
-        if clv_bets else None
-    )
-    median_clv = (
-        statistics.median(float(bet["clv_price"]) for bet in clv_bets)
-        if clv_bets else None
-    )
-    mean_probability_clv = (
-        sum(float(bet["clv_probability"]) for bet in clv_bets) / len(clv_bets)
-        if clv_bets else None
-    )
+    average_clv = sum(float(bet["clv_price"]) for bet in clv_bets) / len(clv_bets) if clv_bets else None
+    median_clv = statistics.median(float(bet["clv_price"]) for bet in clv_bets) if clv_bets else None
+    mean_probability_clv = sum(float(bet["clv_probability"]) for bet in clv_bets) / len(clv_bets) if clv_bets else None
     stake_weighted_clv = (
         sum(float(bet["clv_price"]) * float(bet["stake"]) for bet in clv_bets)
         / sum(float(bet["stake"]) for bet in clv_bets)
-        if clv_bets else None
+        if clv_bets
+        else None
     )
-    average_vig = (
-        sum(float(bet["opening_overround"]) for bet in bets) / len(bets)
-        if bets else None
-    )
+    average_vig = sum(float(bet["opening_overround"]) for bet in bets) / len(bets) if bets else None
     return {
         "schema_version": 2,
         "n_bets": len(bets),
@@ -194,8 +179,7 @@ def economic_backtest(
             "mean_probability_clv": mean_probability_clv,
             "stake_weighted_price_clv": stake_weighted_clv,
             "positive_rate": (
-                sum(float(bet["clv_price"]) > 0.0 for bet in clv_bets) / len(clv_bets)
-                if clv_bets else None
+                sum(float(bet["clv_price"]) > 0.0 for bet in clv_bets) / len(clv_bets) if clv_bets else None
             ),
         },
         "limits": {

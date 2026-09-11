@@ -39,6 +39,15 @@ from .bayesian_bt import BayesianBradleyTerry, BTRating
 from .kalman_rating import KalmanRating, KalmanTeamRating
 from .compositional_bo3 import compositional_bo3_features
 from .config import get_runtime_config
+from .pistols import OPPONENT_DIFF_COLUMNS, PISTOL_COLUMNS, PISTOL_DIFF_COLUMNS
+from .roster_rating import (
+    ObservedLineup,
+    RosterAdjustment,
+    adjust_elo_rating,
+    adjust_glicko_rating,
+    complete_player_ids,
+    evaluate_roster_change,
+)
 
 PERIOD_DAYS = 7           # periodo de rating semanal (alineado con ranking HLTV)
 FORM_HALF_LIFE = 120.0    # días: vida media del decaimiento de la forma
@@ -172,6 +181,28 @@ BAYES_BT_FEATURE_COLUMNS = BAYES_BT_DIFF_COLUMNS + BAYES_BT_SYM_COLUMNS
 KALMAN_DIFF_COLUMNS = ["kalman_mean_diff", "kalman_prob_centered"]
 KALMAN_SYM_COLUMNS = ["kalman_available", "kalman_games_min", "kalman_uncertainty_sum"]
 KALMAN_FEATURE_COLUMNS = KALMAN_DIFF_COLUMNS + KALMAN_SYM_COLUMNS
+
+# Challenger estructural: replica Elo/Glicko sobre todo el historico y solo
+# descuenta credito cuando el 5v5 anunciado demuestra un cambio de nucleo frente
+# al ultimo 5v5 real ya observado. Estas columnas son candidate-only en train.py.
+ROSTER_RATING_FEATURE_COLUMNS = [
+    "roster_glicko_prob_centered",
+    "roster_elo_prob_centered",
+    "roster_rating_comparable",
+    "roster_core_change_team1",
+    "roster_core_change_team2",
+    "roster_retained_players_team1",
+    "roster_retained_players_team2",
+    "roster_replacements_team1",
+    "roster_replacements_team2",
+    "roster_credit_fraction_team1",
+    "roster_credit_fraction_team2",
+    "roster_glicko_rating_team1",
+    "roster_glicko_rating_team2",
+    "roster_glicko_rd_team1",
+    "roster_glicko_rd_team2",
+]
+ROSTER_RATING_CANDIDATE_FEATURE_COLUMNS = ["roster_glicko_prob_centered"]
 
 BO3_COMPOSITIONAL_DIFF_COLUMNS = ["bo3_compositional_prob_centered"]
 BO3_COMPOSITIONAL_SYM_COLUMNS = [
@@ -316,6 +347,24 @@ CONTEXT_FEATURE_COLUMNS = [
     "context_bracket_lower",
 ] + CONTEXT_STAGE_COLUMNS
 
+# Optional, explicit interactions used only when the segment-interaction
+# experiment is requested.  Every directional column changes sign under a
+# team swap; the stage/environment flags and absolute Elo bins are symmetric.
+SEGMENT_INTERACTION_DIFF_COLUMNS = [
+    "elo_diff_x_lan",
+    "elo_diff_x_online",
+    *[f"elo_diff_x_{column.removeprefix('context_')}" for column in CONTEXT_STAGE_COLUMNS],
+    "elo_diff_x_gap_0_50",
+    "elo_diff_x_gap_50_100",
+    "elo_diff_x_gap_100_200",
+    "elo_diff_x_gap_200_300",
+    "elo_diff_x_gap_300_plus",
+]
+SEGMENT_INTERACTION_FEATURE_COLUMNS = [
+    *SEGMENT_INTERACTION_DIFF_COLUMNS,
+    "segment_interactions_available",
+]
+
 PLAYER_DIFF_COLUMNS = [
     "player_rating_diff",
     "player_rating_max_diff",
@@ -381,6 +430,9 @@ EXTENDED_DIFF_COLUMNS = (
     + BAYES_BT_DIFF_COLUMNS
     + KALMAN_DIFF_COLUMNS
     + BO3_COMPOSITIONAL_DIFF_COLUMNS
+    + SEGMENT_INTERACTION_DIFF_COLUMNS
+    + PISTOL_DIFF_COLUMNS
+    + OPPONENT_DIFF_COLUMNS
 )
 
 
@@ -504,6 +556,38 @@ def context_match_features(match: dict[str, Any]) -> dict[str, float]:
     )
     feats["context_available"] = 1.0 if meaningful else 0.0
     return feats
+
+
+def segment_interaction_features(features: dict[str, float]) -> dict[str, float]:
+    """Derive optional Elo/context interactions from frozen pre-match inputs."""
+    output = {column: 0.0 for column in SEGMENT_INTERACTION_FEATURE_COLUMNS}
+    try:
+        elo_diff = float(features.get("elo_diff", 0.0))
+    except (TypeError, ValueError):
+        return output
+    if not math.isfinite(elo_diff):
+        return output
+    output["segment_interactions_available"] = 1.0
+    output["elo_diff_x_lan"] = elo_diff * float(features.get("context_is_lan", 0.0) or 0.0)
+    output["elo_diff_x_online"] = elo_diff * float(features.get("context_is_online", 0.0) or 0.0)
+    for stage_column in CONTEXT_STAGE_COLUMNS:
+        output[f"elo_diff_x_{stage_column.removeprefix('context_')}"] = (
+            elo_diff * float(features.get(stage_column, 0.0) or 0.0)
+        )
+    gap = abs(elo_diff)
+    gap_column = (
+        "elo_diff_x_gap_0_50"
+        if gap < 50.0
+        else "elo_diff_x_gap_50_100"
+        if gap < 100.0
+        else "elo_diff_x_gap_100_200"
+        if gap < 200.0
+        else "elo_diff_x_gap_200_300"
+        if gap < 300.0
+        else "elo_diff_x_gap_300_plus"
+    )
+    output[gap_column] = elo_diff
+    return output
 
 
 def analytics_match_features(match: dict[str, Any]) -> dict[str, float]:
@@ -782,6 +866,7 @@ def external_snapshot_features(match: dict[str, Any]) -> dict[str, float]:
     """Features externas que `dataio` unio respetando captured_at_utc."""
     out: dict[str, float] = {}
     for payload_key, columns in (
+        ("pistol_snapshot_features", PISTOL_COLUMNS),
         ("ranking_snapshot_features", RANKING_FEATURE_COLUMNS),
         ("roster_snapshot_features", ROSTER_FEATURE_COLUMNS),
     ):
@@ -815,6 +900,14 @@ class ChronologicalState:
         self.ratings: dict[str, Rating] = {}
         self.current_period: int | None = None
         self.period_buffer: dict[str, list[_Match]] = defaultdict(list)
+
+        # Estado challenger separado. El rating campeon anterior no se muta ni
+        # se pierde; ambos reciben exactamente los mismos resultados causales.
+        self.roster_rating_config = get_runtime_config().roster_rating
+        self.roster_ratings: dict[str, Rating] = {}
+        self.roster_period_buffer: dict[str, list[_Match]] = defaultdict(list)
+        self.roster_elos: dict[str, float] = defaultdict(lambda: 1500.0)
+        self.last_actual_lineups: dict[str, ObservedLineup] = {}
 
         # Elo baseline
         self.elos: dict[str, float] = defaultdict(lambda: 1500.0)
@@ -936,6 +1029,13 @@ class ChronologicalState:
             self.ratings[key] = r
         return r
 
+    def _get_roster_rating(self, key: str) -> Rating:
+        rating = self.roster_ratings.get(key)
+        if rating is None:
+            rating = Rating()
+            self.roster_ratings[key] = rating
+        return rating
+
     @staticmethod
     def _elapsed_days(last_date: datetime | None, as_of: datetime | None) -> float:
         if last_date is None or as_of is None:
@@ -966,12 +1066,56 @@ class ChronologicalState:
                 self.glicko._decay_rd(rr, elapsed)
         return rr
 
+    def roster_rating_asof(self, key: str, period: int) -> Rating:
+        """Roster challenger state with the same inactivity decay as champion."""
+
+        rating = self.roster_ratings.get(key)
+        if rating is None:
+            return Rating()
+        result = rating.copy()
+        if rating.last_period is not None:
+            elapsed = max(0, period - rating.last_period)
+            if elapsed > 0:
+                self.glicko._decay_rd(result, elapsed)
+        return result
+
+    def _roster_preview(
+        self,
+        key: str,
+        period: int,
+        date_obj: datetime | None,
+        announced_lineup: Any,
+    ) -> tuple[Rating, float, RosterAdjustment]:
+        adjustment = evaluate_roster_change(
+            announced_lineup,
+            self.last_actual_lineups.get(key),
+            date_obj,
+            self.roster_rating_config,
+        )
+        rating = self.roster_rating_asof(key, period)
+        # A deep rebuild takes effect at its next match. If this organisation
+        # already played earlier in the same weekly period, first settle those
+        # old-core results in the challenger preview, then discount the credit.
+        pending = self.roster_period_buffer.get(key) or []
+        if adjustment.core_changed and pending:
+            rating = self.glicko.update(rating, list(pending), period)
+        rating = adjust_glicko_rating(rating, adjustment, self.roster_rating_config)
+        elo = adjust_elo_rating(
+            self.roster_elos[key], adjustment, self.roster_rating_config
+        )
+        return rating, elo, adjustment
+
     def _flush_period(self, period: int) -> None:
-        if not self.period_buffer:
+        if not self.period_buffer and not self.roster_period_buffer:
             return
         for key, matches in self.period_buffer.items():
             self.ratings[key] = self.glicko.update(self._get_rating(key), matches, period)
         self.period_buffer = defaultdict(list)
+        for key, matches in self.roster_period_buffer.items():
+            self.roster_ratings[key] = self.glicko.update(
+                self._get_roster_rating(key), matches, period
+            )
+        self.roster_period_buffer = defaultdict(list)
 
     def _advance_to(self, period: int) -> None:
         if self.current_period is None:
@@ -1109,6 +1253,8 @@ class ChronologicalState:
         date_obj: datetime | None,
         event: str = "",
         fmt: str = "bo3",
+        announced_lineup_a: Any = None,
+        announced_lineup_b: Any = None,
     ) -> dict[str, float]:
         fmt = fmt if fmt in {"bo1", "bo3", "bo5"} else "bo3"
         period = _period_index(date_obj)
@@ -1120,6 +1266,17 @@ class ChronologicalState:
 
         elo_a, elo_b = self.elos[a_key], self.elos[b_key]
         elo_prob = 1.0 / (1.0 + 10.0 ** (-(elo_a - elo_b) / 400.0))
+
+        roster_ra, roster_elo_a, roster_a_adjustment = self._roster_preview(
+            a_key, period, date_obj, announced_lineup_a
+        )
+        roster_rb, roster_elo_b, roster_b_adjustment = self._roster_preview(
+            b_key, period, date_obj, announced_lineup_b
+        )
+        roster_glicko_prob = self.glicko.win_probability(roster_ra, roster_rb)
+        roster_elo_prob = 1.0 / (
+            1.0 + 10.0 ** (-(roster_elo_a - roster_elo_b) / 400.0)
+        )
 
         ts_a = self.ts_ratings.get(a_key) or self.trueskill.default()
         ts_b = self.ts_ratings.get(b_key) or self.trueskill.default()
@@ -1204,6 +1361,23 @@ class ChronologicalState:
             "glicko_rd_sum": ra.rd + rb.rd,
             "elo_diff": elo_a - elo_b,
             "elo_prob_centered": elo_prob - 0.5,
+            "roster_glicko_prob_centered": roster_glicko_prob - 0.5,
+            "roster_elo_prob_centered": roster_elo_prob - 0.5,
+            "roster_rating_comparable": float(
+                roster_a_adjustment.comparable or roster_b_adjustment.comparable
+            ),
+            "roster_core_change_team1": float(roster_a_adjustment.core_changed),
+            "roster_core_change_team2": float(roster_b_adjustment.core_changed),
+            "roster_retained_players_team1": float(roster_a_adjustment.retained_players),
+            "roster_retained_players_team2": float(roster_b_adjustment.retained_players),
+            "roster_replacements_team1": float(roster_a_adjustment.replacements),
+            "roster_replacements_team2": float(roster_b_adjustment.replacements),
+            "roster_credit_fraction_team1": roster_a_adjustment.credit_fraction,
+            "roster_credit_fraction_team2": roster_b_adjustment.credit_fraction,
+            "roster_glicko_rating_team1": roster_ra.rating,
+            "roster_glicko_rating_team2": roster_rb.rating,
+            "roster_glicko_rd_team1": roster_ra.rd,
+            "roster_glicko_rd_team2": roster_rb.rd,
             "trueskill_diff": ts_a.mu - ts_b.mu,
             "trueskill_prob_centered": ts_prob - 0.5,
             "trueskill_available": rating_ready,
@@ -1323,6 +1497,29 @@ class ChronologicalState:
         self.period_buffer[a].append(_Match(rb_snap, 1.0 if a_won else 0.0))
         self.period_buffer[b].append(_Match(ra_snap, 0.0 if a_won else 1.0))
 
+        prematch_lineups = match.get("prematch_lineups") or {}
+        roster_ra_snap, roster_elo_a, roster_a_adjustment = self._roster_preview(
+            a, period, date_obj, prematch_lineups.get("team1")
+        )
+        roster_rb_snap, roster_elo_b, roster_b_adjustment = self._roster_preview(
+            b, period, date_obj, prematch_lineups.get("team2")
+        )
+        for key, rating, adjustment in (
+            (a, roster_ra_snap, roster_a_adjustment),
+            (b, roster_rb_snap, roster_b_adjustment),
+        ):
+            if adjustment.core_changed:
+                self.roster_ratings[key] = rating
+                self.roster_period_buffer.pop(key, None)
+            else:
+                self._get_roster_rating(key)
+        self.roster_period_buffer[a].append(
+            _Match(roster_rb_snap, 1.0 if a_won else 0.0)
+        )
+        self.roster_period_buffer[b].append(
+            _Match(roster_ra_snap, 0.0 if a_won else 1.0)
+        )
+
         # Elo: actualización online inmediata.
         elo_a, elo_b = self.elos[a], self.elos[b]
         exp_a = 1.0 / (1.0 + 10.0 ** (-(elo_a - elo_b) / 400.0))
@@ -1330,6 +1527,24 @@ class ChronologicalState:
         k = 32.0
         self.elos[a] = elo_a + k * (actual_a - exp_a)
         self.elos[b] = elo_b + k * ((1.0 - actual_a) - (1.0 - exp_a))
+
+        roster_exp_a = 1.0 / (
+            1.0 + 10.0 ** (-(roster_elo_a - roster_elo_b) / 400.0)
+        )
+        self.roster_elos[a] = roster_elo_a + k * (actual_a - roster_exp_a)
+        self.roster_elos[b] = roster_elo_b + k * (
+            (1.0 - actual_a) - (1.0 - roster_exp_a)
+        )
+
+        # The current actual five becomes evidence only after the result was
+        # observed. Missing/incomplete lineups never overwrite earlier truth.
+        actual_lineups = match.get("actual_lineups") or {}
+        for key, side in ((a, "team1"), (b, "team2")):
+            identifiers = complete_player_ids(
+                actual_lineups.get(side), self.roster_rating_config.lineup_size
+            )
+            if identifiers is not None and date_obj is not None:
+                self.last_actual_lineups[key] = ObservedLineup(identifiers, date_obj)
 
         # TrueSkill: actualización online inmediata (ganador vs perdedor).
         ts_a = self.ts_ratings.get(a) or self.trueskill.default()
@@ -1565,6 +1780,8 @@ class ChronologicalState:
 def build_training_frame(
     rows: list[dict[str, Any]],
     form_half_life: float = FORM_HALF_LIFE,
+    *,
+    freeze_civil_day: bool = False,
 ) -> tuple[list[dict[str, float]], list[int], list[dict[str, Any]], ChronologicalState]:
     """Itera el histórico cronológicamente y devuelve (X, y, meta, estado_final).
 
@@ -1579,13 +1796,20 @@ def build_training_frame(
     def emit(m: dict[str, Any]) -> None:
         match_context = m.get("match_context") or {}
         feats = state.emit_features(
-            m["team1_key"], m["team2_key"], m.get("date_obj"), m.get("event") or "", m.get("format") or "bo3"
+            m["team1_key"],
+            m["team2_key"],
+            m.get("date_obj"),
+            m.get("event") or "",
+            m.get("format") or "bo3",
+            (m.get("prematch_lineups") or {}).get("team1"),
+            (m.get("prematch_lineups") or {}).get("team2"),
         )
         feats.update(state.regime_features(m))
         feats.update(analytics_match_features(m))
         feats.update(announced_lineup_features(m))
         feats.update(event_metadata_features(m))
         feats.update(context_match_features(m))
+        feats.update(segment_interaction_features(feats))
         feats.update(player_snapshot_features(m))
         feats.update(external_snapshot_features(m))
         X.append(feats)
@@ -1599,6 +1823,17 @@ def build_training_frame(
                 "format": m.get("format"),
                 "environment": match_context.get("environment"),
                 "stage": match_context.get("stage"),
+                "elo_diff": feats.get("elo_diff"),
+                "glicko_prob_team1": float(feats.get("glicko_prob_centered", 0.0)) + 0.5,
+                "roster_glicko_prob_team1": (
+                    float(feats.get("roster_glicko_prob_centered", 0.0)) + 0.5
+                ),
+                "roster_core_change_team1": feats.get("roster_core_change_team1", 0.0),
+                "roster_core_change_team2": feats.get("roster_core_change_team2", 0.0),
+                "roster_retained_players_team1": feats.get("roster_retained_players_team1", 0.0),
+                "roster_retained_players_team2": feats.get("roster_retained_players_team2", 0.0),
+                "roster_credit_fraction_team1": feats.get("roster_credit_fraction_team1", 1.0),
+                "roster_credit_fraction_team2": feats.get("roster_credit_fraction_team2", 1.0),
                 "patch_version": m.get("patch_version") or match_context.get("patch_version"),
                 "map_pool_regime": state.map_pool_regime_label(m.get("date_obj")),
                 "datetime_precision": m.get("datetime_precision") or "exact",
@@ -1619,7 +1854,7 @@ def build_training_frame(
         has_unknown_order = any(
             row.get("datetime_precision") == "date_only" for row in day_rows
         )
-        if has_unknown_order:
+        if freeze_civil_day or has_unknown_order:
             # No inventamos una hora para la semilla historica: todos los
             # partidos del dia se predicen con el estado al inicio del dia.
             for match in day_rows:

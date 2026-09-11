@@ -68,6 +68,7 @@ def _write_fixture(root: Path, *, corrupt_hash: bool = False) -> Path:
     conflicts_path = root / "ranking_conflicts.csv"
     conflicts_path.write_text("gender,player_id\n", encoding="utf-8")
     manifest = {
+        "created_at_utc": "2026-08-01T00:00:00+00:00",
         "fingerprint": "f" * 64,
         "schema_version": "tennis-features-v1",
         "source_commit": "a" * 40,

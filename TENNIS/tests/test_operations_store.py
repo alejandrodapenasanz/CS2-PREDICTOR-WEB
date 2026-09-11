@@ -75,6 +75,7 @@ def prediction_row(
     probability_b: object = 0.38,
     prediction_as_of_utc: str = "2026-07-30T07:05:00+00:00",
     source_retrieved_at_utc: str = "2026-07-30T07:00:00+00:00",
+    scheduled_start_utc: object = "2026-07-30T10:00:00+00:00",
     status: str = "scheduled",
     mapping_status: str = "mapped",
     prediction_status: str = "predicted",
@@ -87,6 +88,7 @@ def prediction_row(
         "prediction_date": "2026-07-30",
         "prediction_as_of_utc": prediction_as_of_utc,
         "source_retrieved_at_utc": source_retrieved_at_utc,
+        "scheduled_start_utc": scheduled_start_utc,
         "source_snapshot_sha256": "a" * 64,
         "tournament": "Example Open",
         "tournament_href": "/example-open/",
@@ -284,6 +286,54 @@ def test_first_valid_prediction_is_official_and_immutable() -> None:
                 WHERE source_match_id = 'te:match-1'
                 """
             )
+
+
+def test_official_prediction_requires_strictly_prestart_utc_timestamp() -> None:
+    """La persistencia replica la puerta antes/igual/después/TBD fail-closed."""
+
+    rows = [
+        prediction_row(
+            source_match_id="te:before-start",
+            scheduled_start_utc="2026-07-30T10:00:00+00:00",
+        ),
+        prediction_row(
+            source_match_id="te:equal-start",
+            scheduled_start_utc="2026-07-30T07:05:00+00:00",
+        ),
+        prediction_row(
+            source_match_id="te:after-start",
+            scheduled_start_utc="2026-07-30T07:00:00+00:00",
+        ),
+        prediction_row(
+            source_match_id="te:tbd-start",
+            scheduled_start_utc=None,
+        ),
+    ]
+    with temporary_store() as store:
+        summary = store.register_prediction_run(
+            "prediction-start-gate",
+            pd.DataFrame(rows),
+        )
+        stored = {
+            str(row["source_match_id"]): row
+            for row in store.connection.execute(
+                "SELECT source_match_id, is_valid, invalid_reason FROM predictions"
+            ).fetchall()
+        }
+        official = store.load_official_predictions()
+
+    assert summary.valid_predictions == 1
+    assert summary.official_predictions_selected == 1
+    assert official["source_match_id"].tolist() == ["te:before-start"]
+    for source_match_id in ("te:equal-start", "te:after-start"):
+        assert stored[source_match_id]["is_valid"] == 0
+        assert "prediction_not_strictly_before_scheduled_start" in str(
+            stored[source_match_id]["invalid_reason"]
+        )
+    assert stored["te:tbd-start"]["is_valid"] == 0
+    assert "scheduled_start_utc_missing" in str(
+        stored["te:tbd-start"]["invalid_reason"]
+    )
 
 
 def test_settlement_uses_winner_slug_not_source_position() -> None:

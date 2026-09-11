@@ -1,7 +1,9 @@
 import unittest
+import sqlite3
 from datetime import datetime, timedelta
 
 from PIPELINE.enrich_predictions import (
+    build_favorite_upset_records,
     decision_probability_team1,
     favorite_upset_summary,
     reliability_adjusted_probability,
@@ -71,11 +73,46 @@ class OperationalProbabilityTests(unittest.TestCase):
     def test_favorite_upset_summary_counts_recent_favorite_losses(self):
         asof = datetime(2026, 7, 3, 18, 0)
         records = [
-            {"date_obj": asof - timedelta(days=5), "team1_key": "a", "team2_key": "b", "favorite_key": "a", "favorite_lost": True, "favorite_source": "market_opening_or_snapshot_odds"},
-            {"date_obj": asof - timedelta(days=15), "team1_key": "a", "team2_key": "c", "favorite_key": "a", "favorite_lost": False, "favorite_source": "market_opening_or_snapshot_odds"},
-            {"date_obj": asof - timedelta(days=20), "team1_key": "d", "team2_key": "a", "favorite_key": "d", "favorite_lost": False, "favorite_source": "market_opening_or_snapshot_odds"},
-            {"date_obj": asof - timedelta(days=30), "team1_key": "a", "team2_key": "f", "favorite_key": None, "favorite_lost": False, "favorite_source": "missing_market_odds"},
-            {"date_obj": asof - timedelta(days=120), "team1_key": "a", "team2_key": "e", "favorite_key": "a", "favorite_lost": True, "favorite_source": "market_opening_or_snapshot_odds"},
+            {
+                "date_obj": asof - timedelta(days=5),
+                "team1_key": "a",
+                "team2_key": "b",
+                "favorite_key": "a",
+                "favorite_lost": True,
+                "favorite_source": "market_opening_or_snapshot_odds",
+            },
+            {
+                "date_obj": asof - timedelta(days=15),
+                "team1_key": "a",
+                "team2_key": "c",
+                "favorite_key": "a",
+                "favorite_lost": False,
+                "favorite_source": "market_opening_or_snapshot_odds",
+            },
+            {
+                "date_obj": asof - timedelta(days=20),
+                "team1_key": "d",
+                "team2_key": "a",
+                "favorite_key": "d",
+                "favorite_lost": False,
+                "favorite_source": "market_opening_or_snapshot_odds",
+            },
+            {
+                "date_obj": asof - timedelta(days=30),
+                "team1_key": "a",
+                "team2_key": "f",
+                "favorite_key": None,
+                "favorite_lost": False,
+                "favorite_source": "missing_market_odds",
+            },
+            {
+                "date_obj": asof - timedelta(days=120),
+                "team1_key": "a",
+                "team2_key": "e",
+                "favorite_key": "a",
+                "favorite_lost": True,
+                "favorite_source": "market_opening_or_snapshot_odds",
+            },
         ]
 
         summary = favorite_upset_summary(records, "a", asof, window_days=90)
@@ -83,8 +120,60 @@ class OperationalProbabilityTests(unittest.TestCase):
         self.assertEqual(summary["favorite_losses"], 1)
         self.assertEqual(summary["favorite_matches"], 2)
         self.assertEqual(summary["played_matches"], 4)
-        self.assertEqual(summary["market_odds_matches"], 3)
+        self.assertFalse(summary["odds_required"])
+        self.assertEqual(summary["history_scope"], "rolling_window")
         self.assertAlmostEqual(summary["favorite_loss_rate"], 0.5)
+
+    def test_model_favorite_history_counts_no_odds_and_requires_51_percent(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript(
+            """
+            CREATE TABLE teams (
+                team_id INTEGER PRIMARY KEY,
+                hltv_id TEXT,
+                name TEXT NOT NULL
+            );
+            CREATE TABLE prediction_ledger (
+                ledger_id INTEGER PRIMARY KEY,
+                hltv_match_id TEXT,
+                kickoff_utc TEXT,
+                prob_team1 REAL,
+                actual_team1_win INTEGER,
+                prediction_regime TEXT,
+                team1_id INTEGER,
+                team2_id INTEGER,
+                ledger_status TEXT
+            );
+            INSERT INTO teams(team_id, hltv_id, name) VALUES
+                (1, '101', 'Alpha'),
+                (2, '202', 'Beta');
+            INSERT INTO prediction_ledger(
+                ledger_id, hltv_match_id, kickoff_utc, prob_team1,
+                actual_team1_win, prediction_regime, team1_id, team2_id,
+                ledger_status
+            ) VALUES
+                (1, 'm1', '2026-01-01T12:00:00Z', 0.70, 0, 'no_odds', 1, 2, 'evaluated'),
+                (2, 'm2', '2026-02-01T12:00:00Z', 0.40, 0, 'no_odds', 1, 2, 'evaluated'),
+                (3, 'm3', '2026-03-01T12:00:00Z', 0.505, 1, 'no_odds', 1, 2, 'evaluated'),
+                (4, 'm4', '2026-04-01T12:00:00Z', 0.80, 0, 'odds', 1, 2, 'invalid');
+            """
+        )
+
+        records = build_favorite_upset_records(conn)
+        summary = favorite_upset_summary(
+            records,
+            "hltv:101",
+            datetime(2026, 8, 1),
+        )
+        conn.close()
+
+        self.assertEqual([record["match_id"] for record in records], ["m1", "m2"])
+        self.assertEqual(records[0]["prediction_regime"], "no_odds")
+        self.assertEqual(summary["favorite_losses"], 1)
+        self.assertEqual(summary["favorite_matches"], 1)
+        self.assertAlmostEqual(summary["favorite_loss_rate"], 1.0)
+        self.assertFalse(summary["odds_required"])
+        self.assertEqual(summary["history_scope"], "all_database_history")
 
 
 if __name__ == "__main__":

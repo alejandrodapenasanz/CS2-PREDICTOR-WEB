@@ -1,7 +1,9 @@
 from typing import Any
+
+from ..utils import is_team_in_upcoming_match
 from .parser import Parser
 from .upcoming_match_team import UpcomingMatchTeamParser as UMTP
-from ..utils import is_team_in_upcoming_match
+
 
 class UpcomingMatchParser(Parser):
     @staticmethod

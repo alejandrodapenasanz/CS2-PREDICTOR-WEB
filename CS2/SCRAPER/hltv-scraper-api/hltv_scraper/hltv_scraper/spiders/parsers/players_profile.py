@@ -1,6 +1,9 @@
 from typing import Any
+
 import scrapy
+
 from .parser import Parser
+
 
 class PlayersProfileParser(Parser):
     @staticmethod
@@ -14,4 +17,4 @@ class PlayersProfileParser(Parser):
                 "img": selector.css("img::attr(src)").get(),
             }
             profiles_data.append(data)
-        return profiles_data    
+        return profiles_data

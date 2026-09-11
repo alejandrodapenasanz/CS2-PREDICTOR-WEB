@@ -179,6 +179,9 @@ class ModelTrainingTest(unittest.TestCase):
 
             self.assertFalse(first.skipped)
             self.assertTrue(second.skipped)
+            self.assertEqual(first.promotion.action, "bootstrapped")
+            self.assertEqual(second.promotion.action, "active_reused")
+            self.assertFalse(first.retention.applied)
             self.assertEqual(
                 [
                     item["path"]
@@ -251,7 +254,12 @@ class ModelTrainingTest(unittest.TestCase):
             payload = json.loads(
                 published_manifest.read_text(encoding="utf-8")
             )
-            payload["code_inventory"][0]["sha256"] = "0" * 64
+            inference_entry = next(
+                item
+                for item in payload["code_inventory"]
+                if item["path"] == "src/modeling/calibration.py"
+            )
+            inference_entry["sha256"] = "0" * 64
             published_manifest.write_text(
                 json.dumps(payload), encoding="utf-8"
             )

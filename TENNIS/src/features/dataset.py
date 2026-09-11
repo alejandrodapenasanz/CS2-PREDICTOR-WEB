@@ -19,8 +19,8 @@ import logging
 from pathlib import Path, PurePosixPath
 import re
 import shutil
-import tempfile
 from typing import Final, Iterable, Literal, Mapping, Sequence, cast
+import uuid
 
 import pandas as pd
 
@@ -1370,6 +1370,33 @@ def _safe_cleanup_staging(path: Path, output_dir: Path) -> None:
         shutil.rmtree(resolved)
 
 
+def _create_build_workspace(output_dir: Path) -> Path:
+    """Crea un workspace unico heredando la ACL del almacen.
+
+    En Windows con Python 3.13, ``tempfile.mkdtemp`` crea deliberadamente el
+    directorio con una DACL privada equivalente a ``0o700``. Al publicar el
+    hijo mediante ``os.replace`` esa DACL viaja al run inmutable y otro
+    proceso puede quedar sin lectura. ``Path.mkdir`` usa la herencia normal
+    del padre, que es el contrato necesario para los artefactos compartidos.
+    """
+
+    resolved_output = output_dir.resolve()
+    for _ in range(32):
+        candidate = resolved_output / f".feature-build-{uuid.uuid4().hex}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise FeatureDatasetError(
+                "No se pudo crear el workspace heredable de features."
+            ) from exc
+        return candidate
+    raise FeatureDatasetError(
+        "No se pudo reservar un nombre unico para el workspace de features."
+    )
+
+
 def build_training_datasets(
     *,
     manifest_path: Path = SACKMANN_MANIFEST_PATH,
@@ -1501,12 +1528,7 @@ def build_training_datasets(
                 )
             return current
 
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=".feature-build-",
-            dir=resolved_output,
-        )
-    )
+    staging = _create_build_workspace(resolved_output)
     work_dir = staging / "work"
     publish_dir = staging / "publish"
     work_dir.mkdir()

@@ -1,5 +1,7 @@
 from typing import Any
+
 from .parser import Parser
+
 
 class UpcomingMatchTeamParser(Parser):
     @staticmethod

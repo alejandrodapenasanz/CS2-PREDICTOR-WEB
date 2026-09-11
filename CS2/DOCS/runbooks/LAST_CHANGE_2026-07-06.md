@@ -1,5 +1,9 @@
 # LAST change — runbook de verificación (scraper Scrapling + mejora del modelo)
 
+> **Aviso de supersesión (2026-08-11):** las instrucciones de instalación de
+> dependencias de este runbook son históricas. Usa `CS2/README.md`, CPython 3.13
+> y los locks hashados; no instales `requirements.txt` ni CatBoost por separado.
+
 > **Si eres un agente y te acaban de decir "Lee last change.md": este fichero es tu
 > encargo completo.** Contiene (A) qué se cambió y por qué, (B) el protocolo exacto
 > para verificar que el modelo ha mejorado, y (C) qué reportar. No necesitas más

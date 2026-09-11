@@ -15,13 +15,14 @@
      P) BLACKBOX: export de respaldo si se pide -BackupBlackbox.
      9) Genera ..\WEB\data.js para el dashboard compartido.
 
-  La configuracion operativa (guardas HLTV, deps, exit-codes) vive en
+  La configuracion operativa (guardas HLTV y exit-codes) vive en
   PIPELINE\pipeline.config.psd1. Los helpers en PIPELINE\pipeline.helpers.ps1.
 
   Flags:
      -SkipScrape             No scrapear; usa el ultimo run existente.
      -AllowOfflineFallback   Si el scrape falla, continuar con el ultimo run.
      -Retrain                Forzar reentrenamiento del modelo.
+     -RollbackModel          Restaurar last_good y salir sin ejecutar la pipeline.
      -NoDb                   No inicializar ni ingerir en la BBDD.
      -MaxMatches N           Limitar numero de partidos a scrapear (debug; no publica master).
      -PlayerDelay S          Retardo entre peticiones de stats de jugador.
@@ -50,6 +51,7 @@ param(
     [switch]$SkipScrape,
     [switch]$AllowOfflineFallback,
     [switch]$Retrain,
+    [switch]$RollbackModel,
     [switch]$NoDb,
     [ValidateRange(0, [int]::MaxValue)][int]$MaxMatches = 0,
     [ValidateRange(0.0, [double]::MaxValue)][double]$PlayerDelay = 1.5,
@@ -83,6 +85,7 @@ $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $Root
 $WebRoot = Join-Path $RepoRoot "WEB"
 $LogDir = Join-Path $Root "PIPELINE\logs"
+$LogRetentionKeep = 2
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 # --- Helpers + configuracion -------------------------------------------------
@@ -100,6 +103,43 @@ $TimingJson = Join-Path $LogDir ("start_" + $stamp + ".timing.json")
 Initialize-PipelineLogging -JsonlPath $LogJsonl -Level $LogLevel
 
 $script:TranscriptStarted = $false
+
+function Invoke-PipelineLogRetention {
+    <# Conserva los ficheros agrupados de la ejecucion actual y la anterior. #>
+    if ($script:DryRun) { return }
+    try {
+        $entries = @(
+            Get-ChildItem -LiteralPath $LogDir -File -Force -ErrorAction Stop |
+                ForEach-Object {
+                    $match = [regex]::Match(
+                        $_.Name,
+                        '^(?:start|retention|retrain_decision)_(?<token>\d{8}_\d{6})(?:\.|$)'
+                    )
+                    if ($match.Success) {
+                        [pscustomobject]@{ File = $_; Token = $match.Groups['token'].Value }
+                    }
+                }
+        )
+        $keepTokens = @(
+            $entries.Token | Sort-Object -Unique -Descending |
+                Select-Object -First $LogRetentionKeep
+        )
+        foreach ($entry in $entries) {
+            if ($entry.Token -in $keepTokens) { continue }
+            $item = Get-Item -LiteralPath $entry.File.FullName -Force -ErrorAction Stop
+            if (
+                $item.Directory.FullName -ne $LogDir -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
+            ) {
+                throw "Ruta de log no segura para la poda: $($item.FullName)"
+            }
+            Remove-Item -LiteralPath $item.FullName -Force -ErrorAction Stop
+        }
+    } catch {
+        Write-Warning ("No se pudo completar la rotacion de logs: " + $_.Exception.Message)
+    }
+}
+
 try {
     Start-Transcript -Path $script:StartPs1Log -Force | Out-Null
     $script:TranscriptStarted = $true
@@ -108,6 +148,7 @@ try {
 } catch {
     Write-Log ("no se pudo iniciar transcript: " + $_.Exception.Message) -Level WARN
 }
+Invoke-PipelineLogRetention
 
 trap {
     Write-Log ("ERROR start.ps1: " + $_.Exception.Message) -Level ERROR
@@ -116,6 +157,7 @@ trap {
     if ($script:TranscriptStarted) {
         try { Stop-Transcript | Out-Null; $script:TranscriptStarted = $false } catch { }
     }
+    Invoke-PipelineLogRetention
     exit $script:ExitCode
 }
 
@@ -164,6 +206,22 @@ function Invoke-Stage {
 }
 
 # --- Validacion de combinaciones de parametros -------------------------------
+$RollbackConflicts = @()
+if ($RollbackModel) {
+    $RollbackConflicts = @(
+        'SkipScrape', 'AllowOfflineFallback', 'Retrain', 'NoDb', 'MaxMatches',
+        'PlayerDelay', 'SkipPlayerStats', 'SkipTeamProfiles', 'SkipMatchAssets',
+        'MatchAssetsLimit', 'MatchAssetsDelay', 'SkipAnalytics', 'SkipRankings',
+        'SkipWarmup', 'SkipSameDayRecovery', 'RecoveryWindowDays', 'RecoveryDelay',
+        'RecreateScraperVenv', 'BackupBlackbox', 'RestoreBlackbox', 'SkipAutoHeal'
+    ) | Where-Object { $PSBoundParameters.ContainsKey($_) }
+    if ($RollbackConflicts.Count -gt 0) {
+        throw (
+            "-RollbackModel es un modo exclusivo y no se puede combinar con: " +
+            (($RollbackConflicts | ForEach-Object { "-$_" }) -join ', ')
+        )
+    }
+}
 if ($NoDb -and $BackupBlackbox) { Write-Log "-BackupBlackbox se ignora con -NoDb (no se toca la BBDD)." -Level WARN }
 if ($NoDb -and $RestoreBlackbox) { Write-Log "-RestoreBlackbox se ignora con -NoDb (no se toca la BBDD)." -Level WARN }
 if ($SkipScrape -and $MaxMatches -gt 0) { Write-Log "-MaxMatches se ignora con -SkipScrape (no hay scrape)." -Level WARN }
@@ -173,8 +231,12 @@ if ($script:DryRun) { Write-Log "MODO DRY-RUN: no se ejecutara ninguna etapa (so
 # --- Rutas de scripts --------------------------------------------------------
 $DailyStart = Join-Path $Root "PIPELINE\start.py"
 $Enrich = Join-Path $Root "PIPELINE\enrich_predictions.py"
+$Freshness = Join-Path $Root "PIPELINE\freshness.py"
 $BuildWeb = Join-Path $WebRoot "build_web.py"
 $Train = Join-Path $Root "MODEL\train.py"
+$ManageModels = Join-Path $Root "MODEL\manage_models.py"
+$CheckRetrain = Join-Path $Root "MODEL\check_retrain.py"
+$ModelConfig = Join-Path $Root "MODEL\config.yaml"
 $ContextCalibration = Join-Path $Root "MODEL\analyze_context_calibration.py"
 $DriftMonitor = Join-Path $Root "MODEL\monitor_drift.py"
 $BuildDb = Join-Path $Root "BBDD\build_db.py"
@@ -189,14 +251,35 @@ $Blackbox = Join-Path $Root "BBDD\blackbox.py"
 $BlackboxDir = Join-Path $Root "BBDD\BLACKBOX"
 $DbPath = Join-Path $Root "BBDD\cs2.db"
 
+# --- Gestion exclusiva del modelo: rollback y salida temprana ----------------
+if ($RollbackModel) {
+    $ModelPython = Ensure-ModelPython -ProjectRoot $Root -DryRun:$script:DryRun
+    $RollbackCommand = "{0} {1} rollback" -f $ModelPython, $ManageModels
+    if ($script:DryRun) {
+        Write-Log ("DRY-RUN: se ejecutaria: " + $RollbackCommand) -Level INFO -Color DarkYellow
+    } else {
+        try {
+            Invoke-Native $ModelPython @($ManageModels, "rollback") "Rollback modelo a last_good" | Out-Null
+        } catch {
+            $script:ExitCode = $Cfg.ExitCodes.Train
+            throw
+        }
+        Write-Log "Rollback de modelo completado; scraper, BBDD y pipeline no se ejecutan." -Level INFO -Color Green
+    }
+    $script:ExitCode = 0
+    if ($script:TranscriptStarted) {
+        try { Stop-Transcript | Out-Null; $script:TranscriptStarted = $false } catch { }
+    }
+    exit 0
+}
+
 # --- Fase 0: Python del modelo y del scraper ---------------------------------
-$ModelPython = Ensure-ModelPython -Imports $Cfg.ModelImports -PipPackages $Cfg.ModelPipPackages -DryRun:$script:DryRun
+$ModelPython = Ensure-ModelPython -ProjectRoot $Root -DryRun:$script:DryRun
 $ScraperPython = $null
 if (-not $SkipScrape) {
     Set-ScrapeGuardsFromConfig -Guards $Cfg.ScrapeGuards
     Ensure-CaBundle -ScraperDir (Join-Path $Root "SCRAPER\hltv-scraper-api") -DryRun:$script:DryRun
     $ScraperPython = Ensure-ScraperPython -ScraperDir (Join-Path $Root "SCRAPER\hltv-scraper-api") `
-        -BaseImports $Cfg.ScraperBaseImports -StealthImports $Cfg.ScraperStealthImports `
         -Recreate:$RecreateScraperVenv -DryRun:$script:DryRun
 }
 Write-Log ("Python modelo:  " + $ModelPython) -Level DEBUG
@@ -234,8 +317,13 @@ if (-not $NoDb) {
 }
 
 # --- Etapa 2: scrape ----------------------------------------------------------
+$script:HltvAttemptStatus = 'not_attempted'
+$script:HltvAttemptedAtUtc = $null
+$script:HltvAttemptError = $null
+$script:HltvFallbackUsed = $false
 if (-not $SkipScrape) {
     Invoke-Stage -Name "Scrape online de HLTV + actualizacion de pendientes" -FailExit $Cfg.ExitCodes.Scrape -Action {
+        $script:HltvAttemptedAtUtc = [DateTime]::UtcNow.ToString('o')
         $StartArgs = @($DailyStart, "--player-delay", [string]$PlayerDelay)
         if (-not $Quiet) { $StartArgs += "--verbose" }
         if ($MaxMatches -gt 0) { $StartArgs += @("--max-matches", [string]$MaxMatches, "--no-promote") }
@@ -253,8 +341,12 @@ if (-not $SkipScrape) {
         if ($AllowOfflineFallback) { $StartArgs += "--allow-empty-scrape" }
         try {
             Invoke-Native $ScraperPython $StartArgs "Scrape online HLTV" | Out-Null
+            $script:HltvAttemptStatus = 'success'
         } catch {
             if ($AllowOfflineFallback) {
+                $script:HltvAttemptStatus = 'failed'
+                $script:HltvAttemptError = $_.Exception.Message
+                $script:HltvFallbackUsed = $true
                 Write-Log ("Scrape fallo; continuo con ultimo run por -AllowOfflineFallback: " + $_.Exception.Message) -Level WARN
             } else {
                 throw
@@ -296,6 +388,67 @@ if (-not $NoDb) {
     }
 }
 
+# --- Decision de reentreno automatico (solo tras disponer de datos validados) -
+# Manual (-Retrain) y artefacto ausente ya tienen prioridad en $needTrain. Si no
+# aplica ninguno, el contador causal compara la fecha del ultimo entrenamiento
+# con filas etiquetadas de dias estrictamente posteriores.
+if ((-not $needTrain) -and (-not $NoDb)) {
+    $RetrainDecisionPath = Join-Path $LogDir ("retrain_decision_" + $stamp + ".json")
+    if ($script:DryRun) {
+        Write-Log (
+            "DRY-RUN: se evaluaria auto-retrain con MODEL\check_retrain.py " +
+            "despues de ingest, reparacion y health gate; no se escribe ni se lee decision."
+        ) -Level INFO -Color DarkYellow
+    } else {
+        try {
+            Invoke-Native $ModelPython @(
+                $CheckRetrain,
+                "--db", $DbPath,
+                "--artifact", $Artifact,
+                "--config", $ModelConfig,
+                "--output", $RetrainDecisionPath
+            ) "Decision auto-retrain" | Out-Null
+            if (-not (Test-Path -LiteralPath $RetrainDecisionPath -PathType Leaf)) {
+                throw "check_retrain.py no genero $RetrainDecisionPath"
+            }
+            $RetrainDecision = Get-Content -LiteralPath $RetrainDecisionPath -Raw | ConvertFrom-Json
+            $DecisionPropertyNames = @($RetrainDecision.PSObject.Properties.Name)
+            foreach ($RequiredProperty in @(
+                'should_train', 'n_new_labeled', 'threshold', 'cutoff', 'newest_date', 'reason'
+            )) {
+                if ($DecisionPropertyNames -notcontains $RequiredProperty) {
+                    throw "Decision auto-retrain invalida: falta '$RequiredProperty'."
+                }
+            }
+        } catch {
+            $script:ExitCode = $Cfg.ExitCodes.Train
+            throw
+        }
+
+        if ($DecisionPropertyNames -contains 'registry_warnings') {
+            foreach ($RegistryWarning in @($RetrainDecision.registry_warnings)) {
+                Write-Log ([string]$RegistryWarning) -Level WARN -Color Yellow
+            }
+        }
+        $DecisionCutoff = if ($null -eq $RetrainDecision.cutoff) { '<none>' } else { [string]$RetrainDecision.cutoff }
+        $DecisionNewest = if ($null -eq $RetrainDecision.newest_date) { '<none>' } else { [string]$RetrainDecision.newest_date }
+        Write-Log (
+            "Auto-retrain: n_new={0}/{1} cutoff={2} newest={3} should_train={4} reason={5}" -f
+            [int]$RetrainDecision.n_new_labeled,
+            [int]$RetrainDecision.threshold,
+            $DecisionCutoff,
+            $DecisionNewest,
+            [bool]$RetrainDecision.should_train,
+            [string]$RetrainDecision.reason
+        ) -Level INFO
+        if ([bool]$RetrainDecision.should_train) {
+            $needTrain = $true
+            $script:StageTotal += 1
+            Write-Log "Umbral automatico alcanzado: el challenger pasara por la misma puerta que -Retrain." -Level INFO -Color Cyan
+        }
+    }
+}
+
 # --- Etapa 4: entrenamiento (solo si -Retrain o falta el artefacto) ----------
 if ($needTrain) {
     Invoke-Stage -Name "Entrenando modelo (Glicko-2 + calibracion) con master actualizado" -FailExit $Cfg.ExitCodes.Train -Action {
@@ -307,6 +460,21 @@ if ($needTrain) {
 
 # --- Etapa 5: enrich ----------------------------------------------------------
 Invoke-Stage -Name "Enriqueciendo predicciones (modelo + odds + flags + calibracion)" -FailExit $Cfg.ExitCodes.Enrich -Action {
+    $FreshnessArgs = @(
+        $Freshness,
+        '--run-dir', $RunDir,
+        '--attempt-status', $script:HltvAttemptStatus
+    )
+    if ($script:HltvAttemptedAtUtc) {
+        $FreshnessArgs += @('--attempted-at-utc', $script:HltvAttemptedAtUtc)
+    }
+    if ($script:HltvAttemptError) {
+        $FreshnessArgs += @('--attempt-error', $script:HltvAttemptError)
+    }
+    if ($script:HltvFallbackUsed) {
+        $FreshnessArgs += '--fallback-used'
+    }
+    Invoke-Native $ModelPython $FreshnessArgs "Estado de frescura HLTV" | Out-Null
     Invoke-Native $ModelPython @($Enrich, "--run-dir", $RunDir) "Enriquecimiento predicciones" | Out-Null
 }
 
@@ -339,7 +507,49 @@ if ($BackupBlackbox -and (-not $NoDb)) {
     }
 }
 
-# --- Etapa 9: web ------------------------------------------------------------
+# --- Retencion conservadora (preview hasta que exista aprobacion compatible) --
+$RetentionReportPath = Join-Path $LogDir ("retention_" + $stamp + ".json")
+$RetentionResult = $null
+if ($script:DryRun) {
+    Write-Log (
+        "DRY-RUN: se evaluaria retencion automatica con manage_models.py prune " +
+        "--scope all --auto; no se escribe ni se aplica el plan."
+    ) -Level INFO -Color DarkYellow
+} else {
+    try {
+        Invoke-Native $ModelPython @(
+            $ManageModels,
+            "prune",
+            "--scope", "all",
+            "--auto",
+            "--output", $RetentionReportPath
+        ) "Retencion automatica de artefactos y runs" | Out-Null
+        if (-not (Test-Path -LiteralPath $RetentionReportPath -PathType Leaf)) {
+            throw "manage_models.py no genero $RetentionReportPath"
+        }
+        $RetentionResult = Get-Content -LiteralPath $RetentionReportPath -Raw | ConvertFrom-Json
+        if ($null -eq $RetentionResult) {
+            throw "manage_models.py genero un reporte de retencion vacio."
+        }
+    } catch {
+        $script:ExitCode = $Cfg.ExitCodes.Train
+        throw
+    }
+    Write-Log (
+        "Retencion evaluada correctamente (preview/no-op o aplicada segun marker): " +
+        $RetentionReportPath
+    ) -Level INFO
+    $PendingCleanupCount = [int]($RetentionResult.pending_cleanup.count)
+    if ($PendingCleanupCount -gt 0) {
+        $PendingCleanupNames = @($RetentionResult.pending_cleanup.items | ForEach-Object { $_.name }) -join ", "
+        Write-Log (
+            "LIMPIEZA PENDIENTE: {0} residuo(s): {1}. La pipeline continua; latest y last_good permanecen protegidos." -f
+            $PendingCleanupCount, $PendingCleanupNames
+        ) -Level WARN -Color Yellow
+    }
+}
+
+# --- Etapa 9: web (despues de retencion para publicar sus avisos) ------------
 Invoke-Stage -Name "Generando WEB\data.js compartido" -FailExit $Cfg.ExitCodes.Web -Action {
     Invoke-Native $ModelPython @($BuildWeb, "--sport-root", $Root, "--run-dir", $RunDir) "Generacion web" | Out-Null
 }
@@ -362,6 +572,24 @@ $script:StageTimings | Format-Table -AutoSize | Out-String | ForEach-Object { Wr
 Write-Host ("  Run:       " + $RunDir)
 Write-Host ("  Dashboard: " + (Join-Path $WebRoot "index.html"))
 Write-Host ("  Contexto:  " + (Join-Path $Root "MODEL\results\CONTEXT_CALIBRATION.md"))
+$FreshnessPath = Join-Path $RunDir 'freshness.json'
+if ((-not $script:DryRun) -and (Test-Path -LiteralPath $FreshnessPath -PathType Leaf)) {
+    $FreshnessReport = Get-Content -LiteralPath $FreshnessPath -Raw | ConvertFrom-Json
+    foreach ($Source in @($FreshnessReport.sources)) {
+        $AgeText = if ($null -eq $Source.age_hours) { 'desconocida' } else { '{0:N1} h' -f [double]$Source.age_hours }
+        $Prefix = if ($Source.status -eq 'fresh' -and -not $Source.fallback_used) { 'OK' } else { 'ADVERTENCIA' }
+        Write-Host (
+            "  Frescura:  {0} {1}: {2}, antiguedad {3}, causa={4}, umbral={5} h" -f
+            $Prefix, $Source.label, $Source.status, $AgeText, $Source.cause, $Source.threshold_hours
+        )
+    }
+}
+if ((-not $script:DryRun) -and $null -ne $RetentionResult -and [int]$RetentionResult.pending_cleanup.count -gt 0) {
+    Write-Host (
+        "  Limpieza:  ADVERTENCIA, {0} residuo(s) pendiente(s); ver {1}" -f
+        [int]$RetentionResult.pending_cleanup.count, $RetentionResult.pending_cleanup.state_path
+    ) -ForegroundColor Yellow
+}
 Write-Host ("  Abrir:     start " + (Join-Path $WebRoot "index.html"))
 if ($BackupBlackbox -and (-not $NoDb)) {
     Write-Host ("  Blackbox:  " + $BlackboxDir + "  (copiala a USB/nube)")
@@ -373,4 +601,5 @@ $script:ExitCode = 0
 if ($script:TranscriptStarted) {
     try { Stop-Transcript | Out-Null; $script:TranscriptStarted = $false } catch { }
 }
+Invoke-PipelineLogRetention
 exit 0

@@ -323,6 +323,140 @@ class EloEngine:
             },
         )
 
+    @staticmethod
+    def _copied_seed_state(state: PlayerEloState) -> _PlayerState:
+        """Valida y copia un estado persistido sin compartir referencias."""
+
+        rating_fields = (
+            ("general_elo", state.general_elo),
+            ("hard_elo", state.hard_elo),
+            ("clay_elo", state.clay_elo),
+            ("grass_elo", state.grass_elo),
+            ("carpet_elo", state.carpet_elo),
+        )
+        checked_ratings: dict[str, float] = {}
+        for field_name, value in rating_fields:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                raise ValueError(
+                    f"{field_name} debe ser un número finito."
+                )
+            checked_ratings[field_name] = float(value)
+
+        count_fields = (
+            ("general_matches", state.general_matches),
+            ("hard_matches", state.hard_matches),
+            ("clay_matches", state.clay_matches),
+            ("grass_matches", state.grass_matches),
+            ("carpet_matches", state.carpet_matches),
+        )
+        checked_counts: dict[str, int] = {}
+        for field_name, value in count_fields:
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"{field_name} debe ser un entero no negativo."
+                )
+            checked_counts[field_name] = value
+        surface_matches = sum(
+            checked_counts[field_name]
+            for field_name in (
+                "hard_matches",
+                "clay_matches",
+                "grass_matches",
+                "carpet_matches",
+            )
+        )
+        if surface_matches > checked_counts["general_matches"]:
+            raise ValueError(
+                "La suma de partidos por superficie no puede superar "
+                "general_matches."
+            )
+
+        return _PlayerState(
+            general_rating=checked_ratings["general_elo"],
+            general_matches=checked_counts["general_matches"],
+            surfaces={
+                "Hard": _SurfaceState(
+                    checked_ratings["hard_elo"],
+                    checked_counts["hard_matches"],
+                ),
+                "Clay": _SurfaceState(
+                    checked_ratings["clay_elo"],
+                    checked_counts["clay_matches"],
+                ),
+                "Grass": _SurfaceState(
+                    checked_ratings["grass_elo"],
+                    checked_counts["grass_matches"],
+                ),
+                "Carpet": _SurfaceState(
+                    checked_ratings["carpet_elo"],
+                    checked_counts["carpet_matches"],
+                ),
+            },
+            state_date=state.state_date,
+        )
+
+    def seed_states(
+        self,
+        states: Iterable[PlayerEloState],
+        *,
+        base_date: date,
+    ) -> None:
+        """Continúa desde estados completos cerrados hasta ``base_date``.
+
+        La siembra es atómica y solo se admite sobre un motor virgen. Cada
+        jugador conserva su propia ``state_date`` y el corte global impide
+        procesar posteriormente bloques en ``base_date`` o anteriores.
+        """
+
+        checked_base_date = _validate_block_date(base_date)
+        _exclusive_as_of_date(checked_base_date)
+        if self._last_date is not None or self._players:
+            raise EloEngineError(
+                "Solo se puede sembrar un EloEngine completamente vacío."
+            )
+        materialised = tuple(states)
+        if not materialised:
+            raise ValueError("states no puede ser vacío.")
+
+        copied: dict[tuple[Gender, int], _PlayerState] = {}
+        for state in materialised:
+            if not isinstance(state, PlayerEloState):
+                raise TypeError(
+                    "states debe contener solo PlayerEloState."
+                )
+            if state.gender not in {"M", "F"}:
+                raise ValueError("Cada estado debe tener gender M o F.")
+            if (
+                isinstance(state.player_id, bool)
+                or not isinstance(state.player_id, int)
+                or state.player_id < 0
+            ):
+                raise ValueError(
+                    "Cada player_id debe ser un entero no negativo."
+                )
+            state_date = _validate_block_date(state.state_date)
+            if state_date > checked_base_date:
+                raise DateBlockError(
+                    "Un estado sembrado no puede ser posterior a base_date."
+                )
+            key = (state.gender, state.player_id)
+            if key in copied:
+                raise EloEngineError(
+                    "La siembra contiene estados duplicados por jugador."
+                )
+            copied[key] = self._copied_seed_state(state)
+
+        self._players = copied
+        self._last_date = checked_base_date
+
     def _state_for_read(
         self,
         gender: Gender,

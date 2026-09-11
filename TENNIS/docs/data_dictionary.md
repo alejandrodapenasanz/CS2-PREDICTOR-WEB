@@ -268,7 +268,57 @@ persistidos en el run, contadores cero e `is_cold_start=True`. Las suites
 fórmula, el aislamiento, la regla temporal, la reproducibilidad, la
 persistencia transaccional y las consultas individual y por lotes.
 
-## Cartelera diaria de Tennis Explorer
+## Sidecar diario de TennisRatio
+
+`scripts/update_tennisratio.py` consulta únicamente las páginas HTML públicas,
+`robots.txt` y el sitemap de perfiles autorizados; `/api/` está excluido por
+allowlist. Los bytes validados se comprimen bajo
+`data/raw/tennisratio/snapshots/`, con un máximo de dos versiones por recurso,
+y los hechos se registran en `data/processed/tennisratio.sqlite3`. Esta base es
+lateral e independiente de `BBDD/tennis.sqlite3`.
+
+Las tablas de observaciones y decisiones son append-only y tienen triggers que
+rechazan `UPDATE` y `DELETE`:
+
+| Tabla | Contenido |
+|---|---|
+| `refresh_batches`, `published_batches` | Publicaciones diarias completas y puntero last-good validado. |
+| `source_snapshots` | URL, SHA-256, tamaño, tipo MIME, cabeceras HTTP y ruta comprimida observada. |
+| `agenda_observations` | Cartelera ATP/WTA/Challenger/ITF con `first_seen_at_utc`. |
+| `profile_inventory_observations` | Versiones `(URL, lastmod)` del sitemap de jugadores. |
+| `player_observations` | Nombre, género, DOB, ranking y payload de cada versión de perfil. |
+| `match_observations` | Resultados vistos desde cada ficha; las cuotas permanecen solo dentro de esta evidencia de auditoría. |
+| `identity_resolutions` | Coincidencia exacta y única contra Sackmann o decisión `unmapped`/`ambiguous`. |
+| `quarantine_events` | Fallos de perfil, rival sin identidad y contradicciones bilaterales. |
+
+Las APIs tipadas exponen contratos distintos:
+
+| API/tipo | Regla |
+|---|---|
+| `load_active_agenda(D)` | Lee sin red el último batch publicado para presentación y estado operativo; no acredita por sí solo inputs del modelo. |
+| `load_agenda_as_of(D, match_date=D)` | Devuelve la última observación de cada partido cuya captura y publicación son `< D`; de aquí salen superficie, nivel y cuotas causales. |
+| `MappedRanking` | Incluye `effective_date`, `available_date` y `first_seen_at_utc`; solo se devuelve cuando ambas fechas son `< D`. Los puntos no se inventan. |
+| `MappedResult` | Exige ganador/perdedor Sackmann únicos, fecha efectiva y disponibilidad de partido y ambas identidades `< D`; nunca expone cuotas. |
+| `load_identity_resolutions(as_of_date=D)` / `MappedIdentity` | Exige observación, resolución y publicación `< D`; una identidad descubierta en `D` no desbloquea Elo, ranking ni historial hasta `D+1`. El modo sin corte queda reservado a presentación actual. |
+
+La agenda TennisRatio conserva además `scheduled_start_utc` como
+`datetime64[ns, UTC]`: es el instante exacto del atributo público `data-utc`.
+Si la fuente publica `None`/TBD queda nulo. Este campo de la agenda actual solo
+sirve como puerta operativa y exige
+`prediction_as_of_utc < scheduled_start_utc`; no se usa como feature ni se
+reconstruye desde una hora local.
+
+Un perfil visto por primera vez en `D` no adquiere disponibilidad retroactiva,
+aunque incluya partidos antiguos. El estado de forma, H2H, Elo y ranking solo
+puede consumirlo desde `D+1`. Los resultados se entregan únicamente después
+del corte conservador que el llamador acredita para su histórico Sackmann, de
+modo que las dos fuentes no cuenten el mismo partido dos veces.
+
+La fuente declara atribución a TennisRatio.com y licencia CC BY-NC 4.0 en el
+manifiesto last-good. Los agregados actuales de la ficha describen el estado
+presente y no se usan para reconstruir una feature histórica.
+
+## Cartelera diaria de Tennis Explorer (respaldo)
 
 `get_daily_matches()` devuelve únicamente singles ATP, WTA, Challenger e ITF
 de la fecha solicitada. Este DataFrame diario no se concatena directamente con
@@ -679,24 +729,35 @@ deserializa después de verificar el inventario completo.
 
 Cada ejecución de fase 8 publica la cartelera completa en
 `data/processed/predictions/predictions_YYYY-MM-DD_<timestamp UTC>.csv`. A es
-siempre `player_1` de Tennis Explorer y B es `player_2`; no se reorienta según
-favorito, ranking o resultado.
+siempre `player_1` de la agenda publicada y B es `player_2`; no se reorienta
+según favorito, ranking o resultado.
 
 | Columna | Tipo CSV | Descripción |
 |---|---|---|
 | `prediction_date` | fecha ISO | Fecha civil `D` de la cartelera. |
 | `prediction_as_of_utc` | timestamp UTC | Instante en que comenzó la inferencia; debe ser posterior a la captura usada y su fecha civil no puede superar `prediction_date` para ser oficial. |
-| `source_retrieved_at_utc` | timestamp UTC | Instante acreditado del snapshot de Tennis Explorer; su fecha civil no puede superar `prediction_date` para ser oficial. |
+| `source_retrieved_at_utc` | timestamp UTC | Instante acreditado del snapshot de agenda TennisRatio o del respaldo Tennis Explorer; su fecha civil no puede superar `prediction_date` para ser oficial. |
 | `source_snapshot_sha256` | SHA-256 | Hash de los bytes HTML validados. |
+| `feature_agenda_retrieved_at_utc` | timestamp UTC nullable | Captura congelada que aporta metadatos al modelo; una predicción exige fecha civil `< prediction_date`. Nula si el partido no era conocido antes de `D`. |
+| `feature_agenda_snapshot_sha256` | SHA-256 nullable | Hash de la observación pre-D exacta, separado del snapshot actual de presentación. |
+| `feature_surface`, `feature_tour_level` | texto nullable | Superficie y nivel de una observación exacta pre-D o del catálogo exacto torneo+edición con captura `< D`. |
+| `feature_surface_resolution` | texto nullable | `direct_pre_date`, `catalog_exact_edition` o `same_edition_propagation`; nulo si no hubo resolución. |
+| `feature_surface_resolution_reason` | texto nullable | Razón auditable de una superficie no resuelta, incluido conflicto, agregado o falta de evidencia. |
+| `feature_surface_captured_at_utc` | timestamp UTC nullable | Instante de captura de la evidencia que justificó la superficie; su fecha civil es siempre `< prediction_date`. |
+| `feature_surface_evidence_id` | SHA-256 nullable | ID estable de la evidencia exacta elegida. |
+| `feature_surface_source_url`, `feature_surface_source_sha256` | texto nullable | Procedencia y hash del snapshot fuente, sin nueva petición durante la predicción. |
+| `surface_catalog_fingerprint` | SHA-256 nullable | Identidad reproducible del catálogo causal completo usado para D. |
+| `feature_odds_a`, `feature_odds_b` | decimal nullable | Cuotas congeladas pre-D preparadas para un perfil de mercado; no se confunden con las cuotas actuales `odds_*`. |
 | `tournament` | texto | Torneo visible, conservado desde el scraper. |
 | `tour_level` | texto | Etiqueta diaria literal `ATP`, `WTA`, `Challenger` o `ITF`. |
 | `canonical_tour_level` | texto nullable | Categoría de modelado `ATP Tour`, `WTA Tour`, `Challenger` o `ITF`; nula en filas no predichas. |
 | `gender` | texto | Universo `M` o `F` que determina Elo y modelo. |
 | `surface` | texto nullable | Superficie material explícita del mismo HTML; nula si la fuente no la publicó o solo indicó `Indoors`. |
-| `scheduled_time` | texto nullable | Hora local visible sin zona inferida. |
+| `scheduled_time` | texto nullable | Hora textual de presentación. Puede proceder del UTC estructurado de TennisRatio o de la hora local sin zona de Tennis Explorer; nunca gobierna por sí sola la puerta preinicio. |
+| `scheduled_start_utc` | timestamp UTC nullable | Instante de inicio publicado por una fuente con zona inequívoca. La fila solo puede recibir probabilidad y ser oficial si `prediction_as_of_utc` es estrictamente anterior; TBD/nulo falla cerrado. |
 | `status` | texto | Estado conservador de fase 4. Solo `scheduled` es elegible. |
 | `player_a_name`, `player_b_name` | texto | Nombres visibles en el orden de la fuente. |
-| `player_a_slug`, `player_b_slug` | texto nullable | Slugs estables de Tennis Explorer. |
+| `player_a_slug`, `player_b_slug` | texto nullable | Slugs estables namespaced por la fuente; TennisRatio usa `tennisratio:<perfil>`. |
 | `player_a_id`, `player_b_id` | entero nullable | IDs Sackmann del género correcto; nulos si no se resolvieron. |
 | `mapping_status` | texto | `mapped` exige ambos IDs; en otro caso `unmapped`. |
 | `odds_a`, `odds_b` | decimal nullable | Cuotas decimales visibles del snapshot. |
@@ -712,13 +773,58 @@ favorito, ranking o resultado.
 | `model_profile` | texto nullable | Perfil del bundle; actualmente `sports_only`. |
 | `model_fingerprint` | SHA-256 nullable | Run inmutable de fase 7 utilizado. |
 | `model_training_max_date` | fecha nullable | Máxima fecha fuente incluida al entrenar; una fila oficial exige este corte y el corte disponible descrito abajo. |
-| `feature_history_max_date` | fecha nullable | Última fecha disponible en el Parquet causal del género. |
-| `ranking_source_max_date` | fecha nullable | Última fecha global de rankings disponible en la fuente compatible. |
+| `model_training_available_max_date` | fecha nullable | Fecha en la que el último label de entrenamiento se considera disponible bajo el embargo Sackmann; debe ser `< prediction_date`. |
+| `feature_history_max_date` | fecha nullable | Última fecha deportiva del histórico servido; puede avanzar mediante el overlay sin reescribir el Parquet. |
+| `feature_history_available_max_date` | fecha nullable | Primera fecha de disponibilidad del último resultado incorporado; debe ser `< prediction_date` y gobierna la frescura. |
+| `ranking_source_max_date` | fecha nullable | Última fecha efectiva de ranking causal usada por la fuente compatible. |
+| `supplemental_result_rows` | entero nullable | Resultados laterales causales disponibles para continuar Elo; cero cuando el sidecar no aporta filas. |
+| `supplemental_ranking_rows` | entero nullable | Rankings laterales causales y mapeados disponibles para el género. |
+| `overlay_fingerprint` | SHA-256 nullable | Identidad reproducible de resultados, rankings, cortes y procedencia TennisRatio realmente servidos. |
 | `feature_fingerprint` | SHA-256 nullable | Identidad del dataset de fase 6 verificado antes de inferir. |
 
 Los modelos actuales son `sports_only`: `odds_*` y
 `market_probability_*` no entran al estimador, aunque se conservan para
 comparar el resultado calibrado con el mercado.
+
+### Contrato web de confianza y rendimiento liquidado
+
+El payload `tennis.matches[*].input_confidence` expone exclusivamente
+`level` y `flags`. `level` conserva `HIGH`, `MEDIUM`, `LOW` o `UNAVAILABLE` y
+la interfaz lo traduce a un nivel cualitativo; no existe un score numerico de
+fiabilidad.
+
+`tennis.settled_performance` se construye desde el join inmutable
+`official_predictions -> predictions -> settlements` y contiene:
+
+| Campo | Tipo | Descripcion |
+|---|---|---|
+| `status` | texto | `computed` o `not_computed`. |
+| `scope` | texto | Declara que agrega todas las predicciones oficiales liquidadas. |
+| `settled_count` | entero | Filas con settlement completo, aunque una probabilidad malformada pudiera impedir evaluarlas. |
+| `evaluated_count` | entero | Filas con outcome y probabilidad calibrada validos usadas en las metricas. |
+| `correct` | entero | Favoritos previstos que coincidieron con el resultado real. |
+| `accuracy` | float nullable | `correct / evaluated_count`; nulo con muestra vacia. |
+| `brier` | float nullable | Error cuadratico medio de la probabilidad del ganador previsto frente al acierto real. |
+| `log_loss` | float nullable | Entropia cruzada media sobre el mismo par, con clipping numerico documentado. |
+| `provisional` | booleano | Verdadero mientras `evaluated_count < provisional_threshold`. |
+| `provisional_threshold` | entero | Umbral auditable de 100 partidos. |
+| `calibration` | objeto | Metodo cuantiles, numero de bins solicitado y bins observados. |
+
+Cada bin de calibracion publica `probability_min`, `probability_max`,
+`mean_predicted`, `observed_rate` y `count`. El listado diario puede seguir
+mostrando solo la ultima jornada; este agregado siempre recorre todo el
+historico liquidado.
+
+### Sidecar `tennisratio.sqlite3`: `match_statistics_v1`
+
+Vista aditiva y de solo lectura sobre `match_observations.payload_json`. Expone
+identidad de fuente, fecha efectiva, fecha de captura y: precisión de primer
+servicio; puntos ganados con primer/segundo servicio; aces; dobles faltas;
+break points salvados/convertidos; juegos de servicio/retorno ganados; puntos
+de retorno ante primer/segundo servicio; y puntos de presión totales/ganados.
+Los cocientes `N/D` se validan y la API tipada los separa en numerador y
+denominador. Nulo significa que la fuente no publicó la estadística; nunca se
+imputa en adquisición. La BBDD operativa y su triplete sagrado no se modifican.
 
 ### Correcciones de contrato diario de fase 9
 

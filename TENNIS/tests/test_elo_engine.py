@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime
 import hashlib
 import math
@@ -19,6 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.elo import (  # noqa: E402
     DateBlockError,
     EloEngine,
+    EloEngineError,
     EloParameters,
     EventColumns,
     EventProvenance,
@@ -682,6 +684,105 @@ class EloEngineTest(unittest.TestCase):
             ),
         )
         self.assertEqual(block.audit.included, 1)
+
+    def test_seeded_continuation_matches_a_complete_run_exactly(self) -> None:
+        """Continuar un corte copiado reproduce el Elo monolítico exacto."""
+
+        first = date(2024, 9, 1)
+        second = date(2024, 9, 2)
+        third = date(2024, 9, 3)
+        events = (
+            _event(
+                match_date=first,
+                gender="M",
+                winner_id=1,
+                loser_id=2,
+                row=1,
+                surface="Hard",
+            ),
+            _event(
+                match_date=second,
+                gender="M",
+                winner_id=3,
+                loser_id=1,
+                row=2,
+                surface="Clay",
+            ),
+            _event(
+                match_date=third,
+                gender="M",
+                winner_id=2,
+                loser_id=3,
+                row=3,
+                surface="Grass",
+            ),
+        )
+        expected = EloEngine().process(events)
+        prefix = EloEngine().process(events[:2])
+        continued_engine = EloEngine()
+
+        continued_engine.seed_states(prefix.states, base_date=second)
+        actual = continued_engine.process(events[2:])
+
+        self.assertEqual(actual.states, expected.states)
+        self.assertEqual(actual.snapshots, expected.snapshots)
+        self.assertEqual(continued_engine.last_date, third)
+
+    def test_seed_rejects_noncausal_or_incomplete_inputs_atomically(self) -> None:
+        """Rechaza duplicados, futuro, estado previo y valores inválidos."""
+
+        match_date = date(2024, 10, 1)
+        state = EloEngine().process(
+            (
+                _event(
+                    match_date=match_date,
+                    gender="F",
+                    winner_id=10,
+                    loser_id=20,
+                    row=1,
+                ),
+            )
+        ).states[0]
+
+        duplicate_engine = EloEngine()
+        with self.assertRaises(EloEngineError):
+            duplicate_engine.seed_states(
+                (state, state),
+                base_date=match_date,
+            )
+        self.assertIsNone(duplicate_engine.last_date)
+
+        future_engine = EloEngine()
+        with self.assertRaises(DateBlockError):
+            future_engine.seed_states(
+                (replace(state, state_date=date(2024, 10, 2)),),
+                base_date=match_date,
+            )
+        self.assertIsNone(future_engine.last_date)
+
+        invalid_engine = EloEngine()
+        with self.assertRaises(ValueError):
+            invalid_engine.seed_states(
+                (replace(state, general_elo=math.nan),),
+                base_date=match_date,
+            )
+        self.assertIsNone(invalid_engine.last_date)
+
+        nonempty_engine = EloEngine()
+        nonempty_engine.process_date_block(
+            match_date,
+            (
+                _event(
+                    match_date=match_date,
+                    gender="M",
+                    winner_id=1,
+                    loser_id=2,
+                    row=2,
+                ),
+            ),
+        )
+        with self.assertRaises(EloEngineError):
+            nonempty_engine.seed_states((state,), base_date=match_date)
 
 
 if __name__ == "__main__":

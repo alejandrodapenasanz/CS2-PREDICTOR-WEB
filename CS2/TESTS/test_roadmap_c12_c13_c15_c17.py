@@ -57,7 +57,7 @@ class ConfigurationAndReproducibilityTests(unittest.TestCase):
     def test_default_config_is_versioned_and_hash_is_stable(self) -> None:
         first = load_config(ROOT / "MODEL" / "config.yaml")
         second = load_config(ROOT / "MODEL" / "config.yaml")
-        self.assertEqual(first.version, 3)
+        self.assertEqual(first.version, 6)
         self.assertEqual(first.sha256, second.sha256)
         self.assertEqual(len(first.sha256), 64)
         self.assertEqual(first.feature_thresholds["regime"], 200)

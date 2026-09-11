@@ -11,7 +11,9 @@
   <link rel="shortcut icon" type="image/png" href="./media/logo.png">
   <link rel="apple-touch-icon" href="./media/logo.png">
   <link rel="manifest" href="./manifest.webmanifest">
-  <script src="./data.js"></script>
+  <script>
+    document.write('<script src="./data.js?ts=' + Date.now() + '"><\/script>');
+  </script>
   <style>
     :root {
       color-scheme: dark;
@@ -112,6 +114,14 @@
     .kpi b { display: block; font-size: 23px; font-weight: 800; font-family: ui-monospace, monospace; }
     .kpi span { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .6px; }
 
+    .freshness-panel { margin: 0 0 16px; border-color: var(--line2); }
+    .freshness-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:8px; padding:10px; }
+    .freshness-source { border:1px solid var(--line); border-left:3px solid var(--green); border-radius:7px; padding:9px 11px; background:var(--panel2); }
+    .freshness-source.warning { border-left-color:var(--amber); }
+    .freshness-source.danger { border-left-color:var(--red); background:rgba(255,39,64,.05); }
+    .freshness-source b { display:block; font:800 12px ui-monospace,monospace; letter-spacing:.4px; }
+    .freshness-source span { color:var(--muted); font-size:11px; }
+
     .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
     .panel-title { padding: 11px 14px; font-size: 12px; letter-spacing: 1.4px; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
     .panel-title .accent { color: var(--red); }
@@ -123,9 +133,9 @@
     tbody tr:hover { background: rgba(255,39,64,.06); }
     tbody tr.sel { background: rgba(255,39,64,.10); box-shadow: inset 3px 0 0 var(--red); }
 
-    th.sortable { cursor: pointer; user-select: none; white-space: nowrap; }
-    th.sortable:hover { color: var(--text); }
-    th.sortable.active { color: var(--red-soft); }
+    th.sortable, th.tennis-sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+    th.sortable:hover, th.tennis-sortable:hover { color: var(--text); }
+    th.sortable.active, th.tennis-sortable.active { color: var(--red-soft); }
     .sortarrow { color: var(--red); font-size: 10px; margin-left: 2px; }
     .openlink { color: var(--muted); border: 1px solid var(--line2); border-radius: 5px; padding: 1px 7px; font-size: 12px; margin-left: 8px; }
     .openlink:hover { color: var(--red-soft); border-color: var(--red); text-decoration: none; }
@@ -231,6 +241,13 @@
     .tennis-meta { color: var(--muted); font-size: 11px; margin-top: 3px; }
     .tennis-real { color: var(--green); font-weight: 750; }
     .tennis-unavailable { color: var(--muted); }
+    .tennis-performance-grid { display:grid; grid-template-columns:minmax(260px,.8fr) minmax(360px,1.2fr); gap:18px; padding:14px; align-items:center; }
+    .tennis-performance-grid .kpis { margin-bottom:0; }
+    .tennis-performance-chart { min-width:0; }
+    .tennis-performance-filters { display:flex; flex-wrap:wrap; gap:10px; align-items:end; padding:12px 14px 0; }
+    .tennis-performance-filters label { display:grid; gap:5px; color:var(--muted); font-size:10px; letter-spacing:.8px; text-transform:uppercase; }
+    .tennis-performance-filters select { min-width:145px; }
+    #tennisCalibration { display:block; width:100%; max-width:620px; height:auto; background:var(--panel2); border:1px solid var(--line); border-radius:8px; }
     .dbline { display:flex; justify-content:space-between; gap:12px; padding:6px 0; border-bottom:1px solid rgba(255,255,255,.05); }
     .dbline:last-child { border-bottom:0; }
     .dbline .key { color: var(--muted); }
@@ -239,7 +256,7 @@
     .hidden { display: none !important; }
     .winrow td { font-family: ui-monospace, monospace; }
     .winrow.best td { color:#fff; background: rgba(255,39,64,.08); }
-    @media (max-width: 1100px) { .layout, .mgrid, .dbgrid { grid-template-columns: 1fr; } aside { position: static; max-height: none; } .controls { grid-template-columns: 1fr 1fr; } }
+    @media (max-width: 1100px) { .layout, .mgrid, .dbgrid, .tennis-performance-grid { grid-template-columns: 1fr; } aside { position: static; max-height: none; } .controls { grid-template-columns: 1fr 1fr; } }
     @media (max-width: 600px) {
       body { overflow-x: hidden; }
       .wrap { padding: 0 12px; }
@@ -290,6 +307,10 @@
   </header>
 
   <main class="wrap">
+    <div class="panel freshness-panel" id="freshnessPanel">
+      <div class="panel-title"><span>// Frescura de datos</span><span class="health" id="freshnessHealth">COMPROBANDO</span></div>
+      <div class="freshness-grid" id="freshnessGrid"></div>
+    </div>
     <!-- VIEW: MATCHES -->
     <section id="view-matches">
       <div class="kpis" id="kpis"></div>
@@ -314,14 +335,15 @@
         <div class="panel-title"><span>★ BEST OPPORTUNITY — máxima confianza operativa</span></div>
         <div class="small" style="padding:12px 14px">
           Ranking por <b>confianza ajustada en el ganador previsto</b>, penalizada por fiabilidad de los datos
-          (historial de ambos equipos, incertidumbre Glicko RD, BO1, rival por definir). No es consejo de apuesta.
+          (historial de ambos equipos, incertidumbre Glicko RD, BO1, rival por definir). La banda diagnóstica
+          y la cobertura del historial previo son informativas: no alteran este ranking. Solo se muestran
+          favoritos con una probabilidad ajustada de ganar de al menos <b>65%</b>. No es consejo de apuesta.
         </div>
       </div>
       <div class="controls" id="bestControls" style="grid-template-columns:repeat(3,minmax(150px,1fr)) auto;padding-top:0">
         <select id="bestDay"><option value="">Día: todos</option></select>
         <select id="bestProb">
-          <option value="0">Probabilidad: todas</option>
-          <option value="0.6">Prob. ganar ≥ 60%</option>
+          <option value="0.65">Prob. ganar ≥ 65% (mínimo)</option>
           <option value="0.7">Prob. ganar ≥ 70%</option>
           <option value="0.8">Prob. ganar ≥ 80%</option>
           <option value="0.9">Prob. ganar ≥ 90%</option>
@@ -351,28 +373,26 @@
     <section id="view-model" class="hidden">
       <div class="mgrid">
         <div class="panel">
-          <div class="panel-title"><span>// Rendimiento walk-forward</span><span class="small">paso semanal · ventana expansiva</span></div>
+          <div class="panel-title"><span>// Referencia secundaria: backtest walk-forward</span><span class="small">paso semanal · ventana expansiva</span></div>
           <table><thead><tr><th>Modelo</th><th>N</th><th>Acc</th><th>LogLoss</th><th>Brier</th><th>AUC</th><th>ECE</th></tr></thead><tbody id="metricsRows"></tbody></table>
           <div class="small" style="padding:10px 14px">
             Objetivo de entrenamiento = <b>log loss</b> (probabilidades calibradas), no solo accuracy.
             El baseline "elige al favorito" (Elo/Glicko) ya acierta ~63-65%; el modelo aporta si baja el log loss/Brier.
           </div>
         </div>
-        <div class="panel model-wide">
-          <div class="panel-title"><span>// Evolución del acierto real</span><span class="small">predicciones walk-forward · resultados cerrados</span></div>
-          <div class="accuracy-range" role="group" aria-label="Periodo del gráfico de accuracy">
-            <button type="button" data-accuracy-range="7d">7 días</button>
-            <button type="button" data-accuracy-range="1m" class="active">1 mes</button>
-            <button type="button" data-accuracy-range="3m">3 meses</button>
-            <button type="button" data-accuracy-range="6m">6 meses</button>
-            <button type="button" data-accuracy-range="1y">1 año</button>
+        <div class="panel model-wide" id="cs2LiveAccuracyPanel">
+          <div class="panel-title"><span>// Accuracy live · ventana móvil</span><span class="small">prediction_ledger · solo liquidadas</span></div>
+          <div class="accuracy-range" role="group" aria-label="Régimen de las predicciones liquidadas">
+            <button type="button" data-ledger-scope="all" class="active">Todos</button>
+            <button type="button" data-ledger-scope="odds">Con odds</button>
+            <button type="button" data-ledger-scope="no_odds">Sin odds</button>
           </div>
           <div class="accuracy-chart-wrap">
             <div class="accuracy-canvas-box">
-              <canvas class="accuracy-chart" id="accuracyCanvas" width="620" height="340" aria-label="Evolución temporal del porcentaje de aciertos reales del modelo"></canvas>
-              <div class="accuracy-tooltip hidden" id="accuracyTooltip"></div>
+              <canvas class="accuracy-chart" id="liveAccuracyCanvas" width="620" height="340" aria-label="Accuracy móvil de predicciones liquidadas del ledger"></canvas>
+              <div class="accuracy-tooltip hidden" id="liveAccuracyTooltip"></div>
             </div>
-            <div class="small accuracy-stats" id="accuracyStats"></div>
+            <div class="small accuracy-stats" id="liveAccuracyStats"></div>
           </div>
         </div>
         <div class="panel">
@@ -384,11 +404,14 @@
           <table><thead><tr><th>Banda (confianza)</th><th>% partidos</th><th>Accuracy</th><th>Log loss</th></tr></thead><tbody id="segRows"></tbody></table>
           <div class="small" id="marketBox" style="padding:10px 14px"></div>
         </div>
-        <div class="panel">
-          <div class="panel-title"><span>// Curva de calibración (resultados reales diarios)</span></div>
+        <div class="panel" id="cs2LiveCalibrationPanel">
+          <div class="panel-title"><span>// Calibración live</span><span class="small">prediction_ledger · N visible por bucket</span></div>
           <div style="padding:14px;display:flex;gap:18px;align-items:center;flex-wrap:wrap">
             <canvas id="calCanvas" width="420" height="320"></canvas>
             <div class="small" id="calStats"></div>
+          </div>
+          <div class="table-scroll">
+            <table><thead><tr><th>Bucket P(team1)</th><th>N</th><th>Prob. media</th><th>Frecuencia real</th></tr></thead><tbody id="calibrationBucketRows"></tbody></table>
           </div>
         </div>
         <div class="panel">
@@ -462,6 +485,44 @@
         </div>
         <div class="small" id="tennisRunMeta" style="padding:10px 14px"></div>
       </div>
+      <div class="panel" style="margin-bottom:16px">
+        <div class="panel-title">
+          <span>// Acierto real (partidos liquidados)</span>
+          <span class="health unavailable" id="tennisPerformanceStatus">SIN MUESTRA / NO CALCULADO</span>
+        </div>
+        <div class="tennis-performance-filters" aria-label="Filtros del rendimiento liquidado de tenis">
+          <label>Género
+            <select id="tennisPerformanceGender">
+              <option value="all">Todos</option>
+              <option value="M">M</option>
+              <option value="F">F</option>
+            </select>
+          </label>
+          <label>Probabilidad del ganador previsto
+            <select id="tennisPerformanceProbability">
+              <option value="all">Todas</option>
+              <option value="50_60">50–60 %</option>
+              <option value="60_70">60–70 %</option>
+              <option value="70_80">70–80 %</option>
+              <option value="80_90">80–90 %</option>
+              <option value="90_100">90–100 %</option>
+            </select>
+          </label>
+          <button class="btn" id="tennisPerformanceReset" type="button">Restablecer</button>
+        </div>
+        <div class="tennis-performance-grid">
+          <div>
+            <div class="kpis" id="tennisPerformanceKpis"></div>
+            <div class="small" id="tennisPerformanceNote"></div>
+          </div>
+          <div class="tennis-performance-chart">
+            <canvas id="tennisCalibration" width="620" height="320" aria-label="Curva de calibracion de predicciones de tenis liquidadas">
+              Curva de calibracion no disponible.
+            </canvas>
+            <div class="small" style="margin-top:7px">La diagonal representa calibracion perfecta; los puntos usan exclusivamente predicciones con resultado liquidado.</div>
+          </div>
+        </div>
+      </div>
       <div class="panel">
         <div class="panel-title">
           <span>// Partidos <span class="accent">[</span><span id="tennisRowCount">0</span><span class="accent">]</span></span>
@@ -474,8 +535,10 @@
               <th>Torneo</th>
               <th>Partido</th>
               <th>Ganador previsto</th>
-              <th>Probabilidad</th>
-              <th>Fiabilidad / flags</th>
+              <th class="tennis-sortable" data-tennis-sort="probability" tabindex="0" role="button" aria-sort="none" title="Ordenar por probabilidad">
+                Probabilidad <span class="sortarrow" data-tennis-arrow="probability"></span>
+              </th>
+              <th>Confianza del input / flags</th>
               <th>Ganador real</th>
             </tr></thead>
             <tbody id="tennisRows"></tbody>
@@ -491,7 +554,19 @@
     const M = DATA.matches || [];
     const DB = DATA.database || {};
     const TENNIS = DATA.tennis || {};
-    const state = { view: "matches", selected: null, sortKey: "time", sortDir: "asc", accuracyRange: "1m" };
+    const FRESHNESS = DATA.freshness?.components || {};
+    const PENDING_CLEANUP = DATA.maintenance?.cs2_pending_cleanup || { count: 0, items: [] };
+    const state = {
+      view: "matches",
+      selected: null,
+      sortKey: "time",
+      sortDir: "asc",
+      ledgerScope: "all",
+      tennisSortKey: null,
+      tennisSortDir: "desc",
+      tennisPerformanceGender: "all",
+      tennisPerformanceProbability: "all",
+    };
     const SORT_DEFAULT_DIR = { time: "asc", match: "asc", decision: "desc", reliability: "desc", flags: "desc" };
     const $ = (id) => document.getElementById(id);
 
@@ -513,10 +588,77 @@
     function logo(m,s){ const u=m[s]?.logo, n=tn(m,s); return u ? `<img class="logo-sm" src="${esc(u)}" onerror="this.replaceWith(Object.assign(document.createElement('span'),{className:'tinitial',textContent:'${esc((n||'?')[0])}'}))">` : `<span class="tinitial">${esc((n||'?')[0])}</span>`; }
     const isTBD = (n) => !n || /tbd|winner|\/|^\s*$/i.test(n);
 
+    function freshnessState(component, sourceId, nowMs=Date.now()){
+      const report = FRESHNESS[component] || {};
+      const source = (report.sources || []).find(row=>row.source_id===sourceId) || {};
+      const lastSuccessMs = Date.parse(source.last_success_at_utc || "");
+      const pipelineMs = Date.parse(report.pipeline_last_run_at_utc || report.generated_at_utc || "");
+      const threshold = Number(source.threshold_hours || 24);
+      const ageHours = Number.isFinite(lastSuccessMs) ? Math.max(0,(nowMs-lastSuccessMs)/3600000) : null;
+      const pipelineAgeHours = Number.isFinite(pipelineMs) ? Math.max(0,(nowMs-pipelineMs)/3600000) : null;
+      const stale = ageHours === null || ageHours > threshold;
+      let cause = "fresh";
+      if(source.last_attempt_status === "failed") cause = "source_update_failed";
+      else if(source.fallback_used) cause = "fallback_used";
+      else if(stale && pipelineAgeHours !== null && pipelineAgeHours > threshold) cause = "pipeline_not_run";
+      else if(stale) cause = "source_not_refreshed";
+      return {...source, component, ageHours, pipelineAgeHours, stale, cause};
+    }
+    function allFreshnessStates(){
+      return Object.entries(FRESHNESS).flatMap(([component,report])=>(report.sources||[]).map(source=>freshnessState(component,source.source_id)));
+    }
+    const ageLabel = hours => hours === null ? "edad desconocida" : hours < 1 ? `${Math.round(hours*60)} min` : hours < 48 ? `${hours.toFixed(1)} h` : `${(hours/24).toFixed(1)} días`;
+    const freshnessCauseLabel = cause => ({
+      fresh:"actualizada correctamente",
+      source_update_failed:"falló la actualización de la fuente",
+      pipeline_not_run:"el pipeline no se ha ejecutado desde entonces",
+      fallback_used:"se utilizó una fuente/lote de fallback",
+      source_not_refreshed:"la fuente no publicó un lote reciente",
+    }[cause] || cause || "causa desconocida");
+    function renderFreshness(){
+      const states = allFreshnessStates();
+      const cleanupItems = Array.isArray(PENDING_CLEANUP.items) ? PENDING_CLEANUP.items : [];
+      const cleanupWarning = cleanupItems.length > 0 || PENDING_CLEANUP.status === "warning";
+      const warning = cleanupWarning || states.some(source=>source.stale || source.fallback_used || source.last_attempt_status==="failed");
+      const health = $("freshnessHealth");
+      health.textContent = warning ? "SISTEMA CON AVISO" : states.length ? "TODO FRESCO" : "SIN METADATOS";
+      health.className = `health ${warning ? "warning" : states.length ? "ok" : "missing"}`;
+      const freshnessCards = states.map(source=>{
+        const severe = source.stale || source.last_attempt_status==="failed";
+        const cls = severe ? "danger" : source.fallback_used ? "warning" : "";
+        const status = severe ? "OBSOLETO" : source.fallback_used ? "FALLBACK" : "FRESCO";
+        const batch = source.last_batch_at_utc && source.timestamp_kind==="latest_source_data_date"
+          ? ` · lote descargado ${esc(source.last_batch_at_utc)}` : "";
+        return `<div class="freshness-source ${cls}"><b>${esc(source.component)} · ${esc(source.label||source.source_id)} · ${status}</b><span>Antigüedad ${esc(ageLabel(source.ageHours))} · umbral ${esc(ageLabel(Number(source.threshold_hours||24)))} · ${esc(freshnessCauseLabel(source.cause))}${batch}</span></div>`;
+      });
+      if(cleanupWarning){
+        const names = cleanupItems.map(item=>item.name).filter(Boolean).join(", ");
+        const detail = cleanupItems.length
+          ? `${cleanupItems.length} residuo(s) pendiente(s): ${names}. La poda continuó sin tocar latest/last_good.`
+          : (PENDING_CLEANUP.error || "No se pudo validar el registro de limpieza pendiente.");
+        freshnessCards.push(`<div class="freshness-source danger"><b>CS2 · LIMPIEZA DE ARTEFACTOS · PENDIENTE</b><span>${esc(detail)}</span></div>`);
+      }
+      $("freshnessGrid").innerHTML = freshnessCards.join("") || '<div class="small">No hay metadatos de frescura publicados.</div>';
+    }
+    const cs2Freshness = () => freshnessState("CS2","hltv");
+    function matchFlags(m){
+      const flags = Array.isArray(m.flags) ? [...m.flags] : [];
+      const source = cs2Freshness();
+      if(source.stale && !flags.some(flag=>flag.code==="DATA_STALE")) flags.unshift({level:"danger",code:"DATA_STALE",message:`Datos HLTV obsoletos (${ageLabel(source.ageHours)}): ${freshnessCauseLabel(source.cause)}.`});
+      if(source.fallback_used && !flags.some(flag=>flag.code==="DATA_FALLBACK")) flags.unshift({level:"warning",code:"DATA_FALLBACK",message:"Se reutilizó el último lote disponible."});
+      return flags;
+    }
+
     // reliability score 0..1 : qué tan respaldada por datos está la predicción
     function reliability(m){
       const stored = m.prediction?.reliability_score;
-      if (stored != null && !isNaN(stored)) return Math.max(0.05, Math.min(1, Number(stored)));
+      if (stored != null && !isNaN(stored)) {
+        let value = Math.max(0.05, Math.min(1, Number(stored)));
+        const source = cs2Freshness();
+        if(source.stale && m.prediction?.data_freshness_status !== "stale") value *= .60;
+        else if(source.fallback_used && !m.prediction?.fallback_source_used) value *= .75;
+        return Math.max(0.05, Math.min(1, value));
+      }
       const f = m.features || {};
       let r = 1;
       const mm = Math.min(f.matches_team1 ?? 0, f.matches_team2 ?? 0);
@@ -534,6 +676,31 @@
     const decisionConfidence = (m) => Math.max(decisionProb(m), 1 - decisionProb(m));
     const decisionSide = (m) => (m.prediction?.decision_favorite_side || (decisionProb(m) >= .5 ? "team1" : "team2"));
     const decisionFavorite = (m) => m.prediction?.decision_favorite || sideName(m, decisionSide(m));
+    function estimateView(m){
+      const prediction = m.prediction || {};
+      const finite = key => {
+        const raw = prediction[key];
+        if(raw === null || raw === undefined || raw === "") return null;
+        const value = Number(raw);
+        return Number.isFinite(value) ? value : null;
+      };
+      const level = String(prediction.estimate_confidence_level || "").trim().toLowerCase();
+      const levels = {
+        high: { label: "ALTA", color: "var(--green)" },
+        medium: { label: "MEDIA", color: "var(--amber)" },
+        low: { label: "BAJA", color: "var(--red-soft)" },
+      };
+      const display = levels[level] || { label: "SIN NIVEL", color: "var(--muted)" };
+      return {
+        disagreement: finite("ensemble_disagreement"),
+        bandHalfWidth: finite("estimate_band_half_width"),
+        historyCoverage: finite("estimate_history_coverage"),
+        level: display.label,
+        color: display.color,
+      };
+    }
+    const estimatePp = (value) => value == null ? "—" : `±${(value*100).toFixed(1)} pp`;
+    const plainPp = (value) => value == null ? "—" : `${(value*100).toFixed(1)} pp`;
     const opportunity = (m) => {
       const stored = m.prediction?.opportunity_score;
       return stored != null && !isNaN(stored)
@@ -607,10 +774,9 @@
       return { team1, team2, favorite: fav };
     }
     function upsetView(m){
-      const u = m.controls?.favorite_upset || m.prediction?.favorite_upset_90d || {};
+      const u = m.controls?.favorite_upset || m.prediction?.favorite_upset_history || m.prediction?.favorite_upset_90d || {};
       const losses = u.favorite_losses ?? 0;
       const favs = u.favorite_matches ?? 0;
-      const played = u.played_matches ?? 0;
       const rate = u.favorite_loss_rate;
       let color = "var(--muted)";
       let label = u.risk_label || "sin datos";
@@ -620,8 +786,8 @@
         else color = "var(--green)";
       }
       return {
-        main: favs ? `${losses}/${favs}` : "s/d",
-        row: `${label} · ${favs}/${played} mkt fav/jug.`,
+        main: favs && rate != null ? pct(rate) : "s/d",
+        row: `${label} · ${losses}/${favs} derrotas como favorito`,
         color,
         rate,
         raw: u
@@ -631,7 +797,7 @@
     // ---------- flag filter options ----------
     (function buildFlagFilter(){
       const codes = new Map();
-      M.forEach(m => (m.flags||[]).forEach(f => codes.set(f.code, f.level)));
+      M.forEach(m => matchFlags(m).forEach(f => codes.set(f.code, f.level)));
       const sel = $("flagFilter");
       sel.innerHTML = '<option value="">Todas las señales</option><option value="__warn">Solo warnings</option>'
         + [...codes.keys()].sort().map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
@@ -644,8 +810,8 @@
       let list = M.filter(m => {
         const t = `${tn(m,'team1')} ${tn(m,'team2')} ${m.event||""}`.toLowerCase();
         if (q && !t.includes(q)) return false;
-        if (ff === "__warn" && !(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")) return false;
-        if (ff && ff!=="__warn" && !(m.flags||[]).some(f=>f.code===ff)) return false;
+        if (ff === "__warn" && !matchFlags(m).some(f=>f.level==="warning" || f.level==="danger")) return false;
+        if (ff && ff!=="__warn" && !matchFlags(m).some(f=>f.code===ff)) return false;
         if (of==="yes" && !m.odds?.available) return false;
         if (of==="no" && m.odds?.available) return false;
         return true;
@@ -678,7 +844,7 @@
     }
     function renderKpis(list){
       const odds = list.filter(m=>m.odds?.available).length;
-      const warn = list.filter(m=>(m.flags||[]).some(f=>f.level==="warning" || f.level==="danger")).length;
+      const warn = list.filter(m=>matchFlags(m).some(f=>f.level==="warning" || f.level==="danger")).length;
       const high = list.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
       const val = list.filter(m=>Math.abs(m.controls?.market?.model_edge_team1||0)>=.08).length;
       const avg = list.length ? list.reduce((s,m)=>s+decisionConfidence(m),0)/list.length : 0;
@@ -704,7 +870,7 @@
           <td class="predcell"><span class="fav">${esc(favName||"—")}</span> <span class="confnum">${pct(conf)}</span>
             <div class="bar"><i style="width:${Math.round((favT1?p1:1-p1)*100)}%"></i></div></td>
           <td><span class="mono" style="color:${rc};font-weight:800">${rl}</span><div class="meter"><i style="width:${Math.round(rel*100)}%;background:${rc}"></i></div></td>
-          <td><div class="flags">${(m.flags||[]).slice(0,3).map(fl=>`<span class="flag ${fl.level}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">OK</span>'}</div></td>
+          <td><div class="flags">${matchFlags(m).slice(0,3).map(fl=>`<span class="flag ${fl.level}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">OK</span>'}</div></td>
         </tr>`;
       }).join("") || `<tr><td colspan="5" class="empty">Sin partidos que coincidan</td></tr>`;
       document.querySelectorAll("tr[data-id]").forEach(tr=>tr.onclick=()=>selectMatch(tr.dataset.id));
@@ -733,6 +899,7 @@
       const uv=upsetView(m);
       const rel=reliability(m); const [rl,rc]=relLabel(rel);
       const dp=decisionProb(m), ds=decisionSide(m), dfav=decisionFavorite(m), dconf=decisionConfidence(m);
+      const estimate=estimateView(m);
       const avg=m.odds?.average;
       const rosterRow = s => { const r=(ctl.roster_stability||{})[s]||{}; return `<div class="small">${esc(sideName(m,s))}: ${num(r.days_with_current_roster,1)}d con roster · cambios30d ${r.changes_30d??"—"} · size ${r.roster_size??"—"} ${r.standin_risk?"· ⚠ stand-in":""}</div>`; };
       const rosterChangeRow = s => {
@@ -775,14 +942,16 @@
           ${statBar("Modelo", p.model_prob_team1, 1-(p.model_prob_team1??.5), pct)}
           ${statBar("Mercado (odds)", p.odds_prob_team1, p.odds_prob_team1==null?null:1-p.odds_prob_team1, pct, "cyan")}
           ${statBar("Blend mkt", p.blended_prob_team1, 1-(p.blended_prob_team1??.5), pct, "green")}
+          <div class="small">RÃ©gimen: <b class="mono">${esc(p.prediction_regime||"no_odds")}</b> Â· arquitectura <b class="mono">${esc(p.prediction_architecture||"model_a_no_odds")}</b>${p.opening_odds_recovered?` Â· <b style="color:var(--cyan)">opening odds recuperada</b>`:""}</div>
           <div class="small">Favorito decisión: <b style="color:var(--green)">${esc(dfav)}</b> · confianza <b class="mono">${pct(dconf)}</b> · fuente ${esc(p.decision_probability_source||"modelo")} · peso mercado ${pct(p.decision_market_weight)}</div>
           <div class="small">Favorito modelo: <b style="color:var(--red-soft)">${esc(p.favorite)}</b> · confianza <b class="mono">${pct(p.confidence)}</b></div>
+          <div class="small">Estimación T1: <b class="mono">${pct(p.model_prob_team1)} ${estimatePp(estimate.bandHalfWidth)}</b> · nivel <b class="mono" style="color:${estimate.color}">${esc(estimate.level)}</b> · cobertura de historial <b class="mono">${pct(estimate.historyCoverage)}</b> · desacuerdo ensemble <b class="mono">${plainPp(estimate.disagreement)}</b></div>
           <div class="small">Bucket histórico fav-pierde: ${pct(p.similar_probability_bucket?.favorite_loss_rate)} (${p.similar_probability_bucket?.n||0} casos similares)</div>
         </div>
-        <div class="box"><b>Fav. upset potencial</b>
+        <div class="box"><b>Historial de upset del favorito</b>
           <div class="small">Favorito actual: <b style="color:${uv.color}">${esc(dfav)}</b> · riesgo <b class="mono" style="color:${uv.color}">${esc(uv.raw.risk_label||"sin datos")}</b></div>
-          <div class="small">Ultimos ${uv.raw.window_days||90}d: perdio como favorito de mercado <b class="mono">${uv.raw.favorite_losses??0}/${uv.raw.favorite_matches??0}</b> veces.</div>
-          <div class="small">Fue favorito de mercado en <b class="mono">${uv.raw.favorite_matches??0}/${uv.raw.played_matches??0}</b> partidos jugados; odds disponibles en <b class="mono">${uv.raw.market_odds_matches??0}/${uv.raw.played_matches??0}</b>. Fuente: odds pre-partido guardadas.</div>
+          <div class="small">Historial completo anterior al partido: perdió <b class="mono">${uv.raw.favorite_losses??0}/${uv.raw.favorite_matches??0}</b> veces cuando el modelo le asignó al menos 51% de victoria (${uv.rate==null?"sin porcentaje":pct(uv.rate)}).</div>
+          <div class="small">Muestra: favorito del modelo en <b class="mono">${uv.raw.favorite_matches??0}</b> de <b class="mono">${uv.raw.played_matches??0}</b> predicciones evaluadas del equipo. No exige odds. Fuente: prediction_ledger prepartido congelado.</div>
         </div>
         <div class="box"><b>Stake recomendado</b>
           <div class="small">Accion: <b style="color:${sv.color}">${esc(sv.label)}</b> · cartera <b class="mono">${esc(sv.pct)}</b> · ROI esperado ${esc(sv.roi)}</div>
@@ -800,7 +969,7 @@
           ${statBar("Partidos", f.matches_team1, f.matches_team2, x=>num(x,0))}
           ${statBar("Rating roster", f.player_rating_team1, f.player_rating_team2, x=>num(x,2))}
         </div>
-        <div class="box"><b>Señales / flags</b><div class="flags">${(m.flags||[]).map(fl=>`<span class="flag ${fl.level}" title="${esc(fl.message)}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">Sin flags</span>'}</div></div>
+        <div class="box"><b>Señales / flags</b><div class="flags">${matchFlags(m).map(fl=>`<span class="flag ${fl.level}" title="${esc(fl.message)}">${esc(fl.code)}</span>`).join("")||'<span class="flag ok">Sin flags</span>'}</div></div>
         <div class="box"><b>Mercado</b>
           <div class="small">Favorito mercado: ${mk.market_favorite_side?esc(sideName(m,mk.market_favorite_side)):"—"} · casas ${m.odds?.bookmaker_count||0} · consenso ${esc(mk.consensus_label||"n/a")}</div>
           <div class="small">Drift T1: ${sg(mk.drift_team1_prob)} · edge modelo T1: ${sg(mk.model_edge_team1)} · value: ${esc(mk.value_label||"n/a")}</div>
@@ -823,7 +992,7 @@
     // ---------- best opportunity ----------
     function renderBest(){
       const dayF = $("bestDay")?.value || "";
-      const probMin = Math.max(0.6, parseFloat($("bestProb")?.value || "0") || 0);
+      const probMin = Math.max(0.65, parseFloat($("bestProb")?.value || "0.65") || 0.65);
       const relMin = Math.max(0.45, parseFloat($("bestRel")?.value || "0") || 0);
       const list = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
                     .map(m=>({m, opp:opportunity(m), rel:reliability(m)}))
@@ -836,10 +1005,16 @@
         const m=x.m, p=m.prediction||{}, f=m.features||{};
         const [rl,rc]=relLabel(x.rel);
         const favSide = decisionSide(m), favName = decisionFavorite(m), conf = decisionConfidence(m);
+        const modelTeam1 = p.model_prob_team1 == null ? null : Number(p.model_prob_team1);
+        const modelFavProb = modelTeam1 == null || !Number.isFinite(modelTeam1)
+          ? null
+          : favSide === "team1" ? modelTeam1 : 1-modelTeam1;
         const gd = (f.glicko_rating_team1!=null&&f.glicko_rating_team2!=null)? (favSide==="team1"?f.glicko_rating_team1-f.glicko_rating_team2:f.glicko_rating_team2-f.glicko_rating_team1):null;
         const edge=m.controls?.market?.model_edge_team1;
         const st=m.staking||{};
         const sv=stakeView(st,m);
+        const estimate=estimateView(m);
+        const uv=upsetView(m);
         return `<div class="opp" data-id="${esc(m.id)}">
           <div class="rank mono">${String(i+1).padStart(2,'0')}</div>
           <div class="ev mono">${esc(m.date)} ${esc(m.hour)} · ${esc((m.format||'').toUpperCase())}</div>
@@ -851,6 +1026,9 @@
             <div class="opp-stat"><b>${gd!=null?(gd>0?"+":"")+gd.toFixed(0):"—"}</b><span>Δ Glicko a favor</span></div>
             <div class="opp-stat"><b style="color:var(--cyan)">${edge!=null?sg(edge):"—"}</b><span>value vs mercado</span></div>
             <div class="opp-stat"><b style="color:${sv.color}">${esc(sv.pct)}</b><span>${esc(sv.row)}</span></div>
+            <div class="opp-stat"><b style="color:${estimate.color}">${pct(modelFavProb)} ${estimatePp(estimate.bandHalfWidth)}</b><span>p modelo del favorito · nivel ${esc(estimate.level)}</span></div>
+            <div class="opp-stat"><b>${pct(estimate.historyCoverage)}</b><span>cobertura de historial · desacuerdo ${plainPp(estimate.disagreement)}</span></div>
+            <div class="opp-stat"><b style="color:${uv.color}">${esc(uv.main)}</b><span>upsets sufridos · ${uv.raw.favorite_losses??0}/${uv.raw.favorite_matches??0} como favorito modelo ≥51%</span></div>
           </div>
         </div>`;
       }).join("") || `<div class="empty">No hay oportunidades con confianza y fiabilidad suficientes hoy.</div>`;
@@ -876,8 +1054,13 @@
         `Benchmark de mercado (odds apertura, n=${mk.n}, ilustrativo): modelo log loss <b class="mono">${num(mk.model_log_loss,3)}</b> vs mercado <b class="mono" style="color:var(--cyan)">${num(mk.market_log_loss,3)}</b>. ${esc(mk.note||"")}`
         : `${esc(mk.note||"Aún sin odds suficientes para el benchmark de mercado.")}`;
       $("marketBox").innerHTML += `<br><span style="color:var(--muted)">Log loss de un coinflip puro = ln(2) ≈ 0.693. El mérito del modelo está en la banda 55-80%; los partidos parejos son incertidumbre irreducible.</span>`;
-      drawFavoriteAccuracy();
-      drawCalibration();
+      const oa = DATA.model?.odds_architectures||{};
+      if(oa.available){
+        const ranking=(oa.ranking||[]).map((r,i)=>`${i+1}. ${esc(r.architecture)}: LL ${num(r.log_loss,4)}, Brier ${num(r.brier,4)}, accuracy ${pct(r.accuracy)}`).join("<br>");
+        $("marketBox").innerHTML += `<br><br><b>Puerta de arquitecturas con/sin odds</b> Â· soporte temporal comÃºn n=${intfmt(oa.n_common_holdout)} Â· sin odds ${pct(oa.no_odds_fraction)} Â· candidata de producciÃ³n <b class="mono">${esc(oa.production_candidate||oa.winner||"â€”")}</b><br>${ranking}`;
+      }
+      drawLiveAccuracy();
+      drawLiveCalibration();
     }
     function drawFavoriteAccuracy(range=state.accuracyRange){
       state.accuracyRange=range;
@@ -987,6 +1170,106 @@
         <div class="small" style="margin-top:8px">Cuanto más pegada a la diagonal, mejor calibrado. Validado solo con resultados reales post-snapshot.</div>`;
     }
 
+    function liveScopeLabel(scope){
+      return scope==="odds"?"con odds":scope==="no_odds"?"sin odds":"todos";
+    }
+    function liveScopeData(scope=state.ledgerScope){
+      const live=DATA.model?.live_performance||{};
+      const scopes=live.scopes||{};
+      const requested=scopes[scope];
+      if(requested&&Number(requested.n)>0)return {live,scope,data:requested};
+      return {live,scope:"all",data:scopes.all||{}};
+    }
+    function setCs2LiveVisibility(visible){
+      [$("cs2LiveAccuracyPanel"),$("cs2LiveCalibrationPanel")].forEach(panel=>panel?.classList.toggle("hidden",!visible));
+    }
+    function drawLiveAccuracy(scope=state.ledgerScope){
+      const selected=liveScopeData(scope);
+      const hasLive=selected.live.status==="available"&&Number(selected.live.scopes?.all?.n)>0;
+      setCs2LiveVisibility(hasLive);
+      if(!hasLive)return;
+      state.ledgerScope=selected.scope;
+      document.querySelectorAll("[data-ledger-scope]").forEach(button=>{
+        const key=button.dataset.ledgerScope;
+        const hasScope=key==="all"||Number(selected.live.scopes?.[key]?.n)>0;
+        button.classList.toggle("hidden",!hasScope);
+        button.classList.toggle("active",key===selected.scope);
+        button.onclick=()=>{state.ledgerScope=key;drawLiveAccuracy(key);drawLiveCalibration(key);};
+      });
+
+      const rolling=selected.data.rolling_accuracy||{};
+      const points=Array.isArray(rolling.points)?rolling.points:[];
+      const cv=$("liveAccuracyCanvas");if(!cv||!points.length)return;
+      const ctx=cv.getContext("2d"),W=cv.width,H=cv.height,left=54,right=18,top=34,bottom=58;
+      const stats=$("liveAccuracyStats"),tooltip=$("liveAccuracyTooltip");
+      ctx.clearRect(0,0,W,H);
+      const plotW=W-left-right,plotH=H-top-bottom;
+      const X=index=>points.length===1?left+plotW/2:left+index*(plotW/(points.length-1));
+      const Y=value=>top+(1-Math.max(0,Math.min(1,Number(value))))*plotH;
+      ctx.font="11px monospace";ctx.textAlign="right";ctx.textBaseline="middle";
+      for(let i=0;i<=4;i++){
+        const value=i/4,y=Y(value);ctx.strokeStyle="#1c2230";ctx.lineWidth=1;
+        ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(W-right,y);ctx.stroke();
+        ctx.fillStyle="#7d8aa0";ctx.fillText(`${Math.round(value*100)}%`,left-8,y);
+      }
+      const latest=rolling.latest||points[points.length-1];
+      if(latest&&Number.isFinite(Number(latest.accuracy))){
+        const y=Y(latest.accuracy);ctx.strokeStyle="#25d9f8";ctx.lineWidth=1;ctx.setLineDash([6,5]);
+        ctx.beginPath();ctx.moveTo(left,y);ctx.lineTo(W-right,y);ctx.stroke();ctx.setLineDash([]);
+        ctx.fillStyle="#25d9f8";ctx.textAlign="left";ctx.textBaseline="bottom";
+        ctx.fillText(`última ventana ${pct(latest.accuracy)}`,left+4,y-4);
+      }
+      const plotted=[];ctx.strokeStyle="#37e89c";ctx.lineWidth=2.5;ctx.shadowColor="rgba(55,232,156,.35)";ctx.shadowBlur=7;ctx.beginPath();
+      points.forEach((point,index)=>{const x=X(index),y=Y(point.accuracy);index?ctx.lineTo(x,y):ctx.moveTo(x,y);plotted.push({x,y,point});});
+      ctx.stroke();ctx.shadowBlur=0;
+      plotted.forEach(({x,y,point},index)=>{if(index%Math.max(1,Math.floor(points.length/50))!==0&&index!==points.length-1)return;ctx.fillStyle=Number(point.n)<Number(rolling.window_size)?"#f1b94b":"#37e89c";ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fill();});
+      const labelIndexes=[0,Math.floor((points.length-1)/2),points.length-1].filter((value,index,all)=>all.indexOf(value)===index);
+      ctx.textAlign="center";ctx.textBaseline="top";ctx.fillStyle="#7d8aa0";ctx.font="10px monospace";
+      labelIndexes.forEach(index=>ctx.fillText(String(points[index].at_utc||"").slice(0,10),X(index),H-bottom+12));
+      ctx.fillStyle="#aab4c6";ctx.textAlign="right";ctx.fillText("liquidación",W-right,H-10);
+      cv.onmousemove=event=>{
+        if(!plotted.length||!tooltip)return;
+        const rect=cv.getBoundingClientRect(),logicalX=(event.clientX-rect.left)*W/rect.width;
+        const nearest=plotted.reduce((best,item)=>Math.abs(item.x-logicalX)<Math.abs(best.x-logicalX)?item:best,plotted[0]);
+        const point=nearest.point;
+        tooltip.innerHTML=`<b>${esc(String(point.at_utc||"").slice(0,10))}</b><br>Accuracy móvil ${pct(point.accuracy)}<br>${intfmt(point.correct)} / ${intfmt(point.n)} liquidaciones`;
+        tooltip.style.left=`${event.clientX+12}px`;tooltip.style.top=`${event.clientY+12}px`;tooltip.classList.remove("hidden");
+      };
+      cv.onmouseleave=()=>tooltip?.classList.add("hidden");
+      if(stats)stats.innerHTML=`
+        <div class="row2"><span class="lab">régimen</span><span></span><span class="val">${esc(liveScopeLabel(selected.scope))}</span></div>
+        <div class="row2"><span class="lab">accuracy última ventana</span><span></span><span class="val" style="color:var(--green)">${pct(latest?.accuracy)}</span></div>
+        <div class="row2"><span class="lab">muestra última ventana</span><span></span><span class="val">${intfmt(latest?.correct)} / ${intfmt(latest?.n)}</span></div>
+        <div class="row2"><span class="lab">ventana máxima</span><span></span><span class="val">${intfmt(rolling.window_size)} liquidaciones</span></div>
+        <div class="row2"><span class="lab">histórico liquidado</span><span></span><span class="val">N=${intfmt(selected.data.n)} · ${pct(selected.data.accuracy)}</span></div>
+        <div class="small" style="margin-top:8px">Solo predicciones prepartido congeladas y evaluadas del prediction_ledger.${selected.live.note?` ${esc(selected.live.note)}`:""}</div>`;
+    }
+    function drawLiveCalibration(scope=state.ledgerScope){
+      const selected=liveScopeData(scope);
+      if(selected.live.status!=="available"||!Number(selected.data.n))return;
+      const calibration=selected.data.calibration||{},bins=Array.isArray(calibration.bins)?calibration.bins:[];
+      if(!bins.length)return;
+      const cv=$("calCanvas");if(!cv)return;const ctx=cv.getContext("2d");
+      const W=cv.width,H=cv.height,pad=42;ctx.clearRect(0,0,W,H);
+      const X=value=>pad+value*(W-pad-12),Y=value=>H-pad-value*(H-pad-12);
+      ctx.strokeStyle="#1c2230";ctx.lineWidth=1;
+      for(let i=0;i<=10;i++){const value=i/10;ctx.beginPath();ctx.moveTo(X(value),Y(0));ctx.lineTo(X(value),Y(1));ctx.moveTo(X(0),Y(value));ctx.lineTo(X(1),Y(value));ctx.stroke();}
+      ctx.strokeStyle="#2a3344";ctx.setLineDash([5,4]);ctx.beginPath();ctx.moveTo(X(0),Y(0));ctx.lineTo(X(1),Y(1));ctx.stroke();ctx.setLineDash([]);
+      ctx.fillStyle="#7d8aa0";ctx.font="11px monospace";ctx.fillText("prob. team1 predicha →",pad,H-14);ctx.save();ctx.translate(14,H-pad);ctx.rotate(-Math.PI/2);ctx.fillText("frecuencia real →",0,0);ctx.restore();
+      ctx.strokeStyle="#ff2740";ctx.lineWidth=2;ctx.beginPath();
+      bins.forEach((bucket,index)=>{const x=X(bucket.avg_prob),y=Y(bucket.empirical_winrate);index?ctx.lineTo(x,y):ctx.moveTo(x,y);});ctx.stroke();
+      bins.forEach(bucket=>{const x=X(bucket.avg_prob),y=Y(bucket.empirical_winrate);ctx.fillStyle="#ff5a6e";ctx.beginPath();ctx.arc(x,y,3+Math.min(6,Math.sqrt(Number(bucket.n))),0,Math.PI*2);ctx.fill();ctx.fillStyle="#d7deea";ctx.font="10px monospace";ctx.fillText(`n=${intfmt(bucket.n)}`,Math.min(W-44,x+7),Math.max(12,y-7));});
+      const stats=$("calStats");if(stats)stats.innerHTML=`
+        <div class="row2"><span class="lab">régimen</span><span></span><span class="val">${esc(liveScopeLabel(selected.scope))}</span></div>
+        <div class="row2"><span class="lab">muestras</span><span></span><span class="val">${intfmt(selected.data.n)}</span></div>
+        <div class="row2"><span class="lab">accuracy</span><span></span><span class="val">${pct(selected.data.accuracy)}</span></div>
+        <div class="row2"><span class="lab">Brier</span><span></span><span class="val">${num(selected.data.brier,4)}</span></div>
+        <div class="row2"><span class="lab">log loss</span><span></span><span class="val">${num(selected.data.log_loss,4)}</span></div>
+        <div class="row2"><span class="lab">ECE</span><span></span><span class="val">${num(calibration.ece,4)}</span></div>
+        <div class="small" style="margin-top:8px">La diagonal es calibración perfecta. Cada punto y cada fila muestran siempre su N real.</div>`;
+      const bucketRows=$("calibrationBucketRows");if(bucketRows)bucketRows.innerHTML=bins.map(bucket=>`<tr class="winrow"><td>${pct(bucket.lower)}–${pct(bucket.upper)}</td><td>${intfmt(bucket.n)}</td><td>${pct(bucket.avg_prob)}</td><td>${pct(bucket.empirical_winrate)}</td></tr>`).join("");
+    }
+
     // ---------- database view ----------
     function renderDatabase(){
       const tableRows = DB.table_counts || [];
@@ -1091,14 +1374,237 @@
     }
 
     // ---------- tennis view ----------
+    function tennisProbabilityValue(row){
+      const value = tennisFinite(row?.predicted?.probability);
+      return value !== null && value >= 0 && value <= 1 ? value : null;
+    }
+
+    function sortedTennisRows(){
+      const rows = Array.isArray(TENNIS.matches) ? TENNIS.matches : [];
+      if(state.tennisSortKey !== "probability") return [...rows];
+      const direction = state.tennisSortDir === "asc" ? 1 : -1;
+      return rows.map((row,index)=>({row,index})).sort((left,right)=>{
+        const a = tennisProbabilityValue(left.row);
+        const b = tennisProbabilityValue(right.row);
+        if(a === null && b === null) return left.index-right.index;
+        if(a === null) return 1;
+        if(b === null) return -1;
+        const probabilityOrder = direction * (a-b);
+        if(probabilityOrder !== 0) return probabilityOrder;
+        const dateOrder = `${left.row.date||""} ${left.row.scheduled_time||""}`
+          .localeCompare(`${right.row.date||""} ${right.row.scheduled_time||""}`);
+        return dateOrder || String(left.row.match_id||"").localeCompare(String(right.row.match_id||"")) || left.index-right.index;
+      }).map(item=>item.row);
+    }
+
+    function updateTennisSortArrow(){
+      document.querySelectorAll("th.tennis-sortable").forEach(th=>{
+        const active = th.dataset.tennisSort === state.tennisSortKey;
+        th.classList.toggle("active", active);
+        th.setAttribute("aria-sort", active ? (state.tennisSortDir === "asc" ? "ascending" : "descending") : "none");
+        const arrow = th.querySelector(".sortarrow");
+        if(arrow) arrow.textContent = active ? (state.tennisSortDir === "asc" ? "▲" : "▼") : "";
+      });
+    }
+
+    function setTennisSort(key){
+      if(key !== "probability") return;
+      if(state.tennisSortKey === key){
+        state.tennisSortDir = state.tennisSortDir === "asc" ? "desc" : "asc";
+      } else {
+        state.tennisSortKey = key;
+        state.tennisSortDir = "desc";
+      }
+      renderTennis();
+    }
+
+    function tennisFinite(value){
+      if(value === null || value === undefined || (typeof value === "string" && value.trim() === "")) return null;
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function tennisCountValue(value){
+      const parsed = tennisFinite(value);
+      return parsed !== null && parsed >= 0 ? Math.trunc(parsed) : 0;
+    }
+
+    function tennisInputConfidence(row){
+      const source = row.input_confidence || {};
+      const flags = Array.isArray(source.flags) ? [...source.flags] : [];
+      const raw = String(source.level || "").trim().toUpperCase();
+      const hasPrediction = Boolean(row.predicted?.winner && tennisFinite(row.predicted?.probability) !== null);
+      if(!hasPrediction || ["UNAVAILABLE", "NOT_AVAILABLE", "NO DISPONIBLE"].includes(raw)){
+        return { label: "NO DISPONIBLE", flags };
+      }
+      const sourceFamily = row.data_freshness?.source_family || (String(row.match_id||"").startsWith("tennisratio:") ? "tennisratio" : "tennis_explorer");
+      const freshness = freshnessState("TENNIS", sourceFamily);
+      if(freshness.stale && !flags.some(flag=>String(flag).startsWith("data_stale_"))) flags.unshift(`data_stale_${sourceFamily}_${Math.round(freshness.ageHours||0)}h`);
+      if((freshness.fallback_used || row.data_freshness?.fallback_used) && !flags.includes("agenda_fallback_tennis_explorer")) flags.unshift("agenda_fallback_tennis_explorer");
+      if(freshness.stale || freshness.fallback_used || row.data_freshness?.fallback_used) return { label: "BAJA", flags };
+      if(["HIGH", "ALTA"].includes(raw)) return { label: "ALTA", flags };
+      if(["MEDIUM", "MEDIA"].includes(raw)) return { label: "MEDIA", flags };
+      if(["LOW", "BAJA"].includes(raw)) return { label: "BAJA", flags };
+      return { label: "—", flags };
+    }
+
+    function tennisPerformanceData(){
+      const root = TENNIS.settled_performance || {};
+      const segmentKey = `${state.tennisPerformanceGender}|${state.tennisPerformanceProbability}`;
+      const source = root.segments?.[segmentKey]
+        || (segmentKey === "all|all" ? root : {});
+      const calibration = source.calibration || {};
+      const settledCount = tennisCountValue(source.settled_count);
+      const evaluatedCount = tennisCountValue(source.evaluated_count);
+      const provisionalThreshold = tennisFinite(source.provisional_threshold);
+      const provisional = source.provisional === true
+        || (evaluatedCount > 0 && provisionalThreshold !== null && evaluatedCount < provisionalThreshold);
+      const bins = evaluatedCount > 0 && Array.isArray(calibration.bins)
+        ? calibration.bins.map(bin=>({
+            label: String(bin.bin || ""),
+            count: tennisCountValue(bin.count),
+            predicted: tennisFinite(bin.mean_predicted),
+            observed: tennisFinite(bin.observed_rate),
+          })).filter(bin=>bin.count > 0 && bin.predicted !== null && bin.observed !== null
+            && bin.predicted >= 0 && bin.predicted <= 1 && bin.observed >= 0 && bin.observed <= 1)
+        : [];
+      return {
+        status: String(source.status || ""),
+        scope: String(source.scope || ""),
+        settledCount,
+        evaluatedCount,
+        correct: tennisCountValue(source.correct),
+        latestSettledAtUtc: String(source.latest_settled_at_utc || ""),
+        accuracy: evaluatedCount > 0 ? tennisFinite(source.accuracy) : null,
+        brier: evaluatedCount > 0 ? tennisFinite(source.brier) : null,
+        logLoss: evaluatedCount > 0 ? tennisFinite(source.log_loss) : null,
+        provisional,
+        provisionalThreshold,
+        method: String(calibration.method || ""),
+        bins,
+        genderFilter: state.tennisPerformanceGender,
+        probabilityFilter: state.tennisPerformanceProbability,
+      };
+    }
+
+    function drawTennisCalibration(performance){
+      const canvas = $("tennisCalibration");
+      if(!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if(!ctx) return;
+      const width = canvas.width;
+      const height = canvas.height;
+      const plot = { left:58, right:22, top:24, bottom:48 };
+      const x = value => plot.left + value * (width - plot.left - plot.right);
+      const y = value => height - plot.bottom - value * (height - plot.top - plot.bottom);
+      ctx.clearRect(0, 0, width, height);
+      ctx.fillStyle = "#12161e";
+      ctx.fillRect(0, 0, width, height);
+      ctx.font = "11px ui-monospace, Consolas, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for(let step=0; step<=5; step+=1){
+        const value = step / 5;
+        ctx.strokeStyle = "#252d3b";
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x(value), y(0)); ctx.lineTo(x(value), y(1)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(x(0), y(value)); ctx.lineTo(x(1), y(value)); ctx.stroke();
+        ctx.fillStyle = "#7d8aa0";
+        ctx.fillText(`${Math.round(value*100)}%`, x(value), height-plot.bottom+18);
+        ctx.textAlign = "right";
+        ctx.fillText(`${Math.round(value*100)}%`, plot.left-9, y(value));
+        ctx.textAlign = "center";
+      }
+      ctx.fillStyle = "#aab4c4";
+      ctx.fillText("Probabilidad predicha", (plot.left+width-plot.right)/2, height-12);
+      ctx.save();
+      ctx.translate(14, (plot.top+height-plot.bottom)/2);
+      ctx.rotate(-Math.PI/2);
+      ctx.fillText("Frecuencia observada", 0, 0);
+      ctx.restore();
+
+      ctx.strokeStyle = "#7d8aa0";
+      ctx.setLineDash([6,5]);
+      ctx.beginPath(); ctx.moveTo(x(0), y(0)); ctx.lineTo(x(1), y(1)); ctx.stroke();
+      ctx.setLineDash([]);
+
+      if(performance.evaluatedCount === 0 || performance.bins.length === 0){
+        ctx.fillStyle = "#c3cad5";
+        ctx.font = "700 14px ui-monospace, Consolas, monospace";
+        ctx.fillText(performance.evaluatedCount === 0 ? "Sin muestra liquidada" : "Curva no calculada", (plot.left+width-plot.right)/2, (plot.top+height-plot.bottom)/2);
+        return;
+      }
+
+      const bins = [...performance.bins].sort((a,b)=>a.predicted-b.predicted);
+      ctx.strokeStyle = "#19e6ff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      bins.forEach((bin,index)=>{
+        if(index === 0) ctx.moveTo(x(bin.predicted), y(bin.observed));
+        else ctx.lineTo(x(bin.predicted), y(bin.observed));
+      });
+      ctx.stroke();
+      bins.forEach(bin=>{
+        ctx.fillStyle = "#ff2740";
+        ctx.beginPath();
+        ctx.arc(x(bin.predicted), y(bin.observed), Math.min(7, 3+Math.sqrt(bin.count)/3), 0, Math.PI*2);
+        ctx.fill();
+        ctx.strokeStyle = "#ffd2d8";
+        ctx.lineWidth = 1;
+        ctx.stroke();
+      });
+    }
+
+    function renderTennisPerformance(){
+      const performance = tennisPerformanceData();
+      const hasSample = performance.evaluatedCount > 0;
+      $("tennisPerformanceKpis").innerHTML = [
+        [intfmt(performance.settledCount), "partidos liquidados"],
+        [hasSample && performance.accuracy !== null ? pct(performance.accuracy) : "no calculado", `accuracy · ${intfmt(performance.correct)}/${intfmt(performance.evaluatedCount)}`],
+        [hasSample && performance.brier !== null ? num(performance.brier,3) : "no calculado", "Brier"],
+        [hasSample && performance.logLoss !== null ? num(performance.logLoss,3) : "no calculado", "log-loss"],
+      ].map(([value,label])=>`<div class="kpi"><b>${value}</b><span>${label}</span></div>`).join("");
+
+      const status = $("tennisPerformanceStatus");
+      status.textContent = !hasSample ? "SIN MUESTRA / NO CALCULADO" : performance.provisional ? "PROVISIONAL" : "CALCULADO";
+      status.className = `health ${!hasSample ? "unavailable" : performance.provisional ? "warning" : "ok"}`;
+      const notes = [];
+      const probabilityLabels = {
+        all: "todas",
+        "50_60": "50-60 %",
+        "60_70": "60-70 %",
+        "70_80": "70-80 %",
+        "80_90": "80-90 %",
+        "90_100": "90-100 %",
+      };
+      notes.push(
+        `Filtros activos: género ${performance.genderFilter === "all" ? "todos" : performance.genderFilter}; `
+        + `probabilidad ${probabilityLabels[performance.probabilityFilter] || performance.probabilityFilter}.`
+      );
+      if(!hasSample){
+        notes.push("Sin muestra: n=0 partidos liquidados evaluables; accuracy, Brier, log-loss y curva no calculados.");
+      } else {
+        notes.push(`N=${intfmt(performance.evaluatedCount)} evaluados de ${intfmt(performance.settledCount)} liquidados${performance.correct <= performance.evaluatedCount ? `; ${intfmt(performance.correct)} aciertos` : ""}.`);
+        if(performance.provisional){
+          const threshold = performance.provisionalThreshold !== null ? ` (umbral ${intfmt(performance.provisionalThreshold)})` : "";
+          notes.push(`Muestra provisional${threshold}: con solo decenas de partidos no debe interpretarse como rendimiento estable.`);
+        }
+      }
+      if(performance.scope) notes.push(`Ambito: ${performance.scope}.`);
+      if(performance.method) notes.push(`Curva: ${performance.method}.`);
+      if(performance.latestSettledAtUtc) notes.push(`Última liquidación incorporada: ${performance.latestSettledAtUtc}.`);
+      $("tennisPerformanceNote").textContent = notes.join(" ");
+      drawTennisCalibration(performance);
+    }
+
     function renderTennis(){
-      const rows = TENNIS.matches || [];
+      const rows = sortedTennisRows();
       const run = TENNIS.latest_run || {};
       const health = TENNIS.health || (TENNIS.database?.exists ? "unavailable" : "missing");
       const predicted = rows.filter(row=>row.predicted?.winner && row.predicted?.probability != null).length;
       const settled = rows.filter(row=>row.actual?.winner).length;
       const unavailable = rows.length - predicted;
-      const lowConfidence = rows.filter(row=>String(row.reliability?.label||"").toUpperCase()==="LOW").length;
+      const lowConfidence = rows.filter(row=>tennisInputConfidence(row).label === "BAJA").length;
 
       const healthEl = $("tennisHealth");
       healthEl.textContent = health;
@@ -1122,6 +1628,8 @@
         ? runBits.join(" · ")
         : "No hay una ejecución de tenis disponible en la base operativa.";
 
+      renderTennisPerformance();
+
       const flagClass = flag => /unavailable|unmapped|missing|stale|poor|low|error/i.test(String(flag))
         ? "danger"
         : /unknown|unverified|warning/i.test(String(flag)) ? "warning" : "info";
@@ -1129,13 +1637,9 @@
         const a = row.player_a?.name || "Jugador A";
         const b = row.player_b?.name || "Jugador B";
         const prediction = row.predicted || {};
-        const reliabilityData = row.reliability || {};
-        const flags = reliabilityData.flags || [];
-        const confidenceScore = Number(reliabilityData.score);
-        const scoreLabel = Number.isFinite(confidenceScore)
-          ? (confidenceScore >= 0 && confidenceScore <= 1 ? pct(confidenceScore) : num(confidenceScore,1))
-          : "";
-        const reliabilityBits = [reliabilityData.label, scoreLabel].filter(Boolean);
+        const confidence = tennisInputConfidence(row);
+        const flags = confidence.flags;
+        const confidenceBits = [confidence.label];
         const flagHtml = flags.map(flag=>`<span class="flag ${flagClass(flag)}">${esc(flag)}</span>`).join("");
         const probabilityDetail = prediction.probability_a != null || prediction.probability_b != null
           ? `<div class="tennis-meta">A ${pct(prediction.probability_a)} · B ${pct(prediction.probability_b)}</div>`
@@ -1157,12 +1661,14 @@
           <td><div class="tennis-match-name">${esc(a)} <span style="color:var(--red)">vs</span> ${esc(b)}</div><div class="tennis-meta">${esc(row.status||"estado no disponible")}</div></td>
           <td>${predictedWinner}<div class="tennis-meta">${esc(prediction.status||"")}</div></td>
           <td class="mono">${pct(prediction.probability)}${probabilityDetail}</td>
-          <td><div class="mono">${esc(reliabilityBits.join(" · ")||"—")}</div><div class="flags">${flagHtml}</div></td>
+          <td><div class="mono">${esc(confidenceBits.join(" · ")||"—")}</div><div class="flags">${flagHtml}</div></td>
           <td>${actualWinner}${actualStatus}</td>
         </tr>`;
       }).join("") || '<tr><td colspan="7" class="empty">Sin predicciones de tenis persistidas para mostrar.</td></tr>';
+      updateTennisSortArrow();
 
       const notes = (TENNIS.notes || []).map(esc);
+      notes.push("Confianza del input describe cobertura y calidad previa del dato; es cualitativa y no es una tasa de acierto.");
       notes.push("El ganador real es un dato posterior y nunca modifica la predicción publicada.");
       $("tennisNotes").innerHTML = notes.join("<br>");
     }
@@ -1223,6 +1729,33 @@
       });
       ["search","flagFilter","oddsFilter"].forEach(id=>$(id).oninput=renderRows);
       document.querySelectorAll("th.sortable").forEach(th=>th.onclick=()=>setSort(th.dataset.sort));
+      document.querySelectorAll("th.tennis-sortable").forEach(th=>{
+        th.onclick=()=>setTennisSort(th.dataset.tennisSort);
+        th.onkeydown=event=>{
+          if(event.key === "Enter" || event.key === " "){
+            event.preventDefault();
+            setTennisSort(th.dataset.tennisSort);
+          }
+        };
+      });
+      const tennisGenderFilter = $("tennisPerformanceGender");
+      const tennisProbabilityFilter = $("tennisPerformanceProbability");
+      if(tennisGenderFilter) tennisGenderFilter.oninput=()=>{
+        state.tennisPerformanceGender = tennisGenderFilter.value;
+        renderTennisPerformance();
+      };
+      if(tennisProbabilityFilter) tennisProbabilityFilter.oninput=()=>{
+        state.tennisPerformanceProbability = tennisProbabilityFilter.value;
+        renderTennisPerformance();
+      };
+      const tennisPerformanceReset = $("tennisPerformanceReset");
+      if(tennisPerformanceReset) tennisPerformanceReset.onclick=()=>{
+        state.tennisPerformanceGender = "all";
+        state.tennisPerformanceProbability = "all";
+        if(tennisGenderFilter) tennisGenderFilter.value = "all";
+        if(tennisProbabilityFilter) tennisProbabilityFilter.value = "all";
+        renderTennisPerformance();
+      };
       $("reset").onclick=()=>{["search","flagFilter","oddsFilter"].forEach(id=>$(id).value="");state.sortKey="time";state.sortDir="asc";renderRows();};
 
       // Filtros de la vista Best Opportunity (Favoritos): dia / probabilidad / fiabilidad.
@@ -1231,17 +1764,19 @@
       if (bd) bd.innerHTML = '<option value="">Día: todos</option>' + days.map(d=>`<option value="${esc(d)}">${esc(d)}</option>`).join("");
       ["bestDay","bestProb","bestRel"].forEach(id=>{ const el=$(id); if(el) el.oninput=renderBest; });
       const br=$("bestReset");
-      if(br) br.onclick=()=>{ if($("bestDay"))$("bestDay").value=""; if($("bestProb"))$("bestProb").value="0"; if($("bestRel"))$("bestRel").value="0"; renderBest(); };
+      if(br) br.onclick=()=>{ if($("bestDay"))$("bestDay").value=""; if($("bestProb"))$("bestProb").value="0.65"; if($("bestRel"))$("bestRel").value="0"; renderBest(); };
 
       // Routing de la pagina de partido.
       const back=$("backLink");
       if(back) back.onclick=(e)=>{ e.preventDefault(); history.replaceState(null,"",location.pathname+location.search); applyRoute(); };
       window.addEventListener("hashchange", applyRoute);
 
+      renderFreshness();
+      window.setInterval(()=>{ renderFreshness(); renderRows(); if(state.view==="tennis") renderTennis(); }, 60000);
       renderRows();
       applyRoute();  // honra deep-link #/partido/:id al cargar
       // pre-cuenta best
-      const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&decisionConfidence(m)>=.6&&reliability(m)>=.45).length;
+      const n = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2'))&&decisionConfidence(m)>=.65&&reliability(m)>=.45).length;
       $("bestCount").textContent = n?`(${n})`:"";
     }
     init();

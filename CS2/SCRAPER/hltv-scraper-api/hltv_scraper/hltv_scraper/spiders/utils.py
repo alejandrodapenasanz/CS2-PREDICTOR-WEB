@@ -1,10 +1,11 @@
 import json
 import os
 
+
 def update_json_data(filename: str, data: dict) -> None:
     data_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data")
     os.makedirs(data_dir, exist_ok=True)
-    
+
     file = os.path.join(data_dir, f"{filename}.json")
     existing_data = {}
 

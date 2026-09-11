@@ -24,7 +24,8 @@
         HLTV_USE_SCRAPLING               = '1'
         HLTV_SOLVE_CLOUDFLARE            = '1'
         HLTV_IMPERSONATE                 = 'chrome'
-        HLTV_STEALTH_HEADLESS            = '1'
+        # Si Cloudflare exige interaccion, la ventana debe ser visible al operador.
+        HLTV_STEALTH_HEADLESS            = '0'
         HLTV_STEALTH_TIMEOUT_MS          = '45000'
         HLTV_STEALTH_MAX_SOLVES_PER_RUN  = '6'
         HLTV_SCRAPLING_TIER1_ATTEMPTS    = '3'
@@ -36,18 +37,6 @@
         BBDD_RANKING_TTL_DAYS            = '7'
         BBDD_ASSETS_BACKFILL_LIMIT       = '20'
     }
-
-    # Dependencias que deben poder importarse en el Python del modelo.
-    # yaml (cs2model.config) y parsel (enrich_predictions) son imports top-level:
-    # sin ellos falla ya la semilla de la BBDD y la etapa de enriquecimiento.
-    ModelImports = @('numpy', 'pandas', 'sklearn', 'scipy', 'matplotlib', 'lightgbm', 'shap', 'yaml', 'parsel')
-
-    # Paquetes pip a instalar si faltan (nombres de distribucion).
-    ModelPipPackages = @('numpy', 'pandas', 'scikit-learn', 'scipy', 'matplotlib', 'lightgbm', 'shap', 'pyyaml', 'parsel')
-
-    # Dependencias base y stealth del venv del scraper.
-    ScraperBaseImports    = @('scrapy', 'cloudscraper', 'parsel', 'requests')
-    ScraperStealthImports = @('scrapling', 'curl_cffi')
 
     # Codigos de salida por clase de fallo (para diagnostico de CI/automatizacion).
     ExitCodes = @{

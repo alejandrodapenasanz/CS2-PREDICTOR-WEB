@@ -22,19 +22,16 @@ import re
 from typing import Any, Final, Iterable, Mapping
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from src.config import RAW_DATA_DIR
+from src.responsible_http import ResponsibleHttpClient, build_http_client
 
 
 LOGGER = logging.getLogger(__name__)
 
 SOURCE_REPOSITORY: Final[str] = "Aneeshers/tennis-sackmann-archive"
 SOURCE_REF: Final[str] = "main"
-SOURCE_WEB_URL: Final[str] = (
-    "https://github.com/Aneeshers/tennis-sackmann-archive"
-)
+SOURCE_WEB_URL: Final[str] = "https://github.com/Aneeshers/tennis-sackmann-archive"
 ORIGINAL_ATP_URL: Final[str] = "https://github.com/JeffSackmann/tennis_atp"
 ORIGINAL_WTA_URL: Final[str] = "https://github.com/JeffSackmann/tennis_wta"
 LICENSE_ID: Final[str] = "CC BY-NC-SA 4.0"
@@ -48,16 +45,10 @@ VERSIONED_MANIFEST_DIRECTORY: Final[str] = "sackmann_manifests"
 
 MATCH_FAMILY_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "atp_main": re.compile(r"^atp/atp_matches_(?P<year>\d{4})\.csv$"),
-    "atp_qual_chall": re.compile(
-        r"^atp/atp_matches_qual_chall_(?P<year>\d{4})\.csv$"
-    ),
-    "atp_futures": re.compile(
-        r"^atp/atp_matches_futures_(?P<year>\d{4})\.csv$"
-    ),
+    "atp_qual_chall": re.compile(r"^atp/atp_matches_qual_chall_(?P<year>\d{4})\.csv$"),
+    "atp_futures": re.compile(r"^atp/atp_matches_futures_(?P<year>\d{4})\.csv$"),
     "wta_main": re.compile(r"^wta/wta_matches_(?P<year>\d{4})\.csv$"),
-    "wta_qual_itf": re.compile(
-        r"^wta/wta_matches_qual_itf_(?P<year>\d{4})\.csv$"
-    ),
+    "wta_qual_itf": re.compile(r"^wta/wta_matches_qual_itf_(?P<year>\d{4})\.csv$"),
 }
 
 EXPECTED_FIRST_YEAR: Final[dict[str, int]] = {
@@ -166,29 +157,19 @@ class DownloadReport:
         return len(self.skipped)
 
 
-def build_http_session() -> requests.Session:
+def build_http_session() -> ResponsibleHttpClient:
     """Crea una sesión HTTP identificada y con reintentos conservadores."""
 
-    retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        status=4,
-        backoff_factor=0.75,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.headers.update(
-        {
+    return build_http_client(
+        default_headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "CS2-Predictor-TENNIS-Sackmann-Ingestion/2",
-        }
+        },
+        robots_user_agent="CS2-Predictor-TENNIS-Sackmann-Ingestion",
+        request_retry_attempts=5,
+        request_retry_delay_seconds=0.75,
+        request_retry_statuses=(429, 500, 502, 503, 504),
     )
-    session.mount("https://", adapter)
-    return session
 
 
 def _request_json(
@@ -202,9 +183,7 @@ def _request_json(
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
-        raise SackmannDownloadError(
-            f"No se pudo consultar la fuente remota: {url}"
-        ) from exc
+        raise SackmannDownloadError(f"No se pudo consultar la fuente remota: {url}") from exc
     if not isinstance(payload, Mapping):
         raise SourceLayoutError(f"La respuesta de {url} no es un objeto JSON.")
     return payload
@@ -238,9 +217,7 @@ def _validate_years(files: Iterable[SourceFile]) -> None:
             if source_file.category == family and source_file.year is not None
         )
         if not years:
-            raise SourceLayoutError(
-                f"No se encontró ningún archivo para la familia {family!r}."
-            )
+            raise SourceLayoutError(f"No se encontró ningún archivo para la familia {family!r}.")
         if years[0] != expected_first_year:
             raise SourceLayoutError(
                 f"La familia {family!r} comienza en {years[0]}, pero la fuente "
@@ -249,9 +226,7 @@ def _validate_years(files: Iterable[SourceFile]) -> None:
         expected_years = set(range(years[0], years[-1] + 1))
         missing_years = sorted(expected_years.difference(years))
         if missing_years:
-            raise SourceLayoutError(
-                f"La familia {family!r} tiene años ausentes: {missing_years}."
-            )
+            raise SourceLayoutError(f"La familia {family!r} tiene años ausentes: {missing_years}.")
 
 
 def _validate_inventory(files: tuple[SourceFile, ...]) -> None:
@@ -262,15 +237,11 @@ def _validate_inventory(files: tuple[SourceFile, ...]) -> None:
 
     missing_players = sorted(PLAYER_FILES.difference(paths))
     if missing_players:
-        raise SourceLayoutError(
-            f"Faltan archivos de jugadores esperados: {missing_players}."
-        )
+        raise SourceLayoutError(f"Faltan archivos de jugadores esperados: {missing_players}.")
 
     missing_rankings = sorted(REQUIRED_RANKING_FILES.difference(paths))
     if missing_rankings:
-        raise SourceLayoutError(
-            f"Faltan archivos de rankings esperados: {missing_rankings}."
-        )
+        raise SourceLayoutError(f"Faltan archivos de rankings esperados: {missing_rankings}.")
 
 
 def fetch_source_inventory(
@@ -281,27 +252,16 @@ def fetch_source_inventory(
     owned_session = session is None
     active_session = session or build_http_session()
     try:
-        commit_url = (
-            f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/commits/{SOURCE_REF}"
-        )
+        commit_url = f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/commits/{SOURCE_REF}"
         commit_payload = _request_json(active_session, commit_url)
         commit_sha = commit_payload.get("sha")
-        if not isinstance(commit_sha, str) or not re.fullmatch(
-            r"[0-9a-f]{40}", commit_sha
-        ):
-            raise SourceLayoutError(
-                "GitHub no devolvió un SHA de commit válido para el mirror."
-            )
+        if not isinstance(commit_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", commit_sha):
+            raise SourceLayoutError("GitHub no devolvió un SHA de commit válido para el mirror.")
 
-        tree_url = (
-            f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/git/trees/"
-            f"{commit_sha}?recursive=1"
-        )
+        tree_url = f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/git/trees/{commit_sha}?recursive=1"
         tree_payload = _request_json(active_session, tree_url)
         if tree_payload.get("truncated") is True:
-            raise SourceLayoutError(
-                "GitHub devolvió un árbol truncado; no es seguro ingerirlo."
-            )
+            raise SourceLayoutError("GitHub devolvió un árbol truncado; no es seguro ingerirlo.")
         raw_entries = tree_payload.get("tree")
         if not isinstance(raw_entries, list):
             raise SourceLayoutError("El árbol de GitHub no contiene una lista tree.")
@@ -320,9 +280,7 @@ def fetch_source_inventory(
                 continue
             if not isinstance(size, int) or size < 0:
                 raise SourceLayoutError(f"Tamaño remoto inválido para {path}.")
-            if not isinstance(blob_sha, str) or not re.fullmatch(
-                r"[0-9a-f]{40}", blob_sha
-            ):
+            if not isinstance(blob_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", blob_sha):
                 raise SourceLayoutError(f"SHA de blob inválido para {path}.")
             category, year = classification
             selected.append(
@@ -335,9 +293,7 @@ def fetch_source_inventory(
                 )
             )
 
-        inventory_files = tuple(
-            sorted(selected, key=lambda source_file: source_file.remote_path)
-        )
+        inventory_files = tuple(sorted(selected, key=lambda source_file: source_file.remote_path))
         _validate_inventory(inventory_files)
         return SourceInventory(commit_sha=commit_sha, files=inventory_files)
     finally:
@@ -362,9 +318,7 @@ def _safe_destination(raw_dir: Path, remote_path: str) -> Path:
     root = raw_dir.resolve()
     destination = (root / Path(remote_path)).resolve()
     if not destination.is_relative_to(root):
-        raise SourceLayoutError(
-            f"La ruta remota intenta salir de data/raw: {remote_path!r}."
-        )
+        raise SourceLayoutError(f"La ruta remota intenta salir de data/raw: {remote_path!r}.")
     return destination
 
 
@@ -389,12 +343,9 @@ def _load_previous_manifest(manifest_path: Path) -> ManifestSnapshot:
             f"El manifiesto local no es un objeto JSON: {manifest_path}."
         )
     source_commit = payload.get("source_commit")
-    if not isinstance(source_commit, str) or re.fullmatch(
-        r"[0-9a-f]{40}", source_commit
-    ) is None:
+    if not isinstance(source_commit, str) or re.fullmatch(r"[0-9a-f]{40}", source_commit) is None:
         raise ExistingFileConflictError(
-            f"El manifiesto local no contiene un source_commit válido: "
-            f"{manifest_path}."
+            f"El manifiesto local no contiene un source_commit válido: {manifest_path}."
         )
 
     files = payload.get("files")
@@ -406,15 +357,13 @@ def _load_previous_manifest(manifest_path: Path) -> ManifestSnapshot:
     for item in files:
         if not isinstance(item, Mapping):
             raise ExistingFileConflictError(
-                f"El manifiesto contiene una entrada files inválida: "
-                f"{manifest_path}."
+                f"El manifiesto contiene una entrada files inválida: {manifest_path}."
             )
         remote_path = item.get("remote_path")
         blob_sha = item.get("git_blob_sha")
         if not isinstance(remote_path, str) or not isinstance(blob_sha, str):
             raise ExistingFileConflictError(
-                f"El manifiesto contiene una ruta o SHA inválidos: "
-                f"{manifest_path}."
+                f"El manifiesto contiene una ruta o SHA inválidos: {manifest_path}."
             )
         if re.fullmatch(r"[0-9a-f]{40}", blob_sha) is None:
             raise ExistingFileConflictError(
@@ -451,9 +400,7 @@ def _should_download_file(
     if not destination.exists():
         return True
     if not destination.is_file():
-        raise ExistingFileConflictError(
-            f"{destination} existe, pero no es un archivo regular."
-        )
+        raise ExistingFileConflictError(f"{destination} existe, pero no es un archivo regular.")
 
     local_size = destination.stat().st_size
     local_sha = _git_blob_sha(destination, local_size)
@@ -487,10 +434,7 @@ def _download_one(
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = destination.with_name(f"{destination.name}.part")
-    url = (
-        f"{RAW_CONTENT_ROOT}/{SOURCE_REPOSITORY}/{commit_sha}/"
-        f"{source_file.remote_path}"
-    )
+    url = f"{RAW_CONTENT_ROOT}/{SOURCE_REPOSITORY}/{commit_sha}/{source_file.remote_path}"
     digest = hashlib.sha1(usedforsecurity=False)
     digest.update(f"blob {source_file.size}\0".encode("ascii"))
     bytes_written = 0
@@ -516,9 +460,7 @@ def _download_one(
             )
         os.replace(temporary_path, destination)
     except (requests.RequestException, OSError) as exc:
-        raise SackmannDownloadError(
-            f"No se pudo descargar {source_file.remote_path}."
-        ) from exc
+        raise SackmannDownloadError(f"No se pudo descargar {source_file.remote_path}.") from exc
     finally:
         if temporary_path.exists():
             temporary_path.unlink()
@@ -528,19 +470,14 @@ def _versioned_manifest_path(raw_dir: Path, commit_sha: str) -> Path:
     """Devuelve la ruta estable del manifiesto correspondiente a un commit."""
 
     if re.fullmatch(r"[0-9a-f]{40}", commit_sha) is None:
-        raise SourceLayoutError(
-            f"No se puede versionar un SHA de commit inválido: {commit_sha!r}."
-        )
+        raise SourceLayoutError(f"No se puede versionar un SHA de commit inválido: {commit_sha!r}.")
     return raw_dir / VERSIONED_MANIFEST_DIRECTORY / f"{commit_sha}.json"
 
 
 def _inventory_file_shas(inventory: SourceInventory) -> dict[str, str]:
     """Construye el mapa ruta-SHA que identifica los archivos de un inventario."""
 
-    return {
-        source_file.remote_path: source_file.git_blob_sha
-        for source_file in inventory.files
-    }
+    return {source_file.remote_path: source_file.git_blob_sha for source_file in inventory.files}
 
 
 def _validate_no_removed_source_files(
@@ -550,9 +487,7 @@ def _validate_no_removed_source_files(
     """Rechaza rutas gestionadas que desaparecen, sin borrar archivos locales."""
 
     current_paths = set(_inventory_file_shas(inventory))
-    removed_paths = sorted(
-        set(previous_manifest.file_shas).difference(current_paths)
-    )
+    removed_paths = sorted(set(previous_manifest.file_shas).difference(current_paths))
     if removed_paths:
         formatted_paths = ", ".join(repr(path) for path in removed_paths)
         raise RemovedSourceFileError(
@@ -629,9 +564,7 @@ def _build_manifest_payload(
                 "git_blob_sha": source_file.git_blob_sha,
                 "status": (
                     "downloaded"
-                    if _safe_destination(
-                        raw_dir, source_file.remote_path
-                    ).resolve()
+                    if _safe_destination(raw_dir, source_file.remote_path).resolve()
                     in downloaded_set
                     else "skipped"
                 ),

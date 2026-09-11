@@ -1,0 +1,56 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+cache_dir = ".cache/pytest"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+cache-dir = ".cache/ruff"
+
+[tool.ruff.lint]
+# Inicio deliberadamente gradual: errores de sintaxis, nombres indefinidos y
+# fallos de flujo. La deuda de imports y reglas de estilo queda documentada.
+select = ["E4", "E7", "E9", "F"]
+ignore = ["F401"]
+
+[tool.ruff.lint.per-file-ignores]
+# Hallazgo heredado: la cuarentena se valida pero aún no se pasa al Elo.
+"scripts/build_elo.py" = ["F841"]
+
+[tool.mypy]
+python_version = "3.13"
+files = [
+    "src/tennis_abstract_selection.py",
+    "src/tennis_abstract_browser.py",
+    "src/tennis_abstract_daily.py",
+    "src/tennis_abstract_store.py",
+    "scripts/update_tennis_abstract.py",
+    "src/tennis_abstract_access.py",
+    "src/tennis_abstract_history_audit.py",
+    "scripts/audit_tennis_abstract.py",
+    "src/features/match_format.py",
+    "src/tennisratio/agenda_context.py",
+    "src/daily_pipeline/format_report.py",
+    "scripts/audit_match_format.py",
+    "src/artifact_integrity.py",
+    "src/config.py",
+    "src/elo/parameters.py",
+    "src/features/schema.py",
+    "src/modeling/parameters.py",
+    "src/modeling/splits.py",
+    "src/operations/identifiers.py",
+    "src/operations/schema.py",
+    "src/responsible_http.py",
+    "src/temporal.py",
+    "src/tennis_explorer/types.py",
+]
+cache_dir = ".cache/mypy"
+ignore_missing_imports = true
+follow_imports = "skip"
+check_untyped_defs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+warn_unused_ignores = false
+warn_redundant_casts = false
+show_error_codes = true

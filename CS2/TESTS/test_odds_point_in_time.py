@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -78,6 +79,78 @@ class OddsPointInTimeTests(unittest.TestCase):
 
         self.assertEqual(row["opening_odds_t1"], 0.35)
         self.assertEqual(row["opening_odds_captured_at"], "2026-06-01T08:00:00Z")
+
+    def test_database_opening_accepts_same_day_prestart_and_rejects_later_prices(
+        self,
+    ) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """
+            CREATE TABLE matches(
+                match_id INTEGER PRIMARY KEY,
+                datetime_utc TEXT,
+                datetime_precision TEXT
+            );
+            CREATE TABLE odds(
+                match_id INTEGER,
+                bookmaker TEXT,
+                captured_at_utc TEXT,
+                market_type TEXT,
+                odds_t1 REAL,
+                odds_t2 REAL,
+                prob_t1 REAL,
+                prob_t2 REAL
+            );
+            INSERT INTO matches VALUES (1, '2026-06-01T16:00:00Z', 'exact');
+            INSERT INTO odds VALUES
+                (1, 'Broken', '2026-06-01T08:00:00Z', 'opening', 1.01, 1.01, 0.5, 0.5),
+                (1, 'Book', '2026-06-01T09:00:00Z', 'opening', 1.80, 2.10, 0.9, 0.1),
+                (1, 'Book', '2026-06-01T15:00:00Z', 'opening', 1.20, 4.50, 0.9, 0.1),
+                (1, 'Book', '2026-06-01T16:01:00Z', 'opening', 4.50, 1.20, 0.1, 0.9);
+            """
+        )
+
+        opening = dataio._opening_odds_by_match(connection)[1]
+        expected = (1 / 1.80) / ((1 / 1.80) + (1 / 2.10))
+
+        self.assertEqual(opening["captured_at"], "2026-06-01T09:00:00Z")
+        self.assertAlmostEqual(opening["team1_implied_prob_norm"], expected)
+        self.assertAlmostEqual(
+            opening["team1_implied_prob_norm"]
+            + opening["team2_implied_prob_norm"],
+            1.0,
+        )
+        connection.close()
+
+    def test_database_opening_requires_exact_kickoff(self) -> None:
+        connection = sqlite3.connect(":memory:")
+        connection.row_factory = sqlite3.Row
+        connection.executescript(
+            """
+            CREATE TABLE matches(
+                match_id INTEGER PRIMARY KEY,
+                datetime_utc TEXT,
+                datetime_precision TEXT
+            );
+            CREATE TABLE odds(
+                match_id INTEGER,
+                bookmaker TEXT,
+                captured_at_utc TEXT,
+                market_type TEXT,
+                odds_t1 REAL,
+                odds_t2 REAL,
+                prob_t1 REAL,
+                prob_t2 REAL
+            );
+            INSERT INTO matches VALUES (1, '2026-06-01T00:00:00Z', 'date_only');
+            INSERT INTO odds VALUES
+                (1, 'Book', '2026-05-31T20:00:00Z', 'opening', 1.80, 2.10, 0.5, 0.5);
+            """
+        )
+
+        self.assertEqual(dataio._opening_odds_by_match(connection), {})
+        connection.close()
 
 
 if __name__ == "__main__":

@@ -381,26 +381,30 @@ Criterio de activacion:
 
 ## 11. Favorite upset history
 
-Fuente: odds prepartido guardadas y resultados cerrados.
+Fuente: `prediction_ledger` evaluado, con probabilidad del modelo congelada
+prepartido y resultado cerrado. No depende de odds.
 
 Ya existe:
 
-- Web muestra cuantas veces el favorito de mercado perdio en ventana reciente.
-- `favorite_upset_90d` como control/explicacion.
+- Web muestra cuantas veces el equipo favorito actual perdió cuando el modelo
+  lo había marcado favorito con probabilidad `>=51%`.
+- El cálculo usa todo el historial causal anterior disponible en la BBDD,
+  incluyendo el régimen `no_odds`, y muestra siempre derrotas/N.
+- `favorite_upset_history` como control/explicación; `favorite_upset_90d` se
+  conserva únicamente como alias JSON compatible para consumidores antiguos.
 
 No implementado en Modelo A:
 
 - Feature aprendida de upset por equipo cuando era favorito.
-- Interaccion con odds, tier, stage y formato.
+- Interacción con tier, stage y formato.
 
 Motivo:
 
-- Muestra con odds baja.
 - Riesgo de sobreajustar a equipos con pocos partidos.
 
 Criterio de activacion:
 
-- Suficiente historial por equipo como favorito de mercado.
+- Suficiente historial por equipo como favorito del modelo.
 - Regularizacion fuerte o smoothing bayesiano.
 - Validar por log loss, no solo por detectar upsets.
 

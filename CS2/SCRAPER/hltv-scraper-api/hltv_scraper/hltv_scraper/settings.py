@@ -14,7 +14,9 @@ NEWSPIDER_MODULE = "hltv_scraper.spiders"
 
 
 # User-Agent: lo rota RotateUserAgentMiddleware (UAs de escritorio realistas).
-USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 # Obey robots.txt rules
 ROBOTSTXT_OBEY = False
@@ -23,8 +25,8 @@ ROBOTSTXT_OBEY = False
 # Concurrencia baja + ritmo humano para no parecer un bot ni abusar.
 CONCURRENT_REQUESTS = 2
 CONCURRENT_REQUESTS_PER_DOMAIN = 1
-DOWNLOAD_DELAY = 7                 # retardo base (segundos)
-RANDOMIZE_DOWNLOAD_DELAY = True    # ±50% de jitter
+DOWNLOAD_DELAY = 7  # retardo base (segundos)
+RANDOMIZE_DOWNLOAD_DELAY = True  # ±50% de jitter
 DOWNLOAD_TIMEOUT = 60
 
 # Reintentos: Cloudflare devuelve 403/429/503. El BackoffRetryMiddleware hace
@@ -85,18 +87,18 @@ DOWNLOADER_MIDDLEWARES = {
 AUTOTHROTTLE_ENABLED = True
 AUTOTHROTTLE_START_DELAY = 5
 AUTOTHROTTLE_MAX_DELAY = 180
-AUTOTHROTTLE_TARGET_CONCURRENCY = 0.5   # por debajo de 1 petición en vuelo de media
+AUTOTHROTTLE_TARGET_CONCURRENCY = 0.5  # por debajo de 1 petición en vuelo de media
 AUTOTHROTTLE_DEBUG = False
 
 # --- Caché HTTP (clave: NO re-scrapear nunca lo ya descargado) -------------
 # El histórico de un partido terminado es inmutable; con la caché activada un
 # re-run no vuelve a pedir páginas ya bajadas. PROJECT.md §4.5.3.
 HTTPCACHE_ENABLED = True
-HTTPCACHE_EXPIRATION_SECS = 0           # 0 = nunca expira (histórico inmutable)
+HTTPCACHE_EXPIRATION_SECS = 0  # 0 = nunca expira (histórico inmutable)
 HTTPCACHE_DIR = "httpcache"
 HTTPCACHE_IGNORE_HTTP_CODES = [403, 429, 500, 502, 503, 504]  # no cachear bloqueos/errores
 HTTPCACHE_STORAGE = "scrapy.extensions.httpcache.FilesystemCacheStorage"
-HTTPCACHE_POLICY = "scrapy.extensions.httpcache.DummyPolicy"   # sirve de caché siempre que exista
+HTTPCACHE_POLICY = "scrapy.extensions.httpcache.DummyPolicy"  # sirve de caché siempre que exista
 
 # Set settings whose default value is deprecated to a future-proof value
 REQUEST_FINGERPRINTER_IMPLEMENTATION = "2.7"

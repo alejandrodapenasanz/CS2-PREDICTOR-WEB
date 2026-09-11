@@ -24,7 +24,7 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import sqlite3
-from typing import Any, Final, Iterable, Iterator, Literal, Mapping, cast
+from typing import TYPE_CHECKING, Any, Final, Iterable, Iterator, Literal, Mapping, cast
 
 import pandas as pd
 
@@ -44,6 +44,9 @@ from src.temporal import (
     SourceDatePolicy,
 )
 
+if TYPE_CHECKING:
+    from .types import MatchEvent
+
 
 Gender = Literal["M", "F"]
 GenderSelection = Literal["M", "F", "all"]
@@ -61,16 +64,22 @@ PROVENANCE_COLUMNS: Final[tuple[str, ...]] = (
     "source_row_number",
 )
 ELO_CODE_PATHS: Final[tuple[str, ...]] = (
+    "config/elo_handoff.json",
     "scripts/build_elo.py",
     "src/artifact_integrity.py",
     "src/data_loaders.py",
     "src/elo/build.py",
     "src/elo/engine.py",
     "src/elo/events.py",
+    "src/elo/operational.py",
     "src/elo/parameters.py",
     "src/elo/store.py",
     "src/elo/types.py",
     "src/identity_integrity.py",
+    "src/tennisratio/__init__.py",
+    "src/tennisratio/service.py",
+    "src/tennisratio/store.py",
+    "src/tennisratio/types.py",
     "src/temporal.py",
 )
 
@@ -189,6 +198,8 @@ class GenderBuildAudit:
     date_blocks: int
     rating_rows: int
     exclusions_by_reason: Mapping[str, int]
+    base_source_rows: int
+    operational_source_rows: int
 
 
 @dataclass(frozen=True)
@@ -203,6 +214,7 @@ class EloBuildReport:
     skipped: bool
     audits: tuple[GenderBuildAudit, ...]
     top_ratings: Mapping[Gender, tuple[Mapping[str, object], ...]]
+    operational_overlay: Mapping[str, object] | None
 
 
 def _normalise_gender_selection(
@@ -587,6 +599,7 @@ def compute_input_fingerprint(
     ) = None,
     code_inventory: Iterable[Mapping[str, object]] | None = None,
     source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
+    operational_contract: Mapping[str, object] | None = None,
 ) -> str:
     """Calcula SHA-256 de fuentes, parámetros, código y cuarentena.
 
@@ -627,6 +640,9 @@ def compute_input_fingerprint(
         "code_inventory": list(resolved_code_inventory),
         "identity_exclusion_after_dates": _identity_rule_payload(quarantine),
         "source_date_policy": source_date_policy.as_dict(),
+        "operational_overlay": (
+            None if operational_contract is None else dict(operational_contract)
+        ),
     }
     try:
         canonical = json.dumps(
@@ -839,6 +855,8 @@ def _spool_manifest_events(
     chunksize: int,
     spool_path: Path,
     source_date_policy: SourceDatePolicy,
+    operational_events: Iterable[MatchEvent] = (),
+    base_cutoff_date: date | None = None,
 ) -> Mapping[Gender, int]:
     """Vuelca eventos ordenados por su fecha causal de disponibilidad."""
 
@@ -895,6 +913,14 @@ def _spool_manifest_events(
                 raise SourceIntegrityError(
                     f"Una fila Sackmann no cumple el contrato Elo: {exc}"
                 ) from exc
+            if base_cutoff_date is not None and any(
+                event.result_source_date > base_cutoff_date
+                for event in events
+            ):
+                raise SourceIntegrityError(
+                    "El snapshot Sackmann congelado contiene un partido "
+                    "posterior al corte fijo del handoff."
+                )
             connection.executemany(
                 insert_sql,
                 (
@@ -922,6 +948,32 @@ def _spool_manifest_events(
             )
             counts.update(event.gender for event in events)
             connection.commit()
+        checked_operational_events = tuple(operational_events)
+        connection.executemany(
+            insert_sql,
+            (
+                (
+                    event.gender,
+                    event.date.isoformat(),
+                    event.result_source_date.isoformat(),
+                    event.winner_id,
+                    event.loser_id,
+                    event.surface,
+                    event.tour_level,
+                    event.score,
+                    event.provenance.source_commit,
+                    event.provenance.source_path,
+                    event.provenance.source_row,
+                    event.source_record_hash,
+                    event.tourney_id,
+                    event.match_num,
+                    event.round,
+                )
+                for event in checked_operational_events
+            ),
+        )
+        counts.update(event.gender for event in checked_operational_events)
+        connection.commit()
         connection.execute(
             f"""
             CREATE INDEX idx_elo_spool_order
@@ -941,7 +993,7 @@ def _spool_manifest_events(
         ) from exc
     finally:
         connection.close()
-    return {selected: int(counts[selected]) for selected in ("M", "F")}
+    return {"M": int(counts["M"]), "F": int(counts["F"])}
 
 
 def _iter_spooled_date_frames(
@@ -1120,6 +1172,7 @@ def build_elo_database(
         Mapping[tuple[Gender, int], date] | None
     ) = None,
     source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
+    operational_overlay: object | None = None,
 ) -> EloBuildReport:
     """Construye y publica la base Elo mediante los contratos core/store.
 
@@ -1140,6 +1193,8 @@ def build_elo_database(
             excluye eventos con fecha estrictamente posterior.
         source_date_policy: Embargo causal aplicado a ``tourney_date`` antes
             de que un resultado pueda modificar un estado Elo.
+        operational_overlay: Eventos post-corte ya validados por el adaptador
+            multifuente; ``None`` conserva el build Sackmann-only para tests.
 
     Returns:
         Informe reproducible de runs, auditoría e idempotencia.
@@ -1160,6 +1215,7 @@ def build_elo_database(
         DEFAULT_ELO_PARAMETERS,
         EloParameters,
     )
+    from .operational import OperationalEloOverlay
     from .store import (
         EloRunNotAvailableError,
         EloStore,
@@ -1175,6 +1231,12 @@ def build_elo_database(
         raise TypeError("force debe ser booleano.")
     if not isinstance(source_date_policy, SourceDatePolicy):
         raise TypeError("source_date_policy debe ser SourceDatePolicy.")
+    if operational_overlay is not None and not isinstance(
+        operational_overlay, OperationalEloOverlay
+    ):
+        raise TypeError(
+            "operational_overlay debe ser OperationalEloOverlay o None."
+        )
     resolved_parameters = (
         DEFAULT_ELO_PARAMETERS if parameters is None else parameters
     )
@@ -1188,6 +1250,13 @@ def build_elo_database(
         Path(manifest_path),
         Path(raw_dir),
     )
+    if (
+        operational_overlay is not None
+        and operational_overlay.base_source_commit != verified.source_commit
+    ):
+        raise EloBuildError(
+            "El overlay operativo no pertenece al commit Sackmann base."
+        )
     gender_manifests = {
         selected_gender: verified.select_gender(selected_gender)
         for selected_gender in selected_genders
@@ -1224,6 +1293,13 @@ def build_elo_database(
             gender_quarantine_rules[selected_gender],
             code_inventory,
             source_date_policy,
+            (
+                None
+                if operational_overlay is None
+                else operational_overlay.contract_for_gender(
+                    selected_gender
+                )
+            ),
         )
         for selected_gender in selected_genders
     }
@@ -1238,7 +1314,7 @@ def build_elo_database(
     resolved_database = Path(database_path).resolve()
     if resolved_database.is_file() and not force:
         existing_store = EloStore(resolved_database)
-        existing_runs: dict[Gender, object] = {}
+        existing_runs: dict[Gender, Any] = {}
         all_current = True
         try:
             for selected_gender in selected_genders:
@@ -1276,6 +1352,11 @@ def build_elo_database(
                     )
                     for selected_gender in selected_genders
                 },
+                operational_overlay=(
+                    None
+                    if operational_overlay is None
+                    else operational_overlay.as_dict()
+                ),
             )
 
     if resolved_database.is_file() and selected_genders != ("M", "F"):
@@ -1315,6 +1396,16 @@ def build_elo_database(
             chunksize=chunksize,
             spool_path=spool_path,
             source_date_policy=source_date_policy,
+            operational_events=(
+                ()
+                if operational_overlay is None
+                else operational_overlay.events
+            ),
+            base_cutoff_date=(
+                None
+                if operational_overlay is None
+                else operational_overlay.cutoff_date
+            ),
         )
         LOGGER.info(
             "Spool Elo validado: M=%d, F=%d.",
@@ -1333,6 +1424,14 @@ def build_elo_database(
         )
         for selected_gender in selected_genders:
             source_rows = int(source_counts.get(selected_gender, 0))
+            operational_source_rows = (
+                0
+                if operational_overlay is None
+                else len(
+                    operational_overlay.events_for_gender(selected_gender)
+                )
+            )
+            base_source_rows = source_rows - operational_source_rows
             if source_rows == 0:
                 raise EloBuildError(
                     f"No hay partidos fuente para el género {selected_gender}."
@@ -1353,6 +1452,13 @@ def build_elo_database(
                     "identity_exclusion_effective_after_dates": (
                         _identity_rule_payload(
                             gender_effective_quarantine_rules[selected_gender]
+                        )
+                    ),
+                    "operational_overlay": (
+                        None
+                        if operational_overlay is None
+                        else operational_overlay.contract_for_gender(
+                            selected_gender
                         )
                     ),
                 },
@@ -1429,6 +1535,8 @@ def build_elo_database(
                     date_blocks=date_blocks,
                     rating_rows=rating_rows,
                     exclusions_by_reason=dict(sorted(exclusions.items())),
+                    base_source_rows=base_source_rows,
+                    operational_source_rows=operational_source_rows,
                 )
             )
             LOGGER.info(
@@ -1470,4 +1578,9 @@ def build_elo_database(
         skipped=False,
         audits=tuple(audits),
         top_ratings=top_ratings,
+        operational_overlay=(
+            None
+            if operational_overlay is None
+            else operational_overlay.as_dict()
+        ),
     )

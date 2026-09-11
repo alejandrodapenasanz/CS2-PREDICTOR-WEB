@@ -5,7 +5,7 @@ cache_dir = "TESTS/.cache/pytest"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py313"
 cache-dir = "TESTS/.cache/ruff"
 exclude = ["SCRAPER/Scrapling", "**/.venv", "**/site-packages"]
 
@@ -17,13 +17,31 @@ ignore = ["F401"]
 "TESTS/*" = ["F811", "E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 files = [
+    "MODEL/cs2model/pistol_opponents.py",
+    "BBDD/round_history_store.py",
+    "PIPELINE/round_history.py",
+    "MODEL/cs2model/pistols.py",
+    "MODEL/run_pistol_ablation.py",
+    "BBDD/backup_retention.py",
+    "BBDD/manage_backups.py",
     "MODEL/cs2model/config.py",
     "MODEL/cs2model/economic.py",
     "MODEL/cs2model/drift.py",
+    "MODEL/cs2model/enhanced_info.py",
+    "MODEL/cs2model/promotion.py",
+    "MODEL/cs2model/retention.py",
+    "MODEL/cs2model/retrain_policy.py",
     "MODEL/cs2model/reproducibility.py",
+    "MODEL/cs2model/roster_rating.py",
+    "MODEL/cs2model/uncertainty.py",
+    "MODEL/check_retrain.py",
+    "MODEL/audit_promotion_consistency.py",
+    "MODEL/manage_models.py",
     "MODEL/monitor_drift.py",
+    "MODEL/run_enhanced_info_ablation.py",
+    "MODEL/run_segment_interaction_ablation.py",
     "MODEL/smoke_pipeline.py",
 ]
 cache_dir = "TESTS/.cache/mypy"

@@ -5,8 +5,8 @@
 Se entrenó un LightGBM principal y una regresión logística de referencia para cada género. La evaluación es exclusivamente temporal y las probabilidades se calibran con Platt.
 
 ```text
-model_fingerprint: b7a13cb790bac072d299a0155b074ea38ecdbc946b002352f19375e38686cae4
-feature_fingerprint: bfe639b5e0f818f3eb4bc58cae0167d2a95486c3211885719553df5d165b1f93
+model_fingerprint: d080b15c768228596b17f613a45b0757d790b193ce2380674fa1c4b73f71c1a5
+feature_fingerprint: 58c7bc022b2be6a4a6f5c63179fc04ff65fe363c08d54424bf5ec65b2107f69a
 source_commit: 83733587353df8a41f2fd4f516147d5aa83f5a8d
 feature_profile: sports_only
 test_seasons: 2016-2025
@@ -15,8 +15,8 @@ fold Y: train <= Y-2; calibración = Y-1; test = Y
 
 | Género | Filas fuente | Filas entrenamiento final | Excluidas no disponibles | Última fecha fuente | Disponibilidad máxima | Corte de reentreno | Predicciones OOF | Folds |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| M | 959020 | 959020 | 0 | 2026-06-01 | 2026-06-22 | 2026-08-10 | 277270 | 10 |
-| F | 769835 | 769835 | 0 | 2026-06-02 | 2026-06-23 | 2026-08-10 | 270604 | 10 |
+| M | 959020 | 959020 | 0 | 2026-06-01 | 2026-06-22 | 2026-08-31 | 277270 | 10 |
+| F | 769835 | 769835 | 0 | 2026-06-02 | 2026-06-23 | 2026-08-31 | 270604 | 10 |
 
 Los hiperparámetros fueron fijados antes de observar los bloques de test. No se hizo selección ni early stopping con calibración/test.
 
@@ -36,7 +36,7 @@ Los hiperparámetros fueron fijados antes de observar los bloques de test. No se
 
 | Modelo | Brier antes | Brier después | Δ Brier | Log-loss antes | Log-loss después | Δ log-loss |
 | --- | --- | --- | --- | --- | --- | --- |
-| Regresión logística | 0.19897417935617784 | 0.19886060276747064 | -0.00011357658870719822 | 0.5808017682089252 | 0.5804513918645158 | -0.0003503763444093755 |
+| Regresión logística | 0.19897417935617784 | 0.19886060276747064 | -0.00011357658870719822 | 0.580801768208925 | 0.5804513918645158 | -0.00035037634440926446 |
 | LightGBM | 0.19766792272381253 | 0.19759985768729382 | -6.806503651871076e-05 | 0.5775753077412382 | 0.5773820898907125 | -0.0001932178505257287 |
 
 ![Curva de calibración M](assets/model_calibration_M.png)
@@ -195,4 +195,4 @@ Todos los casos se conservaron. La auditoría comprobó IDs OOF únicos, precede
 
 ## Artefactos detallados
 
-Las métricas completas, predicciones OOF, folds, calibradores y modelos están en `../models/phase7/runs/b7a13cb790bac072d299a0155b074ea38ecdbc946b002352f19375e38686cae4`. `metrics.csv` incluye todos los modelos y segmentos, además de las poblaciones de soporte común.
+Las métricas completas, predicciones OOF, folds, calibradores y modelos están en `../models/phase7/runs/d080b15c768228596b17f613a45b0757d790b193ce2380674fa1c4b73f71c1a5`. `metrics.csv` incluye todos los modelos y segmentos, además de las poblaciones de soporte común.

@@ -1,0 +1,19 @@
+# Local credentials. Never commit this file.
+.env
+
+# Project-local virtual environment.
+.venv/
+
+# Python-generated files.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Idempotency database and SQLite sidecars.
+data/*.sqlite3
+data/*.sqlite3-*
+
+# Generated best-opportunity handoff for the current requested date.
+daily_report.txt

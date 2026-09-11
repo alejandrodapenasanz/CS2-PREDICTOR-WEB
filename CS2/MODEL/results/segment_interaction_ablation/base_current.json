@@ -1,0 +1,1954 @@
+{
+  "source": "closed_temporal_walk_forward_predictions",
+  "model": "nested_model_policy",
+  "n": 7978,
+  "date_min": "2025-11-16",
+  "date_max": "2026-08-26",
+  "predictions_csv_sha256": "828b0e8d98c5f6bfe9d122da55e80878fd1a4187931688fb519f691995175821",
+  "segment_calibration": {
+    "policy": {
+      "elo_gap_bins": [
+        "0-50",
+        "50-100",
+        "100-200",
+        "200-300",
+        "300+"
+      ],
+      "elo_gap_uses_absolute_difference": true,
+      "min_segment_rows": 100,
+      "reliability_bins": 10,
+      "min_absolute_gap": 0.03,
+      "min_ece": 0.04,
+      "criterion": "95% residual-mean CI plus material gap, or material reliability cell plus ECE",
+      "multiple_testing_warning": "descriptive screen only; the temporal promotion gate decides model changes"
+    },
+    "by_elo_gap": {
+      "0-50": {
+        "n": 3439,
+        "accuracy": 0.588252,
+        "log_loss": 0.66499,
+        "brier": 0.236327,
+        "mean_predicted": 0.543584,
+        "observed_rate": 0.536202,
+        "calibration_gap": -0.007381,
+        "ci95_low": -0.02363,
+        "ci95_high": 0.008867,
+        "ece_10": 0.012177,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 5,
+            "mean_predicted": 0.171497,
+            "observed_rate": 0.4,
+            "calibration_gap": 0.228503,
+            "ci95_low": -0.259304,
+            "ci95_high": 0.71631,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 73,
+            "mean_predicted": 0.267821,
+            "observed_rate": 0.205479,
+            "calibration_gap": -0.062341,
+            "ci95_low": -0.156568,
+            "ci95_high": 0.031885,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 269,
+            "mean_predicted": 0.359889,
+            "observed_rate": 0.375465,
+            "calibration_gap": 0.015576,
+            "ci95_low": -0.042496,
+            "ci95_high": 0.073648,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 816,
+            "mean_predicted": 0.456385,
+            "observed_rate": 0.458333,
+            "calibration_gap": 0.001948,
+            "ci95_low": -0.032155,
+            "ci95_high": 0.036051,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 1242,
+            "mean_predicted": 0.549177,
+            "observed_rate": 0.546699,
+            "calibration_gap": -0.002478,
+            "ci95_low": -0.030033,
+            "ci95_high": 0.025076,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 726,
+            "mean_predicted": 0.641908,
+            "observed_rate": 0.614325,
+            "calibration_gap": -0.027583,
+            "ci95_low": -0.062812,
+            "ci95_high": 0.007647,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 256,
+            "mean_predicted": 0.738188,
+            "observed_rate": 0.714844,
+            "calibration_gap": -0.023344,
+            "ci95_low": -0.078603,
+            "ci95_high": 0.031914,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 52,
+            "mean_predicted": 0.82069,
+            "observed_rate": 0.846154,
+            "calibration_gap": 0.025464,
+            "ci95_low": -0.073868,
+            "ci95_high": 0.124796,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "50-100": {
+        "n": 2329,
+        "accuracy": 0.636325,
+        "log_loss": 0.63544,
+        "brier": 0.222437,
+        "mean_predicted": 0.55706,
+        "observed_rate": 0.553027,
+        "calibration_gap": -0.004032,
+        "ci95_low": -0.023191,
+        "ci95_high": 0.015126,
+        "ece_10": 0.016586,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 15,
+            "mean_predicted": 0.168353,
+            "observed_rate": 0.333333,
+            "calibration_gap": 0.16498,
+            "ci95_low": -0.077087,
+            "ci95_high": 0.407048,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 106,
+            "mean_predicted": 0.256712,
+            "observed_rate": 0.216981,
+            "calibration_gap": -0.03973,
+            "ci95_low": -0.118684,
+            "ci95_high": 0.039223,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 272,
+            "mean_predicted": 0.355428,
+            "observed_rate": 0.338235,
+            "calibration_gap": -0.017193,
+            "ci95_low": -0.073462,
+            "ci95_high": 0.039076,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 455,
+            "mean_predicted": 0.452095,
+            "observed_rate": 0.454945,
+            "calibration_gap": 0.00285,
+            "ci95_low": -0.042901,
+            "ci95_high": 0.048601,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 462,
+            "mean_predicted": 0.552535,
+            "observed_rate": 0.536797,
+            "calibration_gap": -0.015739,
+            "ci95_low": -0.061167,
+            "ci95_high": 0.02969,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 595,
+            "mean_predicted": 0.650169,
+            "observed_rate": 0.636975,
+            "calibration_gap": -0.013195,
+            "ci95_low": -0.051792,
+            "ci95_high": 0.025403,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 328,
+            "mean_predicted": 0.739058,
+            "observed_rate": 0.768293,
+            "calibration_gap": 0.029235,
+            "ci95_low": -0.016681,
+            "ci95_high": 0.07515,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 94,
+            "mean_predicted": 0.839125,
+            "observed_rate": 0.851064,
+            "calibration_gap": 0.011938,
+            "ci95_low": -0.060601,
+            "ci95_high": 0.084477,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 2,
+            "mean_predicted": 0.932209,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.067791,
+            "ci95_low": 0.057966,
+            "ci95_high": 0.077615,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "100-200": {
+        "n": 1891,
+        "accuracy": 0.71285,
+        "log_loss": 0.585239,
+        "brier": 0.199137,
+        "mean_predicted": 0.581961,
+        "observed_rate": 0.606029,
+        "calibration_gap": 0.024068,
+        "ci95_low": 0.003978,
+        "ci95_high": 0.044157,
+        "ece_10": 0.03437,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 26,
+            "mean_predicted": 0.170918,
+            "observed_rate": 0.269231,
+            "calibration_gap": 0.098313,
+            "ci95_low": -0.075852,
+            "ci95_high": 0.272478,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 181,
+            "mean_predicted": 0.256425,
+            "observed_rate": 0.337017,
+            "calibration_gap": 0.080592,
+            "ci95_low": 0.011414,
+            "ci95_high": 0.14977,
+            "material_deviation": true
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 314,
+            "mean_predicted": 0.350431,
+            "observed_rate": 0.328025,
+            "calibration_gap": -0.022405,
+            "ci95_low": -0.074074,
+            "ci95_high": 0.029264,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 149,
+            "mean_predicted": 0.440977,
+            "observed_rate": 0.422819,
+            "calibration_gap": -0.018159,
+            "ci95_low": -0.098048,
+            "ci95_high": 0.061731,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 124,
+            "mean_predicted": 0.554422,
+            "observed_rate": 0.596774,
+            "calibration_gap": 0.042352,
+            "ci95_low": -0.044375,
+            "ci95_high": 0.129079,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 337,
+            "mean_predicted": 0.65815,
+            "observed_rate": 0.673591,
+            "calibration_gap": 0.015441,
+            "ci95_low": -0.03481,
+            "ci95_high": 0.065691,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 565,
+            "mean_predicted": 0.744699,
+            "observed_rate": 0.778761,
+            "calibration_gap": 0.034062,
+            "ci95_low": -0.000276,
+            "ci95_high": 0.068401,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 186,
+            "mean_predicted": 0.830065,
+            "observed_rate": 0.870968,
+            "calibration_gap": 0.040903,
+            "ci95_low": -0.00733,
+            "ci95_high": 0.089136,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 9,
+            "mean_predicted": 0.911008,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.088992,
+            "ci95_low": 0.082222,
+            "ci95_high": 0.095763,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 1,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "200-300": {
+        "n": 293,
+        "accuracy": 0.822526,
+        "log_loss": 0.466256,
+        "brier": 0.14565,
+        "mean_predicted": 0.641138,
+        "observed_rate": 0.662116,
+        "calibration_gap": 0.020978,
+        "ci95_low": -0.02273,
+        "ci95_high": 0.064687,
+        "ece_10": 0.065686,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 13,
+            "mean_predicted": 0.164132,
+            "observed_rate": 0.076923,
+            "calibration_gap": -0.087209,
+            "ci95_low": -0.249024,
+            "ci95_high": 0.074606,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 45,
+            "mean_predicted": 0.25629,
+            "observed_rate": 0.177778,
+            "calibration_gap": -0.078512,
+            "ci95_low": -0.191763,
+            "ci95_high": 0.034738,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 18,
+            "mean_predicted": 0.331874,
+            "observed_rate": 0.388889,
+            "calibration_gap": 0.057015,
+            "ci95_low": -0.179794,
+            "ci95_high": 0.293824,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 7,
+            "mean_predicted": 0.435792,
+            "observed_rate": 0.285714,
+            "calibration_gap": -0.150078,
+            "ci95_low": -0.510268,
+            "ci95_high": 0.210112,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 2,
+            "mean_predicted": 0.555696,
+            "observed_rate": 0.5,
+            "calibration_gap": -0.055696,
+            "ci95_low": -1.080189,
+            "ci95_high": 0.968797,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 11,
+            "mean_predicted": 0.670762,
+            "observed_rate": 0.727273,
+            "calibration_gap": 0.056511,
+            "ci95_low": -0.219487,
+            "ci95_high": 0.332509,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 110,
+            "mean_predicted": 0.760036,
+            "observed_rate": 0.818182,
+            "calibration_gap": 0.058146,
+            "ci95_low": -0.014208,
+            "ci95_high": 0.130499,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 84,
+            "mean_predicted": 0.837471,
+            "observed_rate": 0.892857,
+            "calibration_gap": 0.055387,
+            "ci95_low": -0.010825,
+            "ci95_high": 0.121598,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 3,
+            "mean_predicted": 0.907011,
+            "observed_rate": 0.666667,
+            "calibration_gap": -0.240344,
+            "ci95_low": -0.888861,
+            "ci95_high": 0.408173,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "300+": {
+        "n": 26,
+        "accuracy": 0.769231,
+        "log_loss": 0.612856,
+        "brier": 0.199811,
+        "mean_predicted": 0.630747,
+        "observed_rate": 0.615385,
+        "calibration_gap": -0.015362,
+        "ci95_low": -0.190483,
+        "ci95_high": 0.159759,
+        "ece_10": 0.132249,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 5,
+            "mean_predicted": 0.163647,
+            "observed_rate": 0.2,
+            "calibration_gap": 0.036353,
+            "ci95_low": -0.38307,
+            "ci95_high": 0.455775,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 3,
+            "mean_predicted": 0.232295,
+            "observed_rate": 0.333333,
+            "calibration_gap": 0.101038,
+            "ci95_low": -0.569781,
+            "ci95_high": 0.771858,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 1,
+            "mean_predicted": 0.581195,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.418805,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 1,
+            "mean_predicted": 0.681188,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.318812,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 1,
+            "mean_predicted": 0.787625,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.212375,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 14,
+            "mean_predicted": 0.851353,
+            "observed_rate": 0.714286,
+            "calibration_gap": -0.137068,
+            "ci95_low": -0.386469,
+            "ci95_high": 0.112334,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 1,
+            "mean_predicted": 0.915337,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.084663,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=26 < 100; no se interpreta"
+      }
+    },
+    "by_stage": {
+      "unknown": {
+        "n": 7041,
+        "status": "unknown_segment",
+        "note": "segmento desconocido; excluido de conclusiones"
+      },
+      "group": {
+        "n": 339,
+        "accuracy": 0.675516,
+        "log_loss": 0.597467,
+        "brier": 0.206308,
+        "mean_predicted": 0.562252,
+        "observed_rate": 0.542773,
+        "calibration_gap": -0.019479,
+        "ci95_low": -0.067858,
+        "ci95_high": 0.0289,
+        "ece_10": 0.056609,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 6,
+            "mean_predicted": 0.176854,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.176854,
+            "ci95_low": -0.195529,
+            "ci95_high": -0.158179,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 17,
+            "mean_predicted": 0.246999,
+            "observed_rate": 0.117647,
+            "calibration_gap": -0.129352,
+            "ci95_low": -0.287787,
+            "ci95_high": 0.029083,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 36,
+            "mean_predicted": 0.354,
+            "observed_rate": 0.416667,
+            "calibration_gap": 0.062667,
+            "ci95_low": -0.100479,
+            "ci95_high": 0.225814,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 64,
+            "mean_predicted": 0.448897,
+            "observed_rate": 0.34375,
+            "calibration_gap": -0.105147,
+            "ci95_low": -0.222665,
+            "ci95_high": 0.012372,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 67,
+            "mean_predicted": 0.548212,
+            "observed_rate": 0.522388,
+            "calibration_gap": -0.025824,
+            "ci95_low": -0.146457,
+            "ci95_high": 0.094809,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 71,
+            "mean_predicted": 0.645432,
+            "observed_rate": 0.633803,
+            "calibration_gap": -0.011629,
+            "ci95_low": -0.123987,
+            "ci95_high": 0.100729,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 46,
+            "mean_predicted": 0.746774,
+            "observed_rate": 0.73913,
+            "calibration_gap": -0.007643,
+            "ci95_low": -0.136141,
+            "ci95_high": 0.120855,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 32,
+            "mean_predicted": 0.842575,
+            "observed_rate": 0.96875,
+            "calibration_gap": 0.126175,
+            "ci95_low": 0.061949,
+            "ci95_high": 0.1904,
+            "material_deviation": true
+          }
+        ],
+        "material_reliability_bins": 1,
+        "status": "deviation_detected",
+        "deviation_detected": true,
+        "note": "desviacion descriptiva material; debe validarse por la puerta antes de cambiar el modelo"
+      },
+      "swiss": {
+        "n": 214,
+        "accuracy": 0.607477,
+        "log_loss": 0.651724,
+        "brier": 0.229852,
+        "mean_predicted": 0.580793,
+        "observed_rate": 0.649533,
+        "calibration_gap": 0.06874,
+        "ci95_low": 0.005019,
+        "ci95_high": 0.13246,
+        "ece_10": 0.093857,
+        "reliability": [
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 6,
+            "mean_predicted": 0.277485,
+            "observed_rate": 0.5,
+            "calibration_gap": 0.222515,
+            "ci95_low": -0.208915,
+            "ci95_high": 0.653944,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 22,
+            "mean_predicted": 0.356404,
+            "observed_rate": 0.409091,
+            "calibration_gap": 0.052687,
+            "ci95_low": -0.155716,
+            "ci95_high": 0.261089,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 35,
+            "mean_predicted": 0.450838,
+            "observed_rate": 0.685714,
+            "calibration_gap": 0.234876,
+            "ci95_low": 0.0794,
+            "ci95_high": 0.390352,
+            "material_deviation": true
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 45,
+            "mean_predicted": 0.554405,
+            "observed_rate": 0.622222,
+            "calibration_gap": 0.067817,
+            "ci95_low": -0.074654,
+            "ci95_high": 0.210289,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 60,
+            "mean_predicted": 0.651292,
+            "observed_rate": 0.7,
+            "calibration_gap": 0.048708,
+            "ci95_low": -0.068313,
+            "ci95_high": 0.165729,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 36,
+            "mean_predicted": 0.741321,
+            "observed_rate": 0.666667,
+            "calibration_gap": -0.074654,
+            "ci95_low": -0.231799,
+            "ci95_high": 0.08249,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 10,
+            "mean_predicted": 0.829131,
+            "observed_rate": 0.9,
+            "calibration_gap": 0.070869,
+            "ci95_low": -0.130943,
+            "ci95_high": 0.272681,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 1,
+        "status": "deviation_detected",
+        "deviation_detected": true,
+        "note": "desviacion descriptiva material; debe validarse por la puerta antes de cambiar el modelo"
+      },
+      "quarter": {
+        "n": 115,
+        "accuracy": 0.669565,
+        "log_loss": 0.608354,
+        "brier": 0.210283,
+        "mean_predicted": 0.569769,
+        "observed_rate": 0.556522,
+        "calibration_gap": -0.013247,
+        "ci95_low": -0.097391,
+        "ci95_high": 0.070897,
+        "ece_10": 0.076491,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 2,
+            "mean_predicted": 0.182966,
+            "observed_rate": 0.5,
+            "calibration_gap": 0.317034,
+            "ci95_low": -0.671408,
+            "ci95_high": 1.305476,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 2,
+            "mean_predicted": 0.284644,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.284644,
+            "ci95_low": -0.292367,
+            "ci95_high": -0.27692,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 11,
+            "mean_predicted": 0.344814,
+            "observed_rate": 0.363636,
+            "calibration_gap": 0.018822,
+            "ci95_low": -0.285273,
+            "ci95_high": 0.322917,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 24,
+            "mean_predicted": 0.453537,
+            "observed_rate": 0.333333,
+            "calibration_gap": -0.120204,
+            "ci95_low": -0.31001,
+            "ci95_high": 0.069602,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 24,
+            "mean_predicted": 0.554282,
+            "observed_rate": 0.541667,
+            "calibration_gap": -0.012615,
+            "ci95_low": -0.213355,
+            "ci95_high": 0.188125,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 27,
+            "mean_predicted": 0.644555,
+            "observed_rate": 0.592593,
+            "calibration_gap": -0.051963,
+            "ci95_low": -0.237944,
+            "ci95_high": 0.134019,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 18,
+            "mean_predicted": 0.73639,
+            "observed_rate": 0.833333,
+            "calibration_gap": 0.096944,
+            "ci95_low": -0.084137,
+            "ci95_high": 0.278025,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 6,
+            "mean_predicted": 0.840062,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.159938,
+            "ci95_low": 0.13421,
+            "ci95_high": 0.185666,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 1,
+            "mean_predicted": 0.909206,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.090794,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "final": {
+        "n": 46,
+        "accuracy": 0.565217,
+        "log_loss": 0.684096,
+        "brier": 0.245381,
+        "mean_predicted": 0.531381,
+        "observed_rate": 0.478261,
+        "calibration_gap": -0.05312,
+        "ci95_low": -0.19702,
+        "ci95_high": 0.090779,
+        "ece_10": 0.095744,
+        "reliability": [
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 2,
+            "mean_predicted": 0.247061,
+            "observed_rate": 0.5,
+            "calibration_gap": 0.252939,
+            "ci95_low": -0.754049,
+            "ci95_high": 1.259928,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 4,
+            "mean_predicted": 0.368932,
+            "observed_rate": 0.25,
+            "calibration_gap": -0.118932,
+            "ci95_low": -0.634066,
+            "ci95_high": 0.396203,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 12,
+            "mean_predicted": 0.450507,
+            "observed_rate": 0.416667,
+            "calibration_gap": -0.03384,
+            "ci95_low": -0.321402,
+            "ci95_high": 0.253721,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 14,
+            "mean_predicted": 0.55856,
+            "observed_rate": 0.5,
+            "calibration_gap": -0.05856,
+            "ci95_low": -0.32998,
+            "ci95_high": 0.212859,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 12,
+            "mean_predicted": 0.643519,
+            "observed_rate": 0.5,
+            "calibration_gap": -0.143519,
+            "ci95_low": -0.438427,
+            "ci95_high": 0.151389,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 1,
+            "mean_predicted": 0.713625,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.286375,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 1,
+            "mean_predicted": 0.811898,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.188102,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=46 < 100; no se interpreta"
+      },
+      "league": {
+        "n": 2,
+        "accuracy": 0.0,
+        "log_loss": 0.959624,
+        "brier": 0.379389,
+        "mean_predicted": 0.61425,
+        "observed_rate": 0.0,
+        "calibration_gap": -0.61425,
+        "ci95_low": -0.703757,
+        "ci95_high": -0.524744,
+        "ece_10": 0.61425,
+        "reliability": [
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 1,
+            "mean_predicted": 0.568584,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.568584,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 1,
+            "mean_predicted": 0.659917,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.659917,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=2 < 100; no se interpreta"
+      },
+      "semi": {
+        "n": 103,
+        "accuracy": 0.631068,
+        "log_loss": 0.633626,
+        "brier": 0.221561,
+        "mean_predicted": 0.540456,
+        "observed_rate": 0.582524,
+        "calibration_gap": 0.042069,
+        "ci95_low": -0.048914,
+        "ci95_high": 0.133052,
+        "ece_10": 0.09119,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 1,
+            "mean_predicted": 0.198116,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.198116,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 7,
+            "mean_predicted": 0.273126,
+            "observed_rate": 0.285714,
+            "calibration_gap": 0.012588,
+            "ci95_low": -0.346363,
+            "ci95_high": 0.371539,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 10,
+            "mean_predicted": 0.360435,
+            "observed_rate": 0.2,
+            "calibration_gap": -0.160435,
+            "ci95_low": -0.417045,
+            "ci95_high": 0.096176,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 17,
+            "mean_predicted": 0.442564,
+            "observed_rate": 0.647059,
+            "calibration_gap": 0.204495,
+            "ci95_low": -0.02911,
+            "ci95_high": 0.4381,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 29,
+            "mean_predicted": 0.554045,
+            "observed_rate": 0.551724,
+            "calibration_gap": -0.002321,
+            "ci95_low": -0.187874,
+            "ci95_high": 0.183232,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 29,
+            "mean_predicted": 0.650598,
+            "observed_rate": 0.758621,
+            "calibration_gap": 0.108023,
+            "ci95_low": -0.050608,
+            "ci95_high": 0.266654,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 9,
+            "mean_predicted": 0.739999,
+            "observed_rate": 0.666667,
+            "calibration_gap": -0.073333,
+            "ci95_low": -0.398867,
+            "ci95_high": 0.252201,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 1,
+            "mean_predicted": 0.834357,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.165643,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "ro16": {
+        "n": 98,
+        "accuracy": 0.673469,
+        "log_loss": 0.596824,
+        "brier": 0.205048,
+        "mean_predicted": 0.569631,
+        "observed_rate": 0.520408,
+        "calibration_gap": -0.049222,
+        "ci95_low": -0.138804,
+        "ci95_high": 0.040359,
+        "ece_10": 0.069384,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 3,
+            "mean_predicted": 0.179707,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.179707,
+            "ci95_low": -0.199769,
+            "ci95_high": -0.159645,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 10,
+            "mean_predicted": 0.248804,
+            "observed_rate": 0.2,
+            "calibration_gap": -0.048804,
+            "ci95_low": -0.307224,
+            "ci95_high": 0.209616,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 4,
+            "mean_predicted": 0.339651,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.339651,
+            "ci95_low": -0.368572,
+            "ci95_high": -0.310731,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 16,
+            "mean_predicted": 0.46002,
+            "observed_rate": 0.4375,
+            "calibration_gap": -0.02252,
+            "ci95_low": -0.270446,
+            "ci95_high": 0.225407,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 14,
+            "mean_predicted": 0.560178,
+            "observed_rate": 0.428571,
+            "calibration_gap": -0.131607,
+            "ci95_low": -0.404159,
+            "ci95_high": 0.140946,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 23,
+            "mean_predicted": 0.65518,
+            "observed_rate": 0.695652,
+            "calibration_gap": 0.040472,
+            "ci95_low": -0.148905,
+            "ci95_high": 0.22985,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 22,
+            "mean_predicted": 0.737416,
+            "observed_rate": 0.681818,
+            "calibration_gap": -0.055598,
+            "ci95_low": -0.253594,
+            "ci95_high": 0.142398,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 6,
+            "mean_predicted": 0.823823,
+            "observed_rate": 0.833333,
+            "calibration_gap": 0.00951,
+            "ci95_low": -0.308579,
+            "ci95_high": 0.327599,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=98 < 100; no se interpreta"
+      },
+      "upper_bracket": {
+        "n": 2,
+        "accuracy": 1.0,
+        "log_loss": 0.367841,
+        "brier": 0.099593,
+        "mean_predicted": 0.698458,
+        "observed_rate": 1.0,
+        "calibration_gap": 0.301542,
+        "ci95_low": 0.119086,
+        "ci95_high": 0.483997,
+        "ece_10": 0.301542,
+        "reliability": [
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 1,
+            "mean_predicted": 0.605369,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.394631,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 1,
+            "mean_predicted": 0.791548,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.208452,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=2 < 100; no se interpreta"
+      },
+      "lower_bracket": {
+        "n": 18,
+        "accuracy": 0.666667,
+        "log_loss": 0.657665,
+        "brier": 0.232243,
+        "mean_predicted": 0.482182,
+        "observed_rate": 0.555556,
+        "calibration_gap": 0.073374,
+        "ci95_low": -0.153044,
+        "ci95_high": 0.299791,
+        "ece_10": 0.271811,
+        "reliability": [
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 5,
+            "mean_predicted": 0.342118,
+            "observed_rate": 0.2,
+            "calibration_gap": -0.142118,
+            "ci95_low": -0.53895,
+            "ci95_high": 0.254713,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 5,
+            "mean_predicted": 0.434249,
+            "observed_rate": 0.6,
+            "calibration_gap": 0.165751,
+            "ci95_low": -0.292216,
+            "ci95_high": 0.623718,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 5,
+            "mean_predicted": 0.544419,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.455581,
+            "ci95_low": 0.430227,
+            "ci95_high": 0.480935,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 1,
+            "mean_predicted": 0.642151,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.642151,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 2,
+            "mean_predicted": 0.716597,
+            "observed_rate": 0.5,
+            "calibration_gap": -0.216597,
+            "ci95_low": -1.179762,
+            "ci95_high": 0.746569,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=18 < 100; no se interpreta"
+      }
+    },
+    "by_environment": {
+      "unknown": {
+        "n": 6991,
+        "status": "unknown_segment",
+        "note": "segmento desconocido; excluido de conclusiones"
+      },
+      "lan": {
+        "n": 259,
+        "accuracy": 0.694981,
+        "log_loss": 0.556983,
+        "brier": 0.187871,
+        "mean_predicted": 0.560028,
+        "observed_rate": 0.552124,
+        "calibration_gap": -0.007904,
+        "ci95_low": -0.060786,
+        "ci95_high": 0.044977,
+        "ece_10": 0.082275,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 8,
+            "mean_predicted": 0.180814,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.180814,
+            "ci95_low": -0.195534,
+            "ci95_high": -0.166094,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 17,
+            "mean_predicted": 0.257889,
+            "observed_rate": 0.176471,
+            "calibration_gap": -0.081418,
+            "ci95_low": -0.270306,
+            "ci95_high": 0.10747,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 30,
+            "mean_predicted": 0.345836,
+            "observed_rate": 0.333333,
+            "calibration_gap": -0.012503,
+            "ci95_low": -0.18193,
+            "ci95_high": 0.156924,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 38,
+            "mean_predicted": 0.442357,
+            "observed_rate": 0.394737,
+            "calibration_gap": -0.04762,
+            "ci95_low": -0.202779,
+            "ci95_high": 0.107539,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 45,
+            "mean_predicted": 0.548065,
+            "observed_rate": 0.4,
+            "calibration_gap": -0.148065,
+            "ci95_low": -0.293274,
+            "ci95_high": -0.002856,
+            "material_deviation": true
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 56,
+            "mean_predicted": 0.635443,
+            "observed_rate": 0.678571,
+            "calibration_gap": 0.043129,
+            "ci95_low": -0.07977,
+            "ci95_high": 0.166028,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 33,
+            "mean_predicted": 0.751119,
+            "observed_rate": 0.848485,
+            "calibration_gap": 0.097365,
+            "ci95_low": -0.029267,
+            "ci95_high": 0.223997,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 32,
+            "mean_predicted": 0.843665,
+            "observed_rate": 0.96875,
+            "calibration_gap": 0.125085,
+            "ci95_low": 0.060938,
+            "ci95_high": 0.189231,
+            "material_deviation": true
+          }
+        ],
+        "material_reliability_bins": 2,
+        "status": "deviation_detected",
+        "deviation_detected": true,
+        "note": "desviacion descriptiva material; debe validarse por la puerta antes de cambiar el modelo"
+      },
+      "online": {
+        "n": 728,
+        "accuracy": 0.620879,
+        "log_loss": 0.651156,
+        "brier": 0.229704,
+        "mean_predicted": 0.559638,
+        "observed_rate": 0.56456,
+        "calibration_gap": 0.004922,
+        "ci95_low": -0.029915,
+        "ci95_high": 0.03976,
+        "ece_10": 0.031811,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 6,
+            "mean_predicted": 0.163511,
+            "observed_rate": 0.333333,
+            "calibration_gap": 0.169822,
+            "ci95_low": -0.258268,
+            "ci95_high": 0.597912,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 30,
+            "mean_predicted": 0.255676,
+            "observed_rate": 0.3,
+            "calibration_gap": 0.044324,
+            "ci95_low": -0.121635,
+            "ci95_high": 0.210283,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 71,
+            "mean_predicted": 0.355377,
+            "observed_rate": 0.338028,
+            "calibration_gap": -0.017349,
+            "ci95_low": -0.128918,
+            "ci95_high": 0.09422,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 148,
+            "mean_predicted": 0.453227,
+            "observed_rate": 0.486486,
+            "calibration_gap": 0.033259,
+            "ci95_low": -0.047512,
+            "ci95_high": 0.11403,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 163,
+            "mean_predicted": 0.55478,
+            "observed_rate": 0.576687,
+            "calibration_gap": 0.021907,
+            "ci95_low": -0.05434,
+            "ci95_high": 0.098155,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 179,
+            "mean_predicted": 0.652109,
+            "observed_rate": 0.642458,
+            "calibration_gap": -0.009651,
+            "ci95_low": -0.079552,
+            "ci95_high": 0.06025,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 104,
+            "mean_predicted": 0.738734,
+            "observed_rate": 0.673077,
+            "calibration_gap": -0.065657,
+            "ci95_low": -0.15641,
+            "ci95_high": 0.025096,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 26,
+            "mean_predicted": 0.829293,
+            "observed_rate": 0.923077,
+            "calibration_gap": 0.093784,
+            "ci95_low": -0.010893,
+            "ci95_high": 0.198462,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 1,
+            "mean_predicted": 0.909206,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.090794,
+            "ci95_low": null,
+            "ci95_high": null,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      }
+    },
+    "by_format": {
+      "bo3": {
+        "n": 7201,
+        "accuracy": 0.638245,
+        "log_loss": 0.632957,
+        "brier": 0.221356,
+        "mean_predicted": 0.558814,
+        "observed_rate": 0.556312,
+        "calibration_gap": -0.002502,
+        "ci95_low": -0.01337,
+        "ci95_high": 0.008365,
+        "ece_10": 0.011946,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 60,
+            "mean_predicted": 0.168692,
+            "observed_rate": 0.233333,
+            "calibration_gap": 0.064641,
+            "ci95_low": -0.044186,
+            "ci95_high": 0.173468,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 363,
+            "mean_predicted": 0.258524,
+            "observed_rate": 0.272727,
+            "calibration_gap": 0.014203,
+            "ci95_low": -0.031857,
+            "ci95_high": 0.060263,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 801,
+            "mean_predicted": 0.354656,
+            "observed_rate": 0.340824,
+            "calibration_gap": -0.013832,
+            "ci95_low": -0.046606,
+            "ci95_high": 0.018942,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 1302,
+            "mean_predicted": 0.453086,
+            "observed_rate": 0.447005,
+            "calibration_gap": -0.006082,
+            "ci95_low": -0.033063,
+            "ci95_high": 0.0209,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 1679,
+            "mean_predicted": 0.55052,
+            "observed_rate": 0.544372,
+            "calibration_gap": -0.006149,
+            "ci95_low": -0.029883,
+            "ci95_high": 0.017586,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 1498,
+            "mean_predicted": 0.647997,
+            "observed_rate": 0.632844,
+            "calibration_gap": -0.015154,
+            "ci95_low": -0.039494,
+            "ci95_high": 0.009186,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 1098,
+            "mean_predicted": 0.743325,
+            "observed_rate": 0.759563,
+            "calibration_gap": 0.016238,
+            "ci95_low": -0.009054,
+            "ci95_high": 0.041531,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 385,
+            "mean_predicted": 0.834184,
+            "observed_rate": 0.851948,
+            "calibration_gap": 0.017764,
+            "ci95_low": -0.017747,
+            "ci95_high": 0.053275,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.9,
+            "upper": 1.0,
+            "n": 15,
+            "mean_predicted": 0.913324,
+            "observed_rate": 0.933333,
+            "calibration_gap": 0.020009,
+            "ci95_low": -0.109205,
+            "ci95_high": 0.149224,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "compatible_with_sampling_noise",
+        "deviation_detected": false,
+        "note": "sin desviacion material distinguible del ruido muestral con este criterio"
+      },
+      "bo5": {
+        "n": 79,
+        "accuracy": 0.670886,
+        "log_loss": 0.613609,
+        "brier": 0.212505,
+        "mean_predicted": 0.552444,
+        "observed_rate": 0.582278,
+        "calibration_gap": 0.029835,
+        "ci95_low": -0.072255,
+        "ci95_high": 0.131925,
+        "ece_10": 0.101693,
+        "reliability": [
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 2,
+            "mean_predicted": 0.248025,
+            "observed_rate": 0.0,
+            "calibration_gap": -0.248025,
+            "ci95_low": -0.301266,
+            "ci95_high": -0.194783,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 5,
+            "mean_predicted": 0.364122,
+            "observed_rate": 0.2,
+            "calibration_gap": -0.164122,
+            "ci95_low": -0.554645,
+            "ci95_high": 0.226401,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 20,
+            "mean_predicted": 0.459634,
+            "observed_rate": 0.45,
+            "calibration_gap": -0.009634,
+            "ci95_low": -0.229602,
+            "ci95_high": 0.210333,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 26,
+            "mean_predicted": 0.549823,
+            "observed_rate": 0.692308,
+            "calibration_gap": 0.142485,
+            "ci95_low": -0.036841,
+            "ci95_high": 0.321811,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 16,
+            "mean_predicted": 0.645566,
+            "observed_rate": 0.5625,
+            "calibration_gap": -0.083066,
+            "ci95_low": -0.328362,
+            "ci95_high": 0.16223,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 7,
+            "mean_predicted": 0.724769,
+            "observed_rate": 0.857143,
+            "calibration_gap": 0.132374,
+            "ci95_low": -0.15126,
+            "ci95_high": 0.416008,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 3,
+            "mean_predicted": 0.811953,
+            "observed_rate": 1.0,
+            "calibration_gap": 0.188047,
+            "ci95_low": 0.184567,
+            "ci95_high": 0.191528,
+            "material_deviation": false
+          }
+        ],
+        "material_reliability_bins": 0,
+        "status": "insufficient_sample",
+        "deviation_detected": false,
+        "note": "sin muestra suficiente: n=79 < 100; no se interpreta"
+      },
+      "bo1": {
+        "n": 698,
+        "accuracy": 0.666189,
+        "log_loss": 0.601263,
+        "brier": 0.206944,
+        "mean_predicted": 0.578589,
+        "observed_rate": 0.624642,
+        "calibration_gap": 0.046053,
+        "ci95_low": 0.012454,
+        "ci95_high": 0.079652,
+        "ece_10": 0.051969,
+        "reliability": [
+          {
+            "lower": 0.1,
+            "upper": 0.2,
+            "n": 4,
+            "mean_predicted": 0.164268,
+            "observed_rate": 0.5,
+            "calibration_gap": 0.335732,
+            "ci95_low": -0.219974,
+            "ci95_high": 0.891438,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.2,
+            "upper": 0.3,
+            "n": 43,
+            "mean_predicted": 0.257321,
+            "observed_rate": 0.209302,
+            "calibration_gap": -0.048019,
+            "ci95_low": -0.17156,
+            "ci95_high": 0.075523,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.3,
+            "upper": 0.4,
+            "n": 67,
+            "mean_predicted": 0.352167,
+            "observed_rate": 0.432836,
+            "calibration_gap": 0.080668,
+            "ci95_low": -0.038982,
+            "ci95_high": 0.200319,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.4,
+            "upper": 0.5,
+            "n": 105,
+            "mean_predicted": 0.454844,
+            "observed_rate": 0.52381,
+            "calibration_gap": 0.068965,
+            "ci95_low": -0.026333,
+            "ci95_high": 0.164264,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.5,
+            "upper": 0.6,
+            "n": 126,
+            "mean_predicted": 0.54898,
+            "observed_rate": 0.563492,
+            "calibration_gap": 0.014512,
+            "ci95_low": -0.072148,
+            "ci95_high": 0.101172,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.6,
+            "upper": 0.7,
+            "n": 156,
+            "mean_predicted": 0.65194,
+            "observed_rate": 0.666667,
+            "calibration_gap": 0.014727,
+            "ci95_low": -0.059315,
+            "ci95_high": 0.088769,
+            "material_deviation": false
+          },
+          {
+            "lower": 0.7,
+            "upper": 0.8,
+            "n": 155,
+            "mean_predicted": 0.743805,
+            "observed_rate": 0.812903,
+            "calibration_gap": 0.069099,
+            "ci95_low": 0.007236,
+            "ci95_high": 0.130962,
+            "material_deviation": true
+          },
+          {
+            "lower": 0.8,
+            "upper": 0.9,
+            "n": 42,
+            "mean_predicted": 0.824177,
+            "observed_rate": 0.952381,
+            "calibration_gap": 0.128204,
+            "ci95_low": 0.062079,
+            "ci95_high": 0.194328,
+            "material_deviation": true
+          }
+        ],
+        "material_reliability_bins": 2,
+        "status": "deviation_detected",
+        "deviation_detected": true,
+        "note": "desviacion descriptiva material; debe validarse por la puerta antes de cambiar el modelo"
+      }
+    },
+    "by_event_tier": {
+      "unknown": {
+        "n": 7978,
+        "status": "unknown_segment",
+        "note": "segmento desconocido; excluido de conclusiones"
+      }
+    },
+    "coverage": {
+      "elo_gap_bin": {
+        "known_rows": 7978,
+        "total_rows": 7978,
+        "coverage": 1.0,
+        "min_group_rows": 100
+      },
+      "stage": {
+        "known_rows": 937,
+        "total_rows": 7978,
+        "coverage": 0.117448,
+        "min_group_rows": 100
+      },
+      "environment": {
+        "known_rows": 987,
+        "total_rows": 7978,
+        "coverage": 0.123715,
+        "min_group_rows": 100
+      },
+      "format": {
+        "known_rows": 7978,
+        "total_rows": 7978,
+        "coverage": 1.0,
+        "min_group_rows": 100
+      },
+      "event_tier": {
+        "known_rows": 0,
+        "total_rows": 7978,
+        "coverage": 0.0,
+        "min_group_rows": 100
+      }
+    }
+  }
+}

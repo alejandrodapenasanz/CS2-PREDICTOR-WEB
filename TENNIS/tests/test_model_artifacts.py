@@ -1,4 +1,4 @@
-"""Pruebas offline de publicación inmutable de artefactos."""
+"""Pruebas offline del registro inmutable de challengers de TENNIS."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.modeling.artifacts import (  # noqa: E402
     ArtifactError,
-    activate_published_run,
     create_staging_directory,
     find_verified_run,
     fingerprint_payload,
@@ -25,7 +24,7 @@ from src.modeling.artifacts import (  # noqa: E402
 
 
 class ModelArtifactsTest(unittest.TestCase):
-    """Comprueba fingerprint, publicación, reutilización e integridad."""
+    """Comprueba que registrar nunca equivale a activar."""
 
     def test_fingerprint_is_canonical_for_mapping_order(self) -> None:
         """El orden de claves JSON no cambia la identidad del run."""
@@ -36,12 +35,10 @@ class ModelArtifactsTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 64)
 
-    def test_publishes_and_finds_an_immutable_verified_run(self) -> None:
-        """Mueve staging, activa manifiesto y verifica todos los hashes."""
+    def test_registers_and_finds_challenger_without_active_pointer(self) -> None:
+        """Publicar staging solo crea runs/<fingerprint>."""
 
-        with tempfile.TemporaryDirectory(
-            dir=PROJECT_ROOT / "tests"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tests") as temporary:
             output = Path(temporary) / "models"
             staging = create_staging_directory(output)
             artifact = staging / "models" / "M" / "model.txt"
@@ -49,7 +46,7 @@ class ModelArtifactsTest(unittest.TestCase):
             artifact.write_text("modelo", encoding="utf-8")
             fingerprint = fingerprint_payload({"run": "test"})
 
-            published = publish_staged_run(
+            registered = publish_staged_run(
                 staging,
                 fingerprint=fingerprint,
                 manifest_payload={"artifact_version": "test-v1"},
@@ -57,75 +54,59 @@ class ModelArtifactsTest(unittest.TestCase):
             )
             reused = find_verified_run(fingerprint, output_dir=output)
 
-            self.assertFalse(published.skipped)
+            self.assertFalse(registered.skipped)
             self.assertIsNotNone(reused)
-            assert reused is not None
-            self.assertTrue(reused.skipped)
-            self.assertTrue((output / "manifest.json").is_file())
-            verify_published_run(reused.run_dir)
+            self.assertFalse((output / "manifest.json").exists())
+            self.assertEqual(registered.manifest_path, registered.run_dir / "manifest.json")
+            verify_published_run(registered.run_dir)
 
-    def test_detects_a_changed_published_artifact(self) -> None:
-        """Un archivo modificado después de publicar invalida el run."""
+    def test_detects_changed_registered_artifact(self) -> None:
+        """Un challenger publicado permanece inmutable y verificable."""
 
-        with tempfile.TemporaryDirectory(
-            dir=PROJECT_ROOT / "tests"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tests") as temporary:
             output = Path(temporary) / "models"
             staging = create_staging_directory(output)
             artifact = staging / "artifact.txt"
             artifact.write_text("original", encoding="utf-8")
-            fingerprint = fingerprint_payload({"run": "corrupt"})
-            published = publish_staged_run(
+            registered = publish_staged_run(
                 staging,
+                fingerprint=fingerprint_payload({"run": "corrupt"}),
+                manifest_payload={"artifact_version": "test-v1"},
+                output_dir=output,
+            )
+            (registered.run_dir / "artifact.txt").write_text("alterado", encoding="utf-8")
+
+            with self.assertRaisesRegex(ArtifactError, "tamaño|SHA-256"):
+                verify_published_run(registered.run_dir)
+
+    def test_duplicate_fingerprint_never_overwrites_run(self) -> None:
+        """Un segundo staging no puede sustituir una identidad existente."""
+
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tests") as temporary:
+            output = Path(temporary) / "models"
+            fingerprint = fingerprint_payload({"run": "same"})
+            first = create_staging_directory(output)
+            (first / "model.txt").write_text("A", encoding="utf-8")
+            publish_staged_run(
+                first,
                 fingerprint=fingerprint,
                 manifest_payload={"artifact_version": "test-v1"},
                 output_dir=output,
             )
-            changed = published.run_dir / "artifact.txt"
-            changed.write_text("alterado", encoding="utf-8")
+            second = create_staging_directory(output)
+            (second / "model.txt").write_text("B", encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                ArtifactError, "tamaño|SHA-256"
-            ):
-                verify_published_run(published.run_dir)
-
-    def test_reactivates_a_verified_older_run(self) -> None:
-        """Reutilizar A después de B actualiza el puntero activo a A."""
-
-        with tempfile.TemporaryDirectory(
-            dir=PROJECT_ROOT / "tests"
-        ) as temporary:
-            output = Path(temporary) / "models"
-            published_runs = []
-            for label in ("A", "B"):
-                staging = create_staging_directory(output)
-                (staging / "model.txt").write_text(label, encoding="utf-8")
-                fingerprint = fingerprint_payload({"run": label})
-                published_runs.append(
-                    publish_staged_run(
-                        staging,
-                        fingerprint=fingerprint,
-                        manifest_payload={"artifact_version": "test-v1"},
-                        output_dir=output,
-                    )
+            with self.assertRaisesRegex(ArtifactError, "ya está publicado"):
+                publish_staged_run(
+                    second,
+                    fingerprint=fingerprint,
+                    manifest_payload={"artifact_version": "test-v1"},
+                    output_dir=output,
                 )
-
-            first = find_verified_run(
-                published_runs[0].fingerprint,
-                output_dir=output,
+            payload = json.loads(
+                (output / "runs" / fingerprint / "manifest.json").read_text(encoding="utf-8")
             )
-            assert first is not None
-            activated = activate_published_run(first, output_dir=output)
-            active = json.loads(
-                (output / "manifest.json").read_text(encoding="utf-8")
-            )
-
-            self.assertTrue(activated.skipped)
-            self.assertEqual(active["fingerprint"], first.fingerprint)
-            self.assertEqual(
-                active["active_run"],
-                f"runs/{first.fingerprint}",
-            )
+            self.assertEqual(payload["fingerprint"], fingerprint)
 
 
 if __name__ == "__main__":

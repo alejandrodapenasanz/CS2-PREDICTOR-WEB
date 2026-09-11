@@ -3,8 +3,8 @@
 La función pública verifica primero los Parquet de fase 6, calcula una
 identidad que incluye fuentes, código, parámetros y librerías, y reutiliza un
 run íntegro si ya existe. Un run nuevo procesa cada género por separado,
-publica modelos y calibradores inmutables y actualiza el informe activo solo
-después de verificar todos los artefactos.
+registra modelos y calibradores inmutables y los somete a la puerta temporal.
+El informe activo solo cambia después de una promoción o rollback verificados.
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ from ..config import (
 )
 from .artifacts import (
     PublishedRun,
-    activate_published_run,
     create_staging_directory,
     dump_joblib_artifact,
     find_verified_run,
@@ -38,6 +37,8 @@ from .artifacts import (
     runtime_versions,
     write_json_artifact,
 )
+from .promotion import PromotionResult, gate_challenger
+from .retention import RetentionResult, run_automatic_retention
 from .backtest import (
     GenderFinalModels,
     fit_final_gender_models,
@@ -79,13 +80,15 @@ class TrainingError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class ModelTrainingRun:
-    """Resultado consumible por la CLI tras publicar o reutilizar."""
+    """Resultado consumible tras registrar, evaluar y aplicar retención."""
 
     published: PublishedRun
     summaries: tuple[Mapping[str, object], ...]
     metrics: pd.DataFrame
     market_audits: pd.DataFrame
     suspicious_segments: pd.DataFrame
+    promotion: PromotionResult
+    retention: RetentionResult
 
     @property
     def skipped(self) -> bool:
@@ -141,7 +144,7 @@ def _parameter_payload(
         },
         "feature_contract": {
             "profile": profile,
-            "columns": list(contract.columns_for(profile)),  # type: ignore[arg-type]
+            "columns": list(contract.columns_for(profile)),
         },
         "parameters": {
             "training_as_of_date": training_as_of_date.isoformat(),
@@ -328,7 +331,7 @@ def _copy_atomic(source: Path, target: Path) -> None:
     os.replace(temporary, target)
 
 
-def _sync_active_documentation(published: PublishedRun) -> None:
+def sync_active_documentation(published: PublishedRun) -> None:
     """Actualiza informe y figuras de docs desde un run ya verificado."""
 
     run_dir = published.run_dir
@@ -444,19 +447,19 @@ def retrain_models(
     )
     existing = find_verified_run(fingerprint, output_dir=output_dir)
     if existing is not None:
+        promotion = gate_challenger(existing, output_dir=output_dir)
+        retention = run_automatic_retention(output_dir=output_dir)
         if canonical_output:
-            existing = activate_published_run(
-                existing,
-                output_dir=output_dir,
-            )
-            _sync_active_documentation(existing)
-        summaries, metrics, market, suspicious = _load_run_tables(existing)
+            sync_active_documentation(promotion.active)
+        existing_summaries, metrics, market, suspicious = _load_run_tables(existing)
         return ModelTrainingRun(
             published=existing,
-            summaries=summaries,
+            summaries=existing_summaries,
             metrics=metrics,
             market_audits=market,
             suspicious_segments=suspicious,
+            promotion=promotion,
+            retention=retention,
         )
 
     staging = create_staging_directory(output_dir)
@@ -645,14 +648,18 @@ def retrain_models(
             manifest_payload=manifest_payload,
             output_dir=output_dir,
         )
+        promotion = gate_challenger(published, output_dir=output_dir)
+        retention = run_automatic_retention(output_dir=output_dir)
         if canonical_output:
-            _sync_active_documentation(published)
+            sync_active_documentation(promotion.active)
         return ModelTrainingRun(
             published=published,
             summaries=tuple(summaries),
             metrics=metrics,
             market_audits=market,
             suspicious_segments=suspicious,
+            promotion=promotion,
+            retention=retention,
         )
     except Exception:
         _safe_rmtree_staging(staging, output_dir)

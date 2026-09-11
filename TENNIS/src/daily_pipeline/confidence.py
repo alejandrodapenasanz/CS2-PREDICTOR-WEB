@@ -2,8 +2,15 @@
 
 La confianza describe calidad y frescura de inputs; nunca aumenta porque una
 probabilidad sea extrema. Los umbrales son operativos y conservadores: al
-menos 20 partidos generales, 10 en la superficie, y fuentes con una antigüedad
-máxima de 14 días. No alteran la probabilidad, solo su etiqueta auditable.
+menos 20 partidos generales, 10 en la superficie, y un lag máximo de 14 días
+desde el último resultado ya disponible y desde el ranking. No alteran la
+probabilidad, solo su etiqueta auditable.
+
+La frescura del histórico se mide contra ``training_available_max_date``, no
+contra la fecha deportiva del último partido. Esto es esencial porque el
+contrato causal retrasa 21 días cada resultado: comparar directamente con la
+fecha deportiva marcaría como obsoleta incluso una fuente perfectamente al
+día.
 """
 
 from __future__ import annotations
@@ -17,7 +24,10 @@ ConfidenceLevel = Literal["HIGH", "MEDIUM", "LOW", "UNAVAILABLE"]
 
 MIN_GENERAL_MATCHES: Final[int] = 20
 MIN_SURFACE_MATCHES: Final[int] = 10
-MAX_HISTORY_AGE_DAYS: Final[int] = 14
+MAX_HISTORY_AVAILABILITY_LAG_DAYS: Final[int] = 14
+# Alias público conservado para consumidores anteriores. Su semántica es el
+# lag desde el corte disponible, nunca la edad de la fecha deportiva.
+MAX_HISTORY_AGE_DAYS: Final[int] = MAX_HISTORY_AVAILABILITY_LAG_DAYS
 MAX_RANKING_AGE_DAYS: Final[int] = 14
 
 
@@ -53,21 +63,45 @@ def assess_vector_confidence(
     values: Mapping[str, object],
     *,
     match_date: date,
-    history_max_date: date,
+    history_available_max_date: date,
     ranking_max_date: date,
+    max_history_availability_lag_days: int = (
+        MAX_HISTORY_AVAILABILITY_LAG_DAYS
+    ),
 ) -> ConfidenceAssessment:
-    """Clasifica cobertura y frescura de un vector que sí puede predecirse."""
+    """Clasifica cobertura y frescura de un vector que sí puede predecirse.
+
+    ``history_available_max_date`` es el corte causal después de aplicar la
+    política de disponibilidad a la última fecha deportiva. Debe preceder
+    estrictamente a ``match_date``. El umbral se inyecta para que una política
+    operativa pueda endurecerlo sin cambiar la semántica temporal.
+    """
+
+    if (
+        isinstance(max_history_availability_lag_days, bool)
+        or not isinstance(max_history_availability_lag_days, int)
+        or max_history_availability_lag_days < 1
+    ):
+        raise ValueError(
+            "max_history_availability_lag_days debe ser un entero positivo."
+        )
 
     low_flags: list[str] = []
     warning_flags: list[str] = []
-    history_age = (match_date - history_max_date).days
+    history_availability_lag = (
+        match_date - history_available_max_date
+    ).days
     ranking_source_age = (match_date - ranking_max_date).days
-    if history_age < 1:
-        raise ValueError("history_max_date debe ser estrictamente anterior a D.")
+    if history_availability_lag < 1:
+        raise ValueError(
+            "history_available_max_date debe ser estrictamente anterior a D."
+        )
     if ranking_source_age < 1:
         raise ValueError("ranking_max_date debe ser estrictamente anterior a D.")
-    if history_age > MAX_HISTORY_AGE_DAYS:
-        low_flags.append(f"history_stale_{history_age}d")
+    if history_availability_lag > max_history_availability_lag_days:
+        low_flags.append(
+            f"history_available_stale_{history_availability_lag}d"
+        )
     if ranking_source_age > MAX_RANKING_AGE_DAYS:
         low_flags.append(f"ranking_source_stale_{ranking_source_age}d")
 

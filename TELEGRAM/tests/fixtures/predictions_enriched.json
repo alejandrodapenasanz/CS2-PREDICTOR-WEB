@@ -1,0 +1,65 @@
+[
+  {
+    "id": "match-late",
+    "date": "2026-08-11",
+    "hour": "18:30",
+    "link": "https://www.hltv.org/matches/1001/alpha-vs-beta?event=7",
+    "team1": {"name": "Alpha & Co"},
+    "team2": {"name": "Beta <Academy>"},
+    "prediction": {
+      "decision_favorite": "Alpha & Co",
+      "decision_confidence": 0.6123,
+      "estimate_confidence_level": "medium",
+      "opportunity_eligible": true,
+      "is_best_opportunity": false
+    },
+    "model_trace": {"is_fallback": false}
+  },
+  {
+    "id": "match-best",
+    "date": "2026-08-11",
+    "hour": "12:00",
+    "link": "/matches/1002/northern-lights-vs-crimson-five",
+    "team1": {"name": "Northern Lights"},
+    "team2": {"name": "Crimson Five"},
+    "prediction": {
+      "decision_favorite": "Northern Lights",
+      "decision_confidence": 0.73456,
+      "estimate_confidence_level": "high",
+      "opportunity_eligible": true,
+      "is_best_opportunity": true
+    },
+    "model_trace": {"is_fallback": false}
+  },
+  {
+    "id": "match-early",
+    "date": "2026-08-11",
+    "hour": "09:15",
+    "link": "/matches/1003/early-birds-vs-night-owls",
+    "team1": {"name": "Early Birds"},
+    "team2": {"name": "Night Owls"},
+    "prediction": {
+      "decision_favorite": "Night Owls",
+      "decision_confidence": 0.5501,
+      "estimate_confidence_level": "low",
+      "is_best_opportunity": false
+    },
+    "model_trace": {"is_fallback": false}
+  },
+  {
+    "id": "different-date",
+    "date": "2026-08-12",
+    "hour": "10:00",
+    "link": "/matches/1004/tomorrow-one-vs-tomorrow-two",
+    "team1": {"name": "Tomorrow One"},
+    "team2": {"name": "Tomorrow Two"},
+    "prediction": {
+      "decision_favorite": "Tomorrow One",
+      "decision_confidence": 0.66,
+      "estimate_confidence_level": "low",
+      "opportunity_eligible": true,
+      "is_best_opportunity": false
+    },
+    "model_trace": {"is_fallback": false}
+  }
+]

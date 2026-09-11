@@ -1,0 +1,43 @@
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+cache-dir = ".cache/ruff"
+extend-exclude = [
+    ".venv",
+    ".venv.previous",
+    "hltv_scraper/data",
+    "hltv_scraper/httpcache",
+]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+# Some Scrapy hooks are imported for registration rather than referenced directly.
+ignore = ["F401"]
+
+[tool.mypy]
+python_version = "3.13"
+files = [
+    "app.py",
+    "config.py",
+    "routes",
+    "scripts",
+    "hltv_scraper/__init__.py",
+    "hltv_scraper/cache_config.py",
+    "hltv_scraper/cleaner.py",
+    "hltv_scraper/conditions.py",
+    "hltv_scraper/conditions_checker.py",
+    "hltv_scraper/conditions_factory.py",
+    "hltv_scraper/data.py",
+    "hltv_scraper/path_generator.py",
+    "hltv_scraper/process.py",
+    "hltv_scraper/spider_manager.py",
+]
+cache_dir = ".cache/mypy"
+ignore_missing_imports = true
+follow_imports = "skip"
+allow_untyped_defs = true
+check_untyped_defs = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true

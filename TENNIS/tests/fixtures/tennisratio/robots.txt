@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /admin/
+Disallow: /*?q=
+Disallow: /*?page=
+Disallow: /api/
+
+Sitemap: https://www.tennisratio.com/sitemap.xml

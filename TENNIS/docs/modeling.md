@@ -253,16 +253,41 @@ versiones de librerías y un inventario explícito del código de entrenamiento
 y del runtime diario. Ese inventario incluye `src/temporal.py`, todos los
 módulos de modelado, `scripts/retrain_models.py` y los consumidores de
 `src/daily_pipeline`; no se descubre mediante glob. El run se
-publica desde staging, no se sobrescribe y todos sus archivos quedan
+registra desde staging, no se sobrescribe y todos sus archivos quedan
 inventariados con tamaño y SHA-256. Una segunda ejecución idéntica verifica y
-reutiliza el run. Si ese run ya no era el activo porque se publicó otro después,
-se verifican de nuevo todos sus hashes y se reactiva explícitamente el puntero;
-CLI, documentación y deployment no pueden divergir silenciosamente.
+reutiliza el run, pero registrar o reutilizar nunca mueve producción.
+
+La puerta selecciona el último año OOF completo común (por defecto 2025), exige
+exactamente las mismas claves `gender+record_id`, fechas, labels y segmentos y
+puntúa `lightgbm_platt` con el mismo evaluador. Registra N, periodo, hash del
+cohort, hashes de probabilidades y configuración Platt. Log-loss es principal:
+se exige una mejora mínima de `0,001`; dentro de esa banda solo promociona una
+mejora Brier de al menos `0,0005`. Accuracy es métrica de producto y no decide.
+El mismo Parquet se carga y puntúa dos veces; probabilidades y métricas deben
+coincidir con tolerancia absoluta `1e-12`.
+
+`models/phase7/manifest.json` apunta al champion y `last_good.json` al último
+champion validado disponible para rollback. La conmutación usa compare-and-swap
+del hash del puntero. Comandos operativos:
+
+```powershell
+.venv\Scripts\python.exe scripts\retrain_models.py --rollback
+.venv\Scripts\python.exe scripts\retrain_models.py --retention-preview
+.venv\Scripts\python.exe scripts\retrain_models.py --confirm-prune <TOKEN_DE_LA_PREVIEW>
+```
+
+La retención configurable conserva los últimos N runs más champion y
+`last_good`. Antes de la primera poda real solo presenta la keep-list; la
+confirmación exacta habilita futuras podas con la misma política. Cada plan se
+recalcula antes de borrar. Un fallo de Windows queda en
+`models/phase7/cleanup_pending.json`, se avisa y el pipeline continúa.
 
 `src.modeling.service.load_active_deployment_model()` verifica todos los hashes
-y exige que el inventario persistido coincida exactamente con el código actual
-antes de deserializar el bundle. Si cambia el productor o consumidor, falla
-cerrado y exige reentreno. Su método `predict(..., as_of_date=D)` exige
+y exige que el subconjunto persistido de inferencia coincida exactamente con el
+código actual antes de deserializar el bundle. La identidad amplia del
+challenger incluye también entrenamiento, puerta y CLI; cambiarlas no obliga a
+promover un empate ni invalida por sí solo el predictor vivo. Su método
+`predict(..., as_of_date=D)` exige
 en la propia API `training_available_max_date < D`. Si recibe mercado, también exige
 `market_retrieved_at_utc.date() < D`; sin esa procedencia no calcula edge.
 El pipeline diario repite estas comprobaciones y conserva nula toda comparación

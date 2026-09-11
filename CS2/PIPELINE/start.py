@@ -30,8 +30,7 @@ except ModuleNotFoundError:  # tests de parsers offline pueden correr sin venv d
 ROOT = Path(__file__).resolve().parents[1]
 SCRAPER_PROJECT = ROOT / "SCRAPER" / "hltv-scraper-api"
 SCRAPY_ROOT = SCRAPER_PROJECT / "hltv_scraper"
-SCRAPY_EXE = SCRAPER_PROJECT / ".venv" / "Scripts" / "scrapy.exe"
-PYTHON_EXE = SCRAPER_PROJECT / ".venv" / "Scripts" / "python.exe"
+PYTHON_EXE = Path(sys.executable).resolve()
 COMPARE_SCRIPT = SCRAPER_PROJECT / "scripts" / "collect_player_compare_stats.py"
 CF_SESSION = SCRAPY_ROOT / "cf_session.json"
 
@@ -90,6 +89,7 @@ PREMATCH_NEAR_START_REFRESH_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_STA
 PREMATCH_NEAR_START_WINDOW_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_START_WINDOW_HOURS", "24"))
 CLOSING_ODDS_MAX_AGE_HOURS = float(os.environ.get("HLTV_CLOSING_ODDS_MAX_AGE_HOURS", "6"))
 
+
 # --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
 # Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
 # stealth que resuelve el challenge de Cloudflare y acuña cf_clearance. Ambos
@@ -104,7 +104,7 @@ SCRAPLING_STEALTH_ENABLED = _env_bool("HLTV_SOLVE_CLOUDFLARE", "1")
 SCRAPLING_IMPERSONATE = os.environ.get("HLTV_IMPERSONATE", "chrome").strip() or "chrome"
 SCRAPLING_PROXY = os.environ.get("HLTV_PROXY", "").strip() or None
 SCRAPLING_STEALTH_TIMEOUT_MS = int(os.environ.get("HLTV_STEALTH_TIMEOUT_MS", "90000"))
-SCRAPLING_STEALTH_HEADLESS = _env_bool("HLTV_STEALTH_HEADLESS", "1")
+SCRAPLING_STEALTH_HEADLESS = _env_bool("HLTV_STEALTH_HEADLESS", "0")
 SCRAPLING_STEALTH_MAX_SOLVES = int(os.environ.get("HLTV_STEALTH_MAX_SOLVES_PER_RUN", "6"))
 SCRAPLING_TIER1_ATTEMPTS = int(os.environ.get("HLTV_SCRAPLING_TIER1_ATTEMPTS", "3"))
 CF_REFRESH_ENABLED = _env_bool("HLTV_AUTO_REFRESH_CF_ON_BLOCK", "1")
@@ -207,10 +207,7 @@ def fetch_diagnostics() -> dict[str, Any]:
     stats["max_http_requests_per_run"] = FETCH_MAX_HTTP_REQUESTS_PER_RUN
     stats["url_quarantine_entries"] = len(_URL_QUARANTINE_UNTIL)
     stats["top_failed_urls"] = sorted(
-        (
-            {"url": url, **info}
-            for url, info in _URL_FAILURES.items()
-        ),
+        ({"url": url, **info} for url, info in _URL_FAILURES.items()),
         key=lambda item: (int(item.get("count") or 0), str(item.get("last_at") or "")),
         reverse=True,
     )[:20]
@@ -360,11 +357,7 @@ def db_latest_player_snapshots(player_ids: set[str]) -> dict[str, list[dict[str,
         if key in seen:
             continue
         seen.add(key)
-        stats = {
-            label: row[column]
-            for column, label in stat_columns.items()
-            if row[column] is not None
-        }
+        stats = {label: row[column] for column, label in stat_columns.items() if row[column] is not None}
         out.setdefault(player_id, []).append(
             {
                 "id": player_id,
@@ -458,7 +451,8 @@ def db_pending_match_info(now: str | None = None) -> dict[str, dict[str, Any]] |
             "team2": row[4],
             "event": row[5],
         }
-        for row in rows if row[0]
+        for row in rows
+        if row[0]
     }
 
 
@@ -559,9 +553,7 @@ def ensure_fetch_budget(url: str) -> None:
         return
     if int(_FETCH_STATS["http_attempts"]) >= FETCH_MAX_HTTP_REQUESTS_PER_RUN:
         _FETCH_STATS["budget_exhausted"] = True
-        raise FetchBudgetExceeded(
-            f"HLTV request budget exhausted ({FETCH_MAX_HTTP_REQUESTS_PER_RUN}) before {url}"
-        )
+        raise FetchBudgetExceeded(f"HLTV request budget exhausted ({FETCH_MAX_HTTP_REQUESTS_PER_RUN}) before {url}")
 
 
 def register_url_failure(url: str, reason: str) -> None:
@@ -653,8 +645,7 @@ def register_fetch_block(source: str, url: str, reason: str) -> float:
         adaptive = max(adaptive, FETCH_CIRCUIT_BREAKER_SLEEP + random.uniform(10.0, 45.0))
     _FETCH_DOMAIN_COOLDOWN_UNTIL = max(_FETCH_DOMAIN_COOLDOWN_UNTIL, time.monotonic() + adaptive)
     log(
-        f"BLOCK {source} {reason}; streak={_FETCH_BLOCK_STREAK}; "
-        f"domain cooldown {adaptive:.1f}s: {url}",
+        f"BLOCK {source} {reason}; streak={_FETCH_BLOCK_STREAK}; domain cooldown {adaptive:.1f}s: {url}",
         force=True,
     )
     return adaptive
@@ -678,7 +669,12 @@ def looks_like_cf_or_waf_problem(error: Exception | None) -> bool:
 
 
 def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
-    global _CF_SESSION_REFRESHED_THIS_RUN, _HTTP_SESSION, _FETCH_DOMAIN_COOLDOWN_UNTIL, _FETCH_BLOCK_STREAK, _REQUESTS_PREFERRED_UNTIL
+    global \
+        _CF_SESSION_REFRESHED_THIS_RUN, \
+        _HTTP_SESSION, \
+        _FETCH_DOMAIN_COOLDOWN_UNTIL, \
+        _FETCH_BLOCK_STREAK, \
+        _REQUESTS_PREFERRED_UNTIL
     if not CF_REFRESH_ENABLED:
         return False
     if _CF_SESSION_REFRESHED_THIS_RUN:
@@ -689,13 +685,35 @@ def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
     _CF_SESSION_REFRESHED_THIS_RUN = True
     _FETCH_STATS["cf_session_refresh_attempts"] += 1
     log(f"cf_session refresh triggered by {reason}: {url}", force=True)
-    ok, logs = run_cmd([str(PYTHON_EXE), str(helper)], SCRAPER_PROJECT, timeout=CF_REFRESH_TIMEOUT_SECONDS, stream=True)
-    if ok and CF_SESSION.exists():
+    try:
+        previous_mtime_ns = CF_SESSION.stat().st_mtime_ns if CF_SESSION.exists() else None
+        ok, logs = run_cmd(
+            [str(PYTHON_EXE), str(helper), "--url", url],
+            SCRAPER_PROJECT,
+            timeout=CF_REFRESH_TIMEOUT_SECONDS,
+            stream=True,
+        )
+        current_mtime_ns = CF_SESSION.stat().st_mtime_ns if CF_SESSION.exists() else None
+        fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
+        if not isinstance(fresh, dict):
+            fresh = {}
+    except (OSError, ValueError) as exc:
+        log(f"cf_session refresh failed: {type(exc).__name__}", force=True)
+        return False
+    session_was_refreshed = (
+        current_mtime_ns is not None
+        and current_mtime_ns != previous_mtime_ns
+        and bool(fresh.get("cf_clearance"))
+        and bool(fresh.get("user_agent"))
+    )
+    if ok and session_was_refreshed:
         _FETCH_STATS["cf_session_refresh_successes"] += 1
         _HTTP_SESSION = None
         _FETCH_BLOCK_STREAK = 0
         _FETCH_DOMAIN_COOLDOWN_UNTIL = min(_FETCH_DOMAIN_COOLDOWN_UNTIL, time.monotonic() + 5.0)
-        _REQUESTS_PREFERRED_UNTIL = time.monotonic() + float(os.environ.get("HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS", "900"))
+        _REQUESTS_PREFERRED_UNTIL = time.monotonic() + float(
+            os.environ.get("HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS", "900")
+        )
         log("cf_session refreshed; retrying blocked request", force=True)
         return True
     log(f"cf_session refresh did not produce a usable session: {logs[-500:]}", force=True)
@@ -774,9 +792,11 @@ def run_cmd(cmd: list[str], cwd: Path, timeout: int = 300, stream: bool = False)
         return False, output + f"\nTIMEOUT after {timeout}s: {exc}"
 
 
-def run_spider(spider: str, output_path: Path, spider_args: list[str] | None = None, timeout: int = 600) -> tuple[bool, str]:
+def run_spider(
+    spider: str, output_path: Path, spider_args: list[str] | None = None, timeout: int = 600
+) -> tuple[bool, str]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [str(SCRAPY_EXE), "crawl", spider]
+    cmd = [str(PYTHON_EXE), "-m", "scrapy", "crawl", spider]
     if spider_args:
         cmd.extend(spider_args)
     cmd.extend(["-L", "ERROR", "-O", str(output_path)])
@@ -813,16 +833,8 @@ def match_label(match: dict[str, Any]) -> str:
 def record_label(record: dict[str, Any]) -> str:
     match = (record.get("detail") or {}).get("match") or {}
     row = record.get("upcoming_row") or {}
-    team1 = (
-        (match.get("team1") or {}).get("name")
-        or (row.get("team1") or {}).get("name")
-        or record.get("team1_name")
-    )
-    team2 = (
-        (match.get("team2") or {}).get("name")
-        or (row.get("team2") or {}).get("name")
-        or record.get("team2_name")
-    )
+    team1 = (match.get("team1") or {}).get("name") or (row.get("team1") or {}).get("name") or record.get("team1_name")
+    team2 = (match.get("team2") or {}).get("name") or (row.get("team2") or {}).get("name") or record.get("team2_name")
     return match_label(
         {
             "id": record.get("id"),
@@ -905,7 +917,7 @@ def backoff_delay(attempt: int, retry_after: str | None, *, base_delay: float, m
     hinted = retry_after_seconds(retry_after)
     if hinted is not None:
         return min(max_delay, hinted) + random.uniform(0.25, 1.75)
-    return min(max_delay, base_delay * (2 ** attempt)) + random.uniform(0.5, 2.5)
+    return min(max_delay, base_delay * (2**attempt)) + random.uniform(0.5, 2.5)
 
 
 def polite_fetch_wait(min_interval: float) -> None:
@@ -997,8 +1009,7 @@ def team_from_listing(selector: Selector, number: int, include_score: bool = Fal
         scores = [
             clean_text(item)
             for item in selector.css(
-                "td.result-score span::text, .result-score span::text, "
-                ".score-won::text, .score-lost::text"
+                "td.result-score span::text, .result-score span::text, .score-won::text, .score-lost::text"
             ).getall()
         ]
         scores = [item for item in scores if item and item != "-"]
@@ -1010,9 +1021,7 @@ def parse_upcoming_matches_fallback(html: str) -> list[dict[str, Any]]:
     selector = Selector(text=html)
     parsed: list[dict[str, Any]] = []
     for section in selector.css("div.matches-list-section"):
-        date = parse_hltv_date(
-            section.css(".matches-list-headline::text, .matchDayHeadline::text").get()
-        )
+        date = parse_hltv_date(section.css(".matches-list-headline::text, .matchDayHeadline::text").get())
         for match in section.css("div.match-zone-wrapper, a.match"):
             link = match.css("a.match-info::attr(href), a.match::attr(href), a::attr(href)").get()
             team1 = team_from_listing(match, 1)
@@ -1175,7 +1184,8 @@ def _scrapling_stealth_solve(url: str) -> tuple[int | None, str] | None:
     if SCRAPLING_PROXY:
         kwargs["proxy"] = SCRAPLING_PROXY
         kwargs["geoip"] = True
-    log(f"STEALTH solve_cloudflare (#{_STEALTH_SOLVES}): {url}", force=True)
+    browser_mode = "headless" if SCRAPLING_STEALTH_HEADLESS else "visible"
+    log(f"STEALTH solve_cloudflare (#{_STEALTH_SOLVES}, {browser_mode}): {url}", force=True)
     started = time.monotonic()
     try:
         resp = _ScraplingStealthy.fetch(url, **kwargs)
@@ -1210,6 +1220,32 @@ def _retry_after_cf_refresh(url: str, timeout: int, interval: float) -> str | No
     except Exception as exc:
         register_fetch_error("scrapling_after_cf_refresh", url, exc)
     return None
+
+
+def _refresh_blocked_stats_or_suppress(
+    url: str,
+    timeout: int,
+    interval: float,
+    *,
+    source: str,
+    reason: str,
+) -> str:
+    """Renueva la sesión visible una vez y evita esperas de horas en `/stats/`."""
+
+    register_fetch_soft_block(source, url, reason)
+    if CF_REFRESH_ENABLED and not _CF_SESSION_REFRESHED_THIS_RUN:
+        log("stats challenge persistente; abriendo navegador visible ahora", force=True)
+    else:
+        log("stats challenge persistente; la renovacion visible ya se intento o esta desactivada", force=True)
+    if maybe_refresh_cf_session_once(f"{source}_{reason}", url):
+        refreshed_html = _retry_after_cf_refresh(url, timeout, interval)
+        if refreshed_html is not None:
+            return refreshed_html
+    quarantine_url(url, f"{source} {reason}; interactive_cf_refresh_unavailable_or_failed")
+    raise FetchSuppressedError(
+        "HLTV /stats sigue bloqueado tras la renovacion interactiva; "
+        "se omite esta URL para que la pipeline pueda continuar."
+    )
 
 
 def _scrapling_fetch(
@@ -1250,14 +1286,26 @@ def _scrapling_fetch(
                 return text
             if (status in BLOCK_HTTP_CODES) or challenge:
                 reason = "cloudflare_challenge" if challenge else f"HTTP {status}"
-                if cookies and "/stats/" in url:
+                if "/stats/" in url and status != 429 and (challenge or status == 403):
                     register_fetch_soft_block("scrapling", url, reason)
-                    log("scrapling blocked on stats URL with cf_session; trying requests before long backoff", force=True)
+                    if (
+                        SCRAPLING_STEALTH_ENABLED
+                        and _ScraplingStealthy is not None
+                        and _STEALTH_SOLVES < SCRAPLING_STEALTH_MAX_SOLVES
+                    ):
+                        browser_mode = "headless" if SCRAPLING_STEALTH_HEADLESS else "visible"
+                        log(
+                            f"scrapling blocked on stats URL; trying {browser_mode} stealth before long backoff",
+                            force=True,
+                        )
+                        break
+                    log("scrapling stealth unavailable for stats URL; trying interactive refresh", force=True)
                     return None
                 delay = backoff_delay(attempt, None, base_delay=base, max_delay=max_wait)
                 delay = max(delay, register_fetch_block("scrapling", url, reason))
                 log(f"BLOCK scrapling {reason}; wait {delay:.1f}s: {url}")
-                time.sleep(delay)
+                if attempt < attempts - 1:
+                    time.sleep(delay)
                 continue
             if text:
                 register_fetch_success("scrapling", url)
@@ -1289,6 +1337,7 @@ def _scrapling_fetch(
                 cookies2 = {"cf_clearance": fresh["cf_clearance"]} if fresh.get("cf_clearance") else None
                 if cookies2:
                     try:
+                        ensure_fetch_budget(url)
                         polite_fetch_wait(interval)
                         _FETCH_STATS["http_attempts"] += 1
                         status, text = _scrapling_impersonate_get(url, cookies2, timeout)
@@ -1296,6 +1345,8 @@ def _scrapling_fetch(
                             register_fetch_success("scrapling", url)
                             fetch_cache_put(url, text)
                             return text
+                    except FetchBudgetExceeded:
+                        raise
                     except Exception as exc:
                         register_fetch_error("scrapling", url, exc)
                 stealth_problem = True
@@ -1304,10 +1355,19 @@ def _scrapling_fetch(
         except Exception as exc:
             register_fetch_error("scrapling_stealth", url, exc)
             stealth_problem = True
-        if stealth_problem and maybe_refresh_cf_session_once("scrapling_stealth_failed_or_challenged", url):
-            refreshed_html = _retry_after_cf_refresh(url, timeout, interval)
-            if refreshed_html is not None:
-                return refreshed_html
+        if stealth_problem:
+            if "/stats/" in url:
+                return _refresh_blocked_stats_or_suppress(
+                    url,
+                    timeout,
+                    interval,
+                    source="scrapling_stealth",
+                    reason="failed_or_challenged",
+                )
+            if maybe_refresh_cf_session_once("scrapling_stealth_failed_or_challenged", url):
+                refreshed_html = _retry_after_cf_refresh(url, timeout, interval)
+                if refreshed_html is not None:
+                    return refreshed_html
 
     return None
 
@@ -1388,17 +1448,28 @@ def fetch_html(
                     status_code=response.status_code,
                     source="requests",
                 )
-                delay = backoff_delay(attempt, response.headers.get("Retry-After"), base_delay=base, max_delay=max_wait)
                 reason = "cloudflare_challenge" if challenge else f"HTTP {response.status_code}"
+                if "/stats/" in url and response.status_code != 429 and (challenge or response.status_code == 403):
+                    return _refresh_blocked_stats_or_suppress(
+                        url,
+                        timeout,
+                        interval,
+                        source="requests",
+                        reason=reason,
+                    )
+                delay = backoff_delay(attempt, response.headers.get("Retry-After"), base_delay=base, max_delay=max_wait)
                 delay = max(delay, register_fetch_block("requests", url, reason))
                 log(f"BLOCK requests {reason}; wait {delay:.1f}s: {url}")
-                time.sleep(delay)
+                if attempt < attempts - 1:
+                    time.sleep(delay)
                 continue
             response.raise_for_status()
             register_fetch_success("requests", url)
             fetch_cache_put(url, text)
             log(f"OK requests HTTP {response.status_code} {len(text)} bytes {elapsed:.1f}s: {url}")
             return text
+        except (FetchBudgetExceeded, FetchSuppressedError):
+            raise
         except Exception as exc:
             last_error = exc
             register_fetch_error("requests", url, exc)
@@ -1408,7 +1479,9 @@ def fetch_html(
                 time.sleep(delay)
 
     if cloudscraper is None:
-        if looks_like_cf_or_waf_problem(last_error) and maybe_refresh_cf_session_once("requests_failed_no_cloudscraper", url):
+        if looks_like_cf_or_waf_problem(last_error) and maybe_refresh_cf_session_once(
+            "requests_failed_no_cloudscraper", url
+        ):
             return fetch_html(
                 link,
                 timeout=timeout,
@@ -1450,17 +1523,28 @@ def fetch_html(
                     status_code=response.status_code,
                     source="cloudscraper",
                 )
-                delay = backoff_delay(attempt, response.headers.get("Retry-After"), base_delay=base, max_delay=max_wait)
                 reason = "cloudflare_challenge" if challenge else f"HTTP {response.status_code}"
+                if "/stats/" in url and response.status_code != 429 and (challenge or response.status_code == 403):
+                    return _refresh_blocked_stats_or_suppress(
+                        url,
+                        timeout,
+                        interval,
+                        source="cloudscraper",
+                        reason=reason,
+                    )
+                delay = backoff_delay(attempt, response.headers.get("Retry-After"), base_delay=base, max_delay=max_wait)
                 delay = max(delay, register_fetch_block("cloudscraper", url, reason))
                 log(f"BLOCK cloudscraper {reason}; wait {delay:.1f}s: {url}")
-                time.sleep(delay)
+                if attempt < cloud_attempts - 1:
+                    time.sleep(delay)
                 continue
             response.raise_for_status()
             register_fetch_success("cloudscraper", url)
             fetch_cache_put(url, text)
             log(f"OK cloudscraper HTTP {response.status_code} {len(text)} bytes {elapsed:.1f}s: {url}")
             return text
+        except (FetchBudgetExceeded, FetchSuppressedError):
+            raise
         except Exception as exc:
             last_error = exc
             register_fetch_error("cloudscraper", url, exc)
@@ -1469,7 +1553,9 @@ def fetch_html(
                 log(f"ERROR cloudscraper {type(exc).__name__}: {exc}; wait {delay:.1f}s: {url}")
                 time.sleep(delay)
 
-    if looks_like_cf_or_waf_problem(last_error) and maybe_refresh_cf_session_once("requests_and_cloudscraper_failed", url):
+    if looks_like_cf_or_waf_problem(last_error) and maybe_refresh_cf_session_once(
+        "requests_and_cloudscraper_failed", url
+    ):
         return fetch_html(
             link,
             timeout=timeout,
@@ -1672,11 +1758,17 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
     core_lineup: dict[str, dict[str, Any]] = {}
     standins: dict[str, list[str]] = {}
     for card in selector.css(".analytics-insights-container"):
-        team = clean_text(card.css(".analytics-insights-team-header .team-name::text, .analytics-insights-team-header .team-name *::text").get())
+        team = clean_text(
+            card.css(
+                ".analytics-insights-team-header .team-name::text, .analytics-insights-team-header .team-name *::text"
+            ).get()
+        )
         if not team:
             team = clean_text(card.css(".team-name::text").get())
         for row in card.css(".analytics-insights-insight"):
-            text = clean_text(" ".join(row.css(".analytics-insights-info *::text, .analytics-insights-info::text").getall()))
+            text = clean_text(
+                " ".join(row.css(".analytics-insights-info *::text, .analytics-insights-info::text").getall())
+            )
             if not text:
                 continue
             classes = " ".join(row.css(".analytics-insights-indicator::attr(class)").getall()).lower()
@@ -1698,7 +1790,12 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
 
     event_metadata: dict[str, Any] = {}
     for info in selector.css(".analytics-event-info .analytics-info"):
-        label = (clean_text(" ".join(info.css(".analytics-info-sub-title *::text, .analytics-info-sub-title::text").getall())) or "").lower()
+        label = (
+            clean_text(
+                " ".join(info.css(".analytics-info-sub-title *::text, .analytics-info-sub-title::text").getall())
+            )
+            or ""
+        ).lower()
         value = clean_text(" ".join(info.css(".analytics-info-header *::text, .analytics-info-header::text").getall()))
         if not label or not value:
             continue
@@ -1732,11 +1829,19 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
                 {
                     "map": current_map,
                     "team": team,
-                    "first_pick_pct": parse_analytics_percentage(row.css(".analytics-map-stats-pick-percentage::text").get()),
-                    "first_ban_pct": parse_analytics_percentage(row.css(".analytics-map-stats-ban-percentage::text").get()),
+                    "first_pick_pct": parse_analytics_percentage(
+                        row.css(".analytics-map-stats-pick-percentage::text").get()
+                    ),
+                    "first_ban_pct": parse_analytics_percentage(
+                        row.css(".analytics-map-stats-ban-percentage::text").get()
+                    ),
                     "win_pct": parse_analytics_percentage(row.css(".analytics-map-stats-win-percentage::text").get()),
                     "played": parse_int(row.css(".analytics-map-stats-played::text").get()),
-                    "comment": clean_text(" ".join(row.css(".analytics-map-stats-comment *::text, .analytics-map-stats-comment::text").getall())),
+                    "comment": clean_text(
+                        " ".join(
+                            row.css(".analytics-map-stats-comment *::text, .analytics-map-stats-comment::text").getall()
+                        )
+                    ),
                 }
             )
 
@@ -1750,7 +1855,14 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
             for team in team_names:
                 if not team:
                     continue
-                team_idx = next((probe for probe in range(idx + 1, min(idx + 28, len(lines))) if lines[probe].lower() == team.lower()), None)
+                team_idx = next(
+                    (
+                        probe
+                        for probe in range(idx + 1, min(idx + 28, len(lines)))
+                        if lines[probe].lower() == team.lower()
+                    ),
+                    None,
+                )
                 if team_idx is None:
                     continue
                 metrics = None
@@ -1796,7 +1908,14 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
         }
         for row in table.css("tbody > tr"):
             cells = [clean_text(text) or "" for text in row.css("td::text").getall()]
-            label = next((cell for cell in cells if re.search(r"(?:[012]\s*-\s*[012]\s+(?:wins|losses)|overtimes)", cell, flags=re.I)), "")
+            label = next(
+                (
+                    cell
+                    for cell in cells
+                    if re.search(r"(?:[012]\s*-\s*[012]\s+(?:wins|losses)|overtimes)", cell, flags=re.I)
+                ),
+                "",
+            )
             value = clean_text(row.css(".handicap-data::text").get())
             pct = parse_analytics_percentage(value)
             if not label or pct is None:
@@ -1812,7 +1931,13 @@ def parse_analytics_html(html: str, match_id: str, match_link: str, team_names: 
     for container in selector.css(".analytics-handicap-map-container"):
         classes = " ".join(container.css("::attr(class)").getall()).lower()
         side = "team1" if "team1" in classes else "team2" if "team2" in classes else "unknown"
-        team = team_names[0] if side == "team1" and team_names else team_names[1] if side == "team2" and len(team_names) > 1 else None
+        team = (
+            team_names[0]
+            if side == "team1" and team_names
+            else team_names[1]
+            if side == "team2" and len(team_names) > 1
+            else None
+        )
         if not team:
             continue
         overall = {}
@@ -1865,7 +1990,12 @@ def scrape_match_analytics(match_link: str, run_dir: Path, match_id: str, team_n
     output = run_dir / "analytics" / f"{match_id}.json"
     if not analytics_link:
         log(f"analytics {match_id}: no analytics link")
-        payload = {"available": False, "match_id": match_id, "reason": "analytics_link_not_found", "captured_at": now_utc()}
+        payload = {
+            "available": False,
+            "match_id": match_id,
+            "reason": "analytics_link_not_found",
+            "captured_at": now_utc(),
+        }
         write_json(output, payload)
         return payload
     try:
@@ -2125,17 +2255,19 @@ def parse_player_stats_row(row) -> dict[str, Any]:
     op_kills, op_deaths = parse_pair(first_cell_text(row, "td.st-opkd.traditional-data::text"))
     eco_op_kills, eco_op_deaths = parse_pair(first_cell_text(row, "td.st-opkd.eco-adjusted-data::text"))
     kills, headshots = parse_count_with_parenthetical(first_cell_text(row, "td.st-kills.traditional-data::text"))
-    eco_kills, eco_headshots = parse_count_with_parenthetical(first_cell_text(row, "td.st-kills.eco-adjusted-data::text"))
+    eco_kills, eco_headshots = parse_count_with_parenthetical(
+        first_cell_text(row, "td.st-kills.eco-adjusted-data::text")
+    )
     assists, flash_assists = parse_count_with_parenthetical(first_cell_text(row, "td.st-assists::text"))
     deaths, traded_deaths = parse_count_with_parenthetical(first_cell_text(row, "td.st-deaths.traditional-data::text"))
-    eco_deaths, eco_traded_deaths = parse_count_with_parenthetical(first_cell_text(row, "td.st-deaths.eco-adjusted-data::text"))
-    kast = (
-        first_cell_text(row, "td.st-kast.gtSmartphone-only.traditional-data::text")
-        or first_cell_text(row, "td.st-kast.traditional-data::text")
+    eco_deaths, eco_traded_deaths = parse_count_with_parenthetical(
+        first_cell_text(row, "td.st-deaths.eco-adjusted-data::text")
     )
-    eco_kast = (
-        first_cell_text(row, "td.st-kast.gtSmartphone-only.eco-adjusted-data::text")
-        or first_cell_text(row, "td.st-kast.eco-adjusted-data::text")
+    kast = first_cell_text(row, "td.st-kast.gtSmartphone-only.traditional-data::text") or first_cell_text(
+        row, "td.st-kast.traditional-data::text"
+    )
+    eco_kast = first_cell_text(row, "td.st-kast.gtSmartphone-only.eco-adjusted-data::text") or first_cell_text(
+        row, "td.st-kast.eco-adjusted-data::text"
     )
     return {
         "player_name": text_join(row.css("td.st-player")) or None,
@@ -2234,16 +2366,20 @@ def scrape_match_assets(match_link: str, output_path: Path, delay: float = 0.5) 
     html = fetch_html(match_link)
     html_sources = [save_raw_html(run_dir, "match_page", match_id, match_link, html)]
     existing = read_json(output_path, {}) if output_path.exists() else {}
-    assets = existing if isinstance(existing, dict) and existing.get("match_link") == match_link else {
-        "match_id": match_id_from_link(match_link),
-        "match_link": match_link,
-        "captured_at": now_utc(),
-        "veto": parse_veto_html(html),
-        "mapstats_links": extract_mapstats_links(html),
-        "mapstats": [],
-        "errors": [],
-        "raw_html": html_sources,
-    }
+    assets = (
+        existing
+        if isinstance(existing, dict) and existing.get("match_link") == match_link
+        else {
+            "match_id": match_id_from_link(match_link),
+            "match_link": match_link,
+            "captured_at": now_utc(),
+            "veto": parse_veto_html(html),
+            "mapstats_links": extract_mapstats_links(html),
+            "mapstats": [],
+            "errors": [],
+            "raw_html": html_sources,
+        }
+    )
     assets["captured_at"] = assets.get("captured_at") or now_utc()
     assets["veto"] = assets.get("veto") or parse_veto_html(html)
     assets["mapstats_links"] = assets.get("mapstats_links") or extract_mapstats_links(html)
@@ -2251,7 +2387,9 @@ def scrape_match_assets(match_link: str, output_path: Path, delay: float = 0.5) 
     assets["errors"] = assets.get("errors") or []
     assets["raw_html"] = (assets.get("raw_html") or []) + html_sources
     seen_links = {item.get("source_link") for item in assets["mapstats"] if isinstance(item, dict)}
-    log(f"assets {match_id}: veto_steps={len((assets.get('veto') or {}).get('steps') or [])} mapstats_links={len(assets['mapstats_links'])}")
+    log(
+        f"assets {match_id}: veto_steps={len((assets.get('veto') or {}).get('steps') or [])} mapstats_links={len(assets['mapstats_links'])}"
+    )
     write_json(output_path, assets)
     db_mark_fetch_state(
         "match_assets",
@@ -2261,14 +2399,18 @@ def scrape_match_assets(match_link: str, output_path: Path, delay: float = 0.5) 
     )
     for index, link in enumerate(assets["mapstats_links"], start=1):
         if link in seen_links:
-            log(f"assets {match_id}: mapstats {index}/{len(assets['mapstats_links'])} already in partial JSON; skip {link}")
+            log(
+                f"assets {match_id}: mapstats {index}/{len(assets['mapstats_links'])} already in partial JSON; skip {link}"
+            )
             continue
         try:
             log(f"assets {match_id}: mapstats {index}/{len(assets['mapstats_links'])} {link}")
             time.sleep(delay)
             mapstats_id = mapstats_id_from_link(link) or slug_from_link(link)
             map_html = load_persisted_raw_html("mapstats", mapstats_id) or fetch_html(link)
-            meta = save_raw_html(run_dir, "mapstats", mapstats_id_from_link(link) or slug_from_link(link), link, map_html)
+            meta = save_raw_html(
+                run_dir, "mapstats", mapstats_id_from_link(link) or slug_from_link(link), link, map_html
+            )
             parsed = parse_mapstats_html(map_html, link)
             parsed["raw_html"] = meta
             assets["mapstats"].append(parsed)
@@ -2487,9 +2629,7 @@ def recover_recent_data_gaps(
 
     recovery_index: list[dict[str, Any]] = []
     candidates = [
-        record
-        for record in master.values()
-        if record.get("link") and is_recent_or_active_record(record, window_days)
+        record for record in master.values() if record.get("link") and is_recent_or_active_record(record, window_days)
     ]
     candidates.sort(
         key=lambda record: (
@@ -2524,7 +2664,9 @@ def recover_recent_data_gaps(
                 write_json(output, payload)
                 if append_odds_point(record, odds, run_dir, str(output.relative_to(DATA_ROOT))):
                     item["actions"].append("odds_recovered")
-                    log(f"[recovery {candidate_index}/{len(candidates)}] odds recovered bookmakers={odds.get('bookmaker_count')}")
+                    log(
+                        f"[recovery {candidate_index}/{len(candidates)}] odds recovered bookmakers={odds.get('bookmaker_count')}"
+                    )
                 else:
                     item["actions"].append("odds_still_unavailable")
                     log(f"[recovery {candidate_index}/{len(candidates)}] odds still unavailable")
@@ -2550,7 +2692,9 @@ def recover_recent_data_gaps(
                     if result:
                         record.update(result)
                     item["actions"].append("detail_recovered")
-                    log(f"[recovery {candidate_index}/{len(candidates)}] detail recovered status={record.get('status')}")
+                    log(
+                        f"[recovery {candidate_index}/{len(candidates)}] detail recovered status={record.get('status')}"
+                    )
                 elif logs:
                     item["errors"].append({"kind": "detail", "error": logs[-500:]})
                     log(f"[recovery {candidate_index}/{len(candidates)}] detail unavailable")
@@ -2572,7 +2716,9 @@ def recover_recent_data_gaps(
                 record["analytics"] = analytics
                 if analytics.get("source_file"):
                     record["latest_analytics_file"] = analytics["source_file"]
-                item["actions"].append("analytics_recovered" if analytics.get("available") else "analytics_still_unavailable")
+                item["actions"].append(
+                    "analytics_recovered" if analytics.get("available") else "analytics_still_unavailable"
+                )
             except Exception as exc:
                 log(f"[recovery {candidate_index}/{len(candidates)}] analytics ERROR {exc}")
                 item["errors"].append({"kind": "analytics", "error": str(exc)})
@@ -2788,12 +2934,8 @@ def team_names_for_analytics(record: dict[str, Any], detail: dict[str, Any] | No
     detail_match = (detail or record.get("detail") or {}).get("match") or {}
     upcoming = record.get("upcoming_row") or {}
     return [
-        (detail_match.get("team1") or {}).get("name")
-        or (upcoming.get("team1") or {}).get("name")
-        or "",
-        (detail_match.get("team2") or {}).get("name")
-        or (upcoming.get("team2") or {}).get("name")
-        or "",
+        (detail_match.get("team1") or {}).get("name") or (upcoming.get("team1") or {}).get("name") or "",
+        (detail_match.get("team2") or {}).get("name") or (upcoming.get("team2") or {}).get("name") or "",
     ]
 
 
@@ -2968,8 +3110,7 @@ def update_pending_matches(
         log("pending updates: DB unavailable, using master JSON fallback")
     else:
         pending = [
-            record for record in master.values()
-            if str(record.get("id") or "") in db_pending and record.get("link")
+            record for record in master.values() if str(record.get("id") or "") in db_pending and record.get("link")
         ]
         skipped = max(0, len(db_pending) - len(pending))
         if skipped:
@@ -3109,7 +3250,9 @@ def collect_team_profiles(teams: dict[str, dict[str, Any]], run_dir: Path) -> li
             log(f"[team {index}/{len(team_list)}] unavailable")
         time.sleep(0.2)
     write_json(run_dir / "team_profiles.json", profiles)
-    log(f"team profiles: collected={len(profiles)} fetched={len(team_list)} cache_hits={cache_hits} skipped_fresh={skipped}")
+    log(
+        f"team profiles: collected={len(profiles)} fetched={len(team_list)} cache_hits={cache_hits} skipped_fresh={skipped}"
+    )
     return profiles
 
 
@@ -3221,7 +3364,7 @@ def team_profiles_players_are_fresh(team_profiles_file: Path) -> tuple[bool, int
 def player_ids_from_team_profiles_payload(profiles: list[dict[str, Any]]) -> set[str]:
     player_ids: set[str] = set()
     for profile in profiles:
-        for player in ((profile.get("profile") or {}).get("squad") or []):
+        for player in (profile.get("profile") or {}).get("squad") or []:
             player_id = str(player.get("id") or "")
             if player_id:
                 player_ids.add(player_id)
@@ -3239,11 +3382,7 @@ def player_stats_profiles_with_announced_lineups(
     team's persistent roster history.
     """
     expanded = copy.deepcopy(profiles)
-    by_team_id = {
-        str(item.get("id") or ""): item
-        for item in expanded
-        if str(item.get("id") or "")
-    }
+    by_team_id = {str(item.get("id") or ""): item for item in expanded if str(item.get("id") or "")}
     lineup_players_seen: set[str] = set()
     players_added: set[str] = set()
     synthetic_teams = 0
@@ -3270,11 +3409,7 @@ def player_stats_profiles_with_announced_lineups(
                 synthetic_teams += 1
             profile = item.setdefault("profile", {})
             squad = profile.setdefault("squad", [])
-            existing_ids = {
-                str(player.get("id") or "")
-                for player in squad
-                if str(player.get("id") or "")
-            }
+            existing_ids = {str(player.get("id") or "") for player in squad if str(player.get("id") or "")}
             for player in lineup.get("players") or []:
                 player_id = str(player.get("hltv_player_id") or "")
                 if not player_id:
@@ -3316,16 +3451,15 @@ def materialize_cached_player_stats(team_profiles_file: Path, output: Path, year
     covered_ids = set(selected)
     if not covered_ids:
         return None
-    results = [{
-        "time_filter": "adaptive",
-        "selection_mode": "adaptive_recent_min_maps",
-        "players": sorted(selected.values(), key=lambda item: str(item.get("id") or "")),
-        "source": "BBDD.player_stat_snapshots",
-    }]
-    quality = player_snapshot_quality({
-        player_id: [player]
-        for player_id, player in selected.items()
-    })
+    results = [
+        {
+            "time_filter": "adaptive",
+            "selection_mode": "adaptive_recent_min_maps",
+            "players": sorted(selected.values(), key=lambda item: str(item.get("id") or "")),
+            "source": "BBDD.player_stat_snapshots",
+        }
+    ]
+    quality = player_snapshot_quality({player_id: [player] for player_id, player in selected.items()})
     payload = {
         "ok": True,
         "source": "BBDD.player_stat_snapshots",
@@ -3353,11 +3487,7 @@ def filter_team_profiles_players(
     filtered: list[dict[str, Any]] = []
     for item in profiles:
         profile = dict(item.get("profile") or {})
-        squad = [
-            player
-            for player in profile.get("squad") or []
-            if str(player.get("id") or "") in player_ids
-        ]
+        squad = [player for player in profile.get("squad") or [] if str(player.get("id") or "") in player_ids]
         if not squad:
             continue
         copied = dict(item)
@@ -3411,12 +3541,14 @@ def merge_player_stats_payload(
         "requests_attempted": int(fetched_payload.get("requests_attempted") or 0),
         "stopped_reason": fetched_payload.get("stopped_reason"),
         "failures": fetched_payload.get("failures") or [],
-        "results": [{
-            "time_filter": "adaptive",
-            "selection_mode": "adaptive_recent_min_maps",
-            "min_maps": int(fetched_payload.get("min_maps") or 10),
-            "players": sorted(merged.values(), key=lambda item: str(item.get("id") or "")),
-        }],
+        "results": [
+            {
+                "time_filter": "adaptive",
+                "selection_mode": "adaptive_recent_min_maps",
+                "min_maps": int(fetched_payload.get("min_maps") or 10),
+                "players": sorted(merged.values(), key=lambda item: str(item.get("id") or "")),
+            }
+        ],
     }
 
 
@@ -3588,7 +3720,11 @@ def collect_player_stats(team_profiles_file: Path, run_dir: Path, year: int, del
         ]
     ).lower()
     if stopped_reason and collected == 0:
-        status = "blocked" if any(marker in problem_text for marker in ("cloudflare", "challenge", "403", "cf_session")) else "error"
+        status = (
+            "blocked"
+            if any(marker in problem_text for marker in ("cloudflare", "challenge", "403", "cf_session"))
+            else "error"
+        )
         note = str(stopped_reason or fetched_payload.get("reason") or "player compare scrape failed")
         for player_id in fetch_ids:
             db_mark_fetch_state("player_stats", player_id, status, note[:500])
@@ -3651,7 +3787,9 @@ def collect_completed_match_assets(
         candidates = candidates[:limit]
 
     index = []
-    log(f"completed assets: {len(candidates)} missing/partial completed matches (limit={limit}) skipped_fresh={skipped_fresh}")
+    log(
+        f"completed assets: {len(candidates)} missing/partial completed matches (limit={limit}) skipped_fresh={skipped_fresh}"
+    )
     for item_index, record in enumerate(candidates, start=1):
         match_id = str(record.get("id") or match_id_from_link(record.get("link")) or "")
         if not match_id:
@@ -3674,11 +3812,19 @@ def collect_completed_match_assets(
             record["hltv_assets"] = meta
             index.append({"id": match_id, **meta})
             db_status = "ok" if meta["status"] == "ok" else "partial"
-            db_mark_fetch_state("match_assets", match_id, db_status, f"maps={meta['mapstats_maps']} errors={len(meta['errors'])}")
-            log(f"[assets {item_index}/{len(candidates)}] status={meta['status']} maps={meta['mapstats_maps']} errors={len(meta['errors'])}")
+            db_mark_fetch_state(
+                "match_assets", match_id, db_status, f"maps={meta['mapstats_maps']} errors={len(meta['errors'])}"
+            )
+            log(
+                f"[assets {item_index}/{len(candidates)}] status={meta['status']} maps={meta['mapstats_maps']} errors={len(meta['errors'])}"
+            )
         except Exception as exc:
             text = str(exc).lower()
-            status = "blocked" if any(marker in text for marker in ("cloudflare", "challenge", "403", "cf_", "turnstile")) else "error"
+            status = (
+                "blocked"
+                if any(marker in text for marker in ("cloudflare", "challenge", "403", "cf_", "turnstile"))
+                else "error"
+            )
             db_mark_fetch_state("match_assets", match_id, status, str(exc)[:500])
             log(f"[assets {item_index}/{len(candidates)}] ERROR {exc}")
             index.append({"id": match_id, "status": status, "error": str(exc)})
@@ -3721,7 +3867,9 @@ def parse_ranking_html(html: str, ranking_type: str) -> dict[str, Any]:
         "ranking_type": ranking_type,
         "date_text": date_text,
         "captured_at": now_utc(),
-        "source": "https://www.hltv.org/ranking/teams" if ranking_type == "hltv" else "https://www.hltv.org/valve-ranking/teams",
+        "source": "https://www.hltv.org/ranking/teams"
+        if ranking_type == "hltv"
+        else "https://www.hltv.org/valve-ranking/teams",
         "ranking": [item for item in ranking if item.get("name")],
     }
 
@@ -3777,10 +3925,7 @@ def build_data_quality_report(
         for record in master.values()
         if record.get("status") == "completed" and asset_file_exists(record.get("hltv_assets") or {})
     )
-    profile_roster_sizes = [
-        len((profile.get("profile") or {}).get("squad") or [])
-        for profile in team_profiles
-    ]
+    profile_roster_sizes = [len((profile.get("profile") or {}).get("squad") or []) for profile in team_profiles]
     raw_html_files = list((run_dir / "raw_html").glob("**/*.html.gz"))
     analytics_files = list((run_dir / "analytics").glob("*.json"))
     player_stats_step = (manifest.get("steps") or {}).get("player_stats") or {}
@@ -3798,7 +3943,9 @@ def build_data_quality_report(
             "analytics_coverage": analytics_available / len(snapshots) if snapshots else 0.0,
             "analytics_files": len(analytics_files),
             "team_profiles": len(team_profiles),
-            "avg_roster_size": (sum(profile_roster_sizes) / len(profile_roster_sizes)) if profile_roster_sizes else None,
+            "avg_roster_size": (sum(profile_roster_sizes) / len(profile_roster_sizes))
+            if profile_roster_sizes
+            else None,
             "master_completed": completed,
             "master_pending": pending,
             "completed_with_assets": completed_with_assets,
@@ -3890,7 +4037,7 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
     try:
         html = fetch_html(match["link"])
         raw_html_meta = save_raw_html(run_dir, "match_snapshot", match_id, match["link"], html)
-        match_context = (parse_veto_html(html).get("context") or None)
+        match_context = parse_veto_html(html).get("context") or None
         odds = parse_odds(html)
         event_metadata = parse_event_metadata_from_match_html(html)
     except Exception as exc:
@@ -3914,7 +4061,10 @@ def build_match_snapshot(match: dict[str, Any], run_dir: Path, capture_analytics
     )
     analytics_event = analytics.get("event_metadata") if isinstance(analytics, dict) else None
     if isinstance(analytics_event, dict):
-        event_metadata = {**event_metadata, **{key: value for key, value in analytics_event.items() if value is not None}}
+        event_metadata = {
+            **event_metadata,
+            **{key: value for key, value in analytics_event.items() if value is not None},
+        }
     if html is not None:
         prematch_lineups = parse_prematch_lineups_html(html, detail)
         mark_prematch_standins(prematch_lineups, analytics)
@@ -3977,9 +4127,7 @@ def observed_closing_odds(
     if kickoff is None:
         return None
     try:
-        captured = datetime.fromisoformat(
-            str(point["captured_at"]).replace("Z", "+00:00")
-        )
+        captured = datetime.fromisoformat(str(point["captured_at"]).replace("Z", "+00:00"))
     except ValueError:
         return None
     seconds_to_start = int((kickoff - captured).total_seconds())
@@ -3992,7 +4140,9 @@ def observed_closing_odds(
     return qualified
 
 
-def scheduled_snapshot_refresh_reason(record: dict[str, Any], match: dict[str, Any], now: datetime | None = None) -> str | None:
+def scheduled_snapshot_refresh_reason(
+    record: dict[str, Any], match: dict[str, Any], now: datetime | None = None
+) -> str | None:
     """Decide si corresponde una foto incremental, sin tocar la primera."""
     if record.get("status") == "completed":
         return None
@@ -4013,7 +4163,10 @@ def scheduled_snapshot_refresh_reason(record: dict[str, Any], match: dict[str, A
     now = now or datetime.now(timezone.utc)
     interval_hours = PREMATCH_REFRESH_HOURS
     scheduled_at = upcoming_match_datetime(match)
-    if scheduled_at is not None and 0 <= (scheduled_at - now).total_seconds() <= PREMATCH_NEAR_START_WINDOW_HOURS * 3600:
+    if (
+        scheduled_at is not None
+        and 0 <= (scheduled_at - now).total_seconds() <= PREMATCH_NEAR_START_WINDOW_HOURS * 3600
+    ):
         interval_hours = PREMATCH_NEAR_START_REFRESH_HOURS
     if now - last_refresh >= timedelta(hours=max(0.25, interval_hours)):
         return f"ttl_{interval_hours:g}h"
@@ -4039,9 +4192,7 @@ def materialize_persistent_match_snapshot(
     candidate_files: list[str] = []
     if record.get("latest_snapshot_file"):
         candidate_files.append(str(record["latest_snapshot_file"]))
-    candidate_files.extend(
-        str(item) for item in reversed(record.get("snapshot_files") or []) if item
-    )
+    candidate_files.extend(str(item) for item in reversed(record.get("snapshot_files") or []) if item)
 
     snapshot: dict[str, Any] | None = None
     for candidate in dict.fromkeys(candidate_files):
@@ -4062,13 +4213,15 @@ def materialize_persistent_match_snapshot(
         snapshot = {
             "id": match_id,
             "captured_at": record.get("first_seen_at") or record.get("last_seen_at"),
-            "data_quality": record.get("data_quality") or {
+            "data_quality": record.get("data_quality")
+            or {
                 "real_pre_match_snapshot": True,
                 "legacy_backfill": False,
             },
             "source": "persistent_master_record",
             "detail": detail,
-            "odds": record.get("latest_odds") or {
+            "odds": record.get("latest_odds")
+            or {
                 "available": False,
                 "bookmaker_count": 0,
                 "providers": [],
@@ -4152,28 +4305,49 @@ def upsert_master_record(master: dict[str, Any], snapshot: dict[str, Any], run_d
 
 def main() -> int:
     global VERBOSE
-    parser = argparse.ArgumentParser(description="Daily HLTV start: snapshot pre-match data and update pending results.")
+    parser = argparse.ArgumentParser(
+        description="Daily HLTV start: snapshot pre-match data and update pending results."
+    )
     parser.add_argument("--max-matches", type=int, default=0, help="Debug limit. 0 means all upcoming matches.")
     parser.add_argument("--player-delay", type=float, default=0.75)
     parser.add_argument("--skip-player-stats", action="store_true")
     parser.add_argument("--skip-team-profiles", action="store_true")
-    parser.add_argument("--skip-match-assets", action="store_true", help="No captura veto/mapstats de partidos completados.")
+    parser.add_argument(
+        "--skip-match-assets", action="store_true", help="No captura veto/mapstats de partidos completados."
+    )
     parser.add_argument(
         "--match-assets-limit",
         type=int,
         default=int(os.environ.get("BBDD_ASSETS_BACKFILL_LIMIT", "20")),
         help="Maximo de partidos completados a backfillear; 0 = todos.",
     )
-    parser.add_argument("--match-assets-delay", type=float, default=0.5, help="Retardo entre peticiones de assets HLTV.")
-    parser.add_argument("--skip-analytics", action="store_true", help="No captura HLTV betting analytics de partidos upcoming.")
+    parser.add_argument(
+        "--match-assets-delay", type=float, default=0.5, help="Retardo entre peticiones de assets HLTV."
+    )
+    parser.add_argument(
+        "--skip-analytics", action="store_true", help="No captura HLTV betting analytics de partidos upcoming."
+    )
     parser.add_argument("--skip-rankings", action="store_true", help="No captura rankings actuales HLTV/Valve.")
     parser.add_argument("--skip-warmup", action="store_true", help="No hace warm-up inicial de sesion HLTV.")
-    parser.add_argument("--skip-same-day-recovery", action="store_true", help="No reintenta huecos recientes ya conocidos en master.")
-    parser.add_argument("--same-day-recovery-window-days", type=int, default=2, help="Dias hacia atras para recuperar odds/detalle/analytics recientes.")
-    parser.add_argument("--recovery-delay", type=float, default=1.5, help="Retardo entre peticiones de recuperacion de huecos.")
-    parser.add_argument("--allow-empty-scrape", action="store_true", help="Permite runs sin recent ni upcoming (solo debug/offline).")
+    parser.add_argument(
+        "--skip-same-day-recovery", action="store_true", help="No reintenta huecos recientes ya conocidos en master."
+    )
+    parser.add_argument(
+        "--same-day-recovery-window-days",
+        type=int,
+        default=2,
+        help="Dias hacia atras para recuperar odds/detalle/analytics recientes.",
+    )
+    parser.add_argument(
+        "--recovery-delay", type=float, default=1.5, help="Retardo entre peticiones de recuperacion de huecos."
+    )
+    parser.add_argument(
+        "--allow-empty-scrape", action="store_true", help="Permite runs sin recent ni upcoming (solo debug/offline)."
+    )
     parser.add_argument("--no-promote", action="store_true", help="No publica este run ni actualiza master.")
-    parser.add_argument("--verbose", action="store_true", help="Muestra progreso, URLs, reintentos y bloqueos durante el scrape.")
+    parser.add_argument(
+        "--verbose", action="store_true", help="Muestra progreso, URLs, reintentos y bloqueos durante el scrape."
+    )
     args = parser.parse_args()
     VERBOSE = bool(args.verbose)
     promote_run = not args.no_promote and args.max_matches == 0
@@ -4229,9 +4403,7 @@ def main() -> int:
         )
         if promote_run:
             write_json(MASTER_MATCHES, master)
-    manifest["steps"]["same_day_recovery"] = {
-        key: value for key, value in recovery_result.items() if key != "index"
-    }
+    manifest["steps"]["same_day_recovery"] = {key: value for key, value in recovery_result.items() if key != "index"}
     write_json(run_dir / "manifest.json", manifest)
 
     log("phase: upcoming matches", force=VERBOSE)
@@ -4395,9 +4567,7 @@ def main() -> int:
         )
         if promote_run:
             write_json(MASTER_MATCHES, master)
-    manifest["steps"]["match_assets"] = {
-        key: value for key, value in match_assets_result.items() if key != "index"
-    }
+    manifest["steps"]["match_assets"] = {key: value for key, value in match_assets_result.items() if key != "index"}
     write_json(run_dir / "manifest.json", manifest)
 
     map_winrates = compute_map_winrates(master, run_dir)
@@ -4405,8 +4575,7 @@ def main() -> int:
     manifest["steps"]["map_winrates"] = {"teams": len(map_winrates)}
     quality_report = build_data_quality_report(run_dir, manifest, master, snapshots, team_profiles)
     log(
-        "data quality: "
-        + json.dumps(quality_report.get("summary") or {}, ensure_ascii=False, sort_keys=True),
+        "data quality: " + json.dumps(quality_report.get("summary") or {}, ensure_ascii=False, sort_keys=True),
         force=VERBOSE,
     )
     manifest["steps"]["data_quality"] = {

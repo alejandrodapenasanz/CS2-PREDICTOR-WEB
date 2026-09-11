@@ -1,7 +1,9 @@
 from typing import Any
+
 from .date import UpcomingMatchDateFormatter
 from .parser import Parser
 from .upcoming_match import UpcomingMatchParser as UMP
+
 
 class UpcomingMatchesParser(Parser):
     @staticmethod
@@ -15,10 +17,7 @@ class UpcomingMatchesParser(Parser):
             if date:
                 standard_date = UpcomingMatchDateFormatter.format(date)
 
-            matches = [
-                UMP.parse(match, standard_date)
-                for match in sublist.css("div.match-zone-wrapper")
-            ]
+            matches = [UMP.parse(match, standard_date) for match in sublist.css("div.match-zone-wrapper")]
 
             all_upcoming_matches.extend(matches)
 

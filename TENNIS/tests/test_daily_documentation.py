@@ -66,8 +66,10 @@ class DailyDocumentationTests(unittest.TestCase):
             fake_root = Path(temporary) / "repository with spaces"
             cs2_root = fake_root / "CS2"
             tennis_root = fake_root / "TENNIS"
+            telegram_root = fake_root / "TELEGRAM"
             cs2_root.mkdir(parents=True)
             tennis_root.mkdir(parents=True)
+            telegram_root.mkdir(parents=True)
             shutil.copy2(PROJECT_ROOT.parent / "start.ps1", fake_root)
 
             stub = r"""
@@ -85,6 +87,10 @@ exit $Code
             (cs2_root / "start.ps1").write_text(stub, encoding="utf-8")
             (tennis_root / "run_tennis.ps1").write_text(
                 stub,
+                encoding="utf-8",
+            )
+            (telegram_root / "run_telegram.ps1").write_text(
+                "exit 0\n",
                 encoding="utf-8",
             )
 
@@ -164,7 +170,11 @@ exit $Code
         launcher_path = PROJECT_ROOT / "run_tennis.ps1"
         launcher = launcher_path.read_text(encoding="utf-8")
         self.assertIn("$MyInvocation.MyCommand.Path", launcher)
-        self.assertIn("'.venv\\Scripts\\Activate.ps1'", launcher)
+        self.assertIn("'.venv'", launcher)
+        self.assertIn("'Scripts\\python.exe'", launcher)
+        self.assertIn("'requirements.lock.txt'", launcher)
+        self.assertIn("--only-binary=:all:", launcher)
+        self.assertIn("--require-hashes", launcher)
         self.assertIn("'scripts\\daily_predictions.py'", launcher)
         self.assertNotIn("start.ps1", launcher)
 
@@ -173,7 +183,8 @@ exit $Code
 
         readme = (PROJECT_ROOT / "README.md").read_text(encoding="utf-8")
         expected_fragments = (
-            "python -m pip install -r",
+            "requirements.lock.txt",
+            "CPython 3.13",
             "python scripts\\update_sources.py",
             "python scripts\\build_elo.py",
             "python scripts\\build_features.py",

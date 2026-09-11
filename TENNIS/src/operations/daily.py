@@ -2,9 +2,10 @@
 
 El módulo mantiene separadas tres responsabilidades: el pipeline causal de
 predicción, la persistencia append-only en SQLite y una sola observación de
-resultados de una jornada anterior pendiente. No limita cuántas veces puede
-ejecutarse el lanzador en un día y nunca convierte la predicción en etiqueta o
-estadística de entrenamiento.
+resultados de una jornada anterior pendiente. Para esta última usa primero el
+SQLite lateral de TennisRatio y reserva Tennis Explorer para lotes ausentes,
+incompletos o ambiguos. No limita cuántas veces puede ejecutarse el lanzador en
+un día y nunca convierte la predicción en feature de entrenamiento.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import pandas as pd
 
 from ..config import (
     OPERATIONS_DATABASE_PATH,
+    PLAYER_MAPPING_DATABASE_PATH,
     PREDICTIONS_PROCESSED_DIR,
     PROJECT_ROOT,
 )
@@ -28,6 +30,14 @@ from ..tennis_explorer import (
     TennisExplorerError,
     TennisExplorerResultSnapshot,
     refresh_daily_results,
+)
+from ..tennisratio import TennisRatioError, load_mapped_results
+from .result_sources import (
+    MappedResultLoader,
+    TennisExplorerMappedResultSnapshot,
+    TennisRatioResultSnapshot,
+    build_tennis_explorer_mapped_result_snapshot,
+    build_tennisratio_result_snapshot,
 )
 from .store import OperationsStore
 from .types import (
@@ -64,9 +74,10 @@ class OperationalDailyRun:
     prediction_registration: PredictionRegistration
     statistics_registration: StatisticsRegistration
     result_date: date | None
-    result_snapshot: TennisExplorerResultSnapshot | None
+    result_snapshot: TennisExplorerResultSnapshot | TennisRatioResultSnapshot | None
     observation_reconciliation: ObservationReconciliation | None
     reconciliation_warning: str | None
+
 
 def _optional_text(value: object) -> str | None:
     """Normaliza un texto escalar y conserva los nulos de Pandas."""
@@ -93,13 +104,12 @@ def _utc_token(value: datetime) -> str:
 def _prediction_run_id(run: DailyPredictionRun) -> str:
     """Crea una identidad de ejecución reproducible y legible."""
 
-    return (
-        f"prediction:{run.match_date.isoformat()}:"
-        f"{_utc_token(run.prediction_as_of_utc)}"
-    )
+    return f"prediction:{run.match_date.isoformat()}:{_utc_token(run.prediction_as_of_utc)}"
 
 
-def _observation_run_id(snapshot: TennisExplorerResultSnapshot) -> str:
+def _observation_run_id(
+    snapshot: TennisExplorerResultSnapshot | TennisRatioResultSnapshot,
+) -> str:
     """Crea una identidad append-only para un snapshot de resultados."""
 
     return (
@@ -227,12 +237,48 @@ def _result_metadata(
 ) -> dict[str, object]:
     """Describe un snapshot de resultado sin rutas absolutas de máquina."""
 
-    return {
+    metadata: dict[str, object] = {
         "pipeline": "daily_result_reconciliation_v1",
         "html_path": _project_relative(snapshot.html_path),
         "metadata_path": _project_relative(snapshot.metadata_path),
         "snapshot_sha256": snapshot.snapshot_sha256,
         "source_url": snapshot.source_url,
+    }
+    if isinstance(snapshot, TennisExplorerMappedResultSnapshot):
+        metadata.update(
+            {
+                "pipeline": "daily_result_reconciliation_v3",
+                "raw_snapshot_sha256": snapshot.raw_snapshot_sha256,
+                "identity_join": "exact_id_or_date_gender_unordered_sackmann_ids",
+                "official_pending_count": snapshot.official_pending_count,
+                "terminal_result_count": snapshot.terminal_result_count,
+                "exact_id_count": snapshot.exact_id_count,
+                "identity_mapped_count": snapshot.identity_mapped_count,
+                "paired_inferred_count": snapshot.paired_inferred_count,
+                "unmatched_official_count": snapshot.unmatched_official_count,
+                "unmapped_player_rows": snapshot.unmapped_player_rows,
+                "ambiguous_pair_rows": snapshot.ambiguous_pair_rows,
+            }
+        )
+    return metadata
+
+
+def _tennisratio_result_metadata(
+    snapshot: TennisRatioResultSnapshot,
+) -> dict[str, object]:
+    """Describe un lote lateral sin ocultar su identidad de origen."""
+
+    return {
+        "pipeline": "daily_result_reconciliation_v2",
+        "primary_source": "tennisratio",
+        "source_url": snapshot.source_url,
+        "snapshot_sha256": snapshot.snapshot_sha256,
+        "canonical_match_ids": list(snapshot.canonical_match_ids),
+        "identity_join": "effective_date_gender_unordered_sackmann_ids",
+        "official_pending_count": snapshot.official_pending_count,
+        "matched_count": snapshot.matched_count,
+        "unmatched_count": snapshot.unmatched_count,
+        "coverage_complete": snapshot.unmatched_count == 0,
     }
 
 
@@ -246,14 +292,19 @@ def run_operational_daily_pipeline(
     retrained: bool = False,
     daily_runner: DailyRunner = run_daily_prediction_pipeline,
     result_refresher: ResultRefresher = refresh_daily_results,
+    tennisratio_result_loader: MappedResultLoader = load_mapped_results,
+    player_mapping_database_path: Path = PLAYER_MAPPING_DATABASE_PATH,
 ) -> OperationalDailyRun:
     """Predice, persiste y observa una única fecha anterior pendiente.
 
-    Un fallo HTTP, WAF, caché o HTML durante la conciliación se devuelve como
-    advertencia explícita después de haber conservado la predicción del día.
-    Los fallos de integridad de SQLite sí se propagan: no deben maquillarse.
-    Cada invocación puede refrescar una fecha, pero no existe contador ni tope
-    diario en código.
+    TennisRatio se usa para cada resultado que pueda enlazarse de forma
+    inequívoca con una predicción oficial de su propia agenda; lo no enlazado
+    queda pendiente y no invalida las liquidaciones seguras. Para agendas de
+    otra fuente se exige el lote completo antes de desplazar su fallback. Un fallo
+    HTTP, WAF, caché o HTML del fallback se devuelve como advertencia explícita
+    después de conservar la predicción del día. Los fallos de integridad de la
+    SQLite operativa sí se propagan: no deben maquillarse. Cada invocación
+    puede refrescar una fecha, sin contador ni tope diario en código.
     """
 
     daily = daily_runner(
@@ -276,9 +327,7 @@ def run_operational_daily_pipeline(
             prediction_run_id,
             statistics,
         )
-        pending_date = store.select_pending_result_date(
-            before_date=daily.match_date
-        )
+        pending_date = store.select_pending_result_date(before_date=daily.match_date)
 
     if pending_date is None:
         return OperationalDailyRun(
@@ -291,9 +340,48 @@ def run_operational_daily_pipeline(
             reconciliation_warning=None,
         )
 
+    tennisratio_error: str | None = None
+    try:
+        with OperationsStore(database_path, clock=clock) as store:
+            tennisratio_snapshot = build_tennisratio_result_snapshot(
+                store,
+                pending_date=pending_date,
+                as_of_date=daily.match_date,
+                loader=tennisratio_result_loader,
+            )
+    except TennisRatioError as exc:
+        tennisratio_snapshot = None
+        tennisratio_error = f"{type(exc).__name__}: {exc}"
+
+    if tennisratio_snapshot is not None:
+        with OperationsStore(database_path, clock=clock) as store:
+            observation_reconciliation = store.reconcile_observations(
+                _observation_run_id(tennisratio_snapshot),
+                tennisratio_snapshot.matches,
+                source_system="tennisratio",
+                metadata=_tennisratio_result_metadata(tennisratio_snapshot),
+                observed_at_utc=tennisratio_snapshot.retrieved_at_utc,
+                target_date=pending_date,
+            )
+        return OperationalDailyRun(
+            daily_run=daily,
+            prediction_registration=prediction_registration,
+            statistics_registration=statistics_registration,
+            result_date=pending_date,
+            result_snapshot=tennisratio_snapshot,
+            observation_reconciliation=observation_reconciliation,
+            reconciliation_warning=None,
+        )
+
     try:
         result_snapshot = result_refresher(pending_date, clock=clock)
     except TennisExplorerError as exc:
+        explorer_error = f"{type(exc).__name__}: {exc}"
+        warning = (
+            f"TennisRatio: {tennisratio_error}; Tennis Explorer: {explorer_error}"
+            if tennisratio_error is not None
+            else explorer_error
+        )
         return OperationalDailyRun(
             daily_run=daily,
             prediction_registration=prediction_registration,
@@ -301,15 +389,22 @@ def run_operational_daily_pipeline(
             result_date=pending_date,
             result_snapshot=None,
             observation_reconciliation=None,
-            reconciliation_warning=f"{type(exc).__name__}: {exc}",
+            reconciliation_warning=warning,
+        )
+
+    with OperationsStore(database_path, clock=clock) as store:
+        mapped_result_snapshot = build_tennis_explorer_mapped_result_snapshot(
+            store,
+            result_snapshot,
+            mapping_database_path=player_mapping_database_path,
         )
 
     with OperationsStore(database_path, clock=clock) as store:
         observation_reconciliation = store.reconcile_observations(
-            _observation_run_id(result_snapshot),
-            result_snapshot.matches,
-            metadata=_result_metadata(result_snapshot),
-            observed_at_utc=result_snapshot.retrieved_at_utc,
+            _observation_run_id(mapped_result_snapshot),
+            mapped_result_snapshot.matches,
+            metadata=_result_metadata(mapped_result_snapshot),
+            observed_at_utc=mapped_result_snapshot.retrieved_at_utc,
             target_date=pending_date,
         )
     return OperationalDailyRun(
@@ -317,7 +412,7 @@ def run_operational_daily_pipeline(
         prediction_registration=prediction_registration,
         statistics_registration=statistics_registration,
         result_date=pending_date,
-        result_snapshot=result_snapshot,
+        result_snapshot=mapped_result_snapshot,
         observation_reconciliation=observation_reconciliation,
         reconciliation_warning=None,
     )

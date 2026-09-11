@@ -5,13 +5,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt .
+COPY requirements.txt requirements.lock.txt ./
+COPY wheels ./wheels
+COPY scripts/verify_flasgger_wheel.py ./scripts/verify_flasgger_wheel.py
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential gcc && \
-    pip install --no-cache-dir -r requirements.txt && \
-    apt-get purge -y --auto-remove build-essential gcc && \
-    rm -rf /var/lib/apt/lists/*
+RUN python scripts/verify_flasgger_wheel.py && \
+    python -m pip install --no-cache-dir --no-deps --only-binary=:all: \
+        --require-hashes --find-links ./wheels -r requirements.lock.txt && \
+    python -m pip check
 
 COPY . .
 

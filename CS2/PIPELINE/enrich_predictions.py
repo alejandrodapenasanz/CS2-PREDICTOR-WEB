@@ -29,6 +29,10 @@ MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
 from cs2model.identity import resolved_team
+from cs2model.uncertainty import (
+    count_history_strictly_before_day as cs2_count_history_before,
+    estimate_probability_uncertainty as cs2_estimate_probability_uncertainty,
+)
 
 try:
     from cs2model import dataio as cs2_dataio
@@ -37,6 +41,7 @@ try:
         analytics_match_features as cs2_analytics_match_features,
         announced_lineup_features as cs2_announced_lineup_features,
         context_match_features as cs2_context_match_features,
+        segment_interaction_features as cs2_segment_interaction_features,
         event_metadata_features as cs2_event_metadata_features,
         PLAYER_DIFF_COLUMNS as CS2_PLAYER_DIFF_COLUMNS,
         PLAYER_SYM_COLUMNS as CS2_PLAYER_SYM_COLUMNS,
@@ -46,6 +51,19 @@ try:
         ROSTER_SYM_COLUMNS as CS2_ROSTER_SYM_COLUMNS,
     )
     from cs2model.artifacts import load_artifact as cs2_load_artifact
+    from cs2model.pistols import PISTOL_COLUMNS, PISTOL_DIFF_COLUMNS, load_pistol_store
+    from cs2model.pistol_opponents import (
+        OPPONENT_COLUMNS, OPPONENT_DIFF_COLUMNS, PistolOpponentHistory, state_before_day,
+    )
+    from cs2model.odds import (
+        ODDS_FEATURE_COLUMNS as CS2_ODDS_FEATURE_COLUMNS,
+        no_odds_features as cs2_no_odds_features,
+        resolve_opening_odds as cs2_resolve_opening_odds,
+    )
+    from cs2model.enhanced_info import (
+        ENHANCED_AUDIT_COLUMNS as CS2_ENHANCED_AUDIT_COLUMNS,
+        enhanced_feature_values as cs2_enhanced_feature_values,
+    )
 
     _CS2_OK = True
 except Exception:  # pragma: no cover - entorno sin librería
@@ -60,14 +78,26 @@ except Exception:  # pragma: no cover - entorno sin librería
     def cs2_context_match_features(_match: dict[str, Any]) -> dict[str, float]:
         return {}
 
+    def cs2_segment_interaction_features(_features: dict[str, float]) -> dict[str, float]:
+        return {}
+
     def cs2_event_metadata_features(_match: dict[str, Any]) -> dict[str, float]:
         return {}
+
     CS2_PLAYER_DIFF_COLUMNS = []
     CS2_PLAYER_SYM_COLUMNS = []
     CS2_RANKING_DIFF_COLUMNS = []
     CS2_RANKING_SYM_COLUMNS = []
     CS2_ROSTER_DIFF_COLUMNS = []
     CS2_ROSTER_SYM_COLUMNS = []
+    CS2_ODDS_FEATURE_COLUMNS = ()
+    CS2_ENHANCED_AUDIT_COLUMNS = ()
+    PISTOL_COLUMNS = PISTOL_DIFF_COLUMNS = OPPONENT_COLUMNS = OPPONENT_DIFF_COLUMNS = []
+
+    def cs2_enhanced_feature_values(_match: dict[str, Any], _features: dict[str, Any]) -> dict[str, float]:
+        return {}
+
+
 DAILY_ROOT = ROOT / "PIPELINE"
 RUNS_DIR = DAILY_ROOT / "runs"
 MASTER_MANIFEST = DAILY_ROOT / "master" / "manifest.json"
@@ -208,6 +238,15 @@ def parse_match_datetime(date_text: str | None, hour_text: str | None = None) ->
     return date_obj.replace(hour=12, minute=0)
 
 
+def kickoff_utc_from_local(match_dt: datetime | None) -> str | None:
+    """Convert the published Madrid-local kickoff to an auditable UTC instant."""
+
+    if match_dt is None:
+        return None
+    aware = match_dt.replace(tzinfo=ZoneInfo("Europe/Madrid")) if match_dt.tzinfo is None else match_dt
+    return aware.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def detail_has_completed_score(detail: dict[str, Any]) -> bool:
     match = detail.get("match") or {}
     team1 = match.get("team1") or {}
@@ -215,7 +254,9 @@ def detail_has_completed_score(detail: dict[str, Any]) -> bool:
     return str(team1.get("score") or "").isdigit() and str(team2.get("score") or "").isdigit()
 
 
-def is_snapshot_publishable(snapshot: dict[str, Any], run_started_local: datetime, grace_minutes: int = 15) -> tuple[bool, str]:
+def is_snapshot_publishable(
+    snapshot: dict[str, Any], run_started_local: datetime, grace_minutes: int = 15
+) -> tuple[bool, str]:
     if snapshot.get("status") == "completed":
         return False, "completed"
     detail = snapshot.get("detail") or {}
@@ -297,7 +338,9 @@ def load_history(path: Path) -> list[dict[str, Any]]:
                 "team2_key": clean_team((item.get("team2") or {}).get("name")),
                 "score1": score1,
                 "score2": score2,
-                "winner_key": clean_team((item.get("team1") if score1 > score2 else item.get("team2") or {}).get("name")),
+                "winner_key": clean_team(
+                    (item.get("team1") if score1 > score2 else item.get("team2") or {}).get("name")
+                ),
                 "format": fmt if fmt != "other" else "bo1",
                 "event": item.get("event") or "",
             }
@@ -420,11 +463,7 @@ def load_player_stats(run_dir: Path) -> dict[str, dict[str, Any]]:
             player_id = str(player.get("id"))
             if not player_id:
                 continue
-            time_filter = str(
-                player.get("time_filter")
-                or player.get("selected_from_time_filter")
-                or comp_time_filter
-            )
+            time_filter = str(player.get("time_filter") or player.get("selected_from_time_filter") or comp_time_filter)
             bucket = players.setdefault(
                 player_id,
                 {
@@ -586,7 +625,7 @@ def roster_summary(
     player_stats: dict[str, Any],
     announced_lineup: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    profile_roster = ((profiles.get(str(team_id or "")) or {}).get("squad") or [])
+    profile_roster = (profiles.get(str(team_id or "")) or {}).get("squad") or []
     announced_lineup = announced_lineup or {}
     announced_roster = announced_lineup.get("players") or []
     player_details = announced_lineup.get("player_details") or {}
@@ -626,22 +665,11 @@ def roster_summary(
         roster = []
         roster_source = "unavailable"
 
-    announced_ids = {
-        str(player.get("id") or "")
-        for player in announced_roster
-        if player.get("id")
-    }
-    rendered_ids = {
-        str(player.get("id") or "")
-        for player in roster
-        if player.get("id")
-    }
+    announced_ids = {str(player.get("id") or "") for player in announced_roster if player.get("id")}
+    rendered_ids = {str(player.get("id") or "") for player in roster if player.get("id")}
     announced_complete = bool(announced_lineup.get("complete"))
     announced_matches_rendered = (
-        len(rendered_ids) == COMPLETE_LINEUP_SIZE
-        and announced_ids == rendered_ids
-        if announced_complete
-        else None
+        len(rendered_ids) == COMPLETE_LINEUP_SIZE and announced_ids == rendered_ids if announced_complete else None
     )
     if announced_complete and announced_matches_rendered:
         integrity_status = "confirmed"
@@ -687,11 +715,7 @@ def roster_summary(
                 "stats_by_window": windows,
                 "preferred_time_filter": bundle.get("preferred_time_filter") if isinstance(bundle, dict) else None,
                 "is_standin": bool(player.get("is_standin")),
-                "stats_source": (
-                    "player_stat_snapshot"
-                    if preferred
-                    else (display_stats or {}).get("source")
-                ),
+                "stats_source": ("player_stat_snapshot" if preferred else (display_stats or {}).get("source")),
             }
         )
     summary = {
@@ -707,7 +731,10 @@ def roster_summary(
         "integrity": integrity,
     }
     available_windows = sorted({window for p in players for window in (p.get("stats_by_window") or {})})
-    for window in [*PLAYER_TIME_FILTER_PRIORITY, *[w for w in available_windows if w not in PLAYER_TIME_FILTER_PRIORITY]]:
+    for window in [
+        *PLAYER_TIME_FILTER_PRIORITY,
+        *[w for w in available_windows if w not in PLAYER_TIME_FILTER_PRIORITY],
+    ]:
         window_agg = aggregate_player_stats(players, window)
         if window_agg.get("covered_players"):
             summary["windows"][window] = window_agg
@@ -754,16 +781,16 @@ def roster_integrity_report(entries: list[dict[str, Any]]) -> dict[str, Any]:
         if confirmed:
             both_confirmed += 1
         side_statuses = {
-            side: ((entry.get("rosters") or {}).get(side) or {}).get("integrity", {}).get(
+            side: ((entry.get("rosters") or {}).get(side) or {})
+            .get("integrity", {})
+            .get(
                 "status",
                 "unknown",
             )
             for side in ("team1", "team2")
         }
         hard_reasons = [
-            f"{side}_announced_lineup_mismatch"
-            for side, status in side_statuses.items()
-            if status == "mismatch"
+            f"{side}_announced_lineup_mismatch" for side, status in side_statuses.items() if status == "mismatch"
         ]
         prediction = entry.get("prediction") or {}
         if prediction.get("opportunity_eligible") and not confirmed:
@@ -807,10 +834,20 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
     """
     if not _CS2_OK:
         return None
+    artifact = None
     try:
         artifact = cs2_load_artifact()
         if artifact is None:
             return None
+        if artifact.metadata.get("pistol_opponent_version"):
+            # Candidate-only contract: identical canonical history to its experiment.
+            rows = cs2_dataio.load_training_rows(None, MASTER_MATCHES, cs2_only=True, db_path=LIVE_DB)
+            if not rows:
+                raise ValueError("Opponent-pistol model requires canonical history")
+            with sqlite3.connect(LIVE_DB.resolve().as_uri() + "?mode=ro", uri=True) as connection:
+                pistol_history = PistolOpponentHistory(rows, load_pistol_store(connection))
+            return {"artifact": artifact, "state": None, "history_rows": rows,
+                    "states_by_day": {}, "pistol_opponents": pistol_history}
         rows = cs2_dataio.load_training_rows(
             history_path,
             MASTER_MATCHES if MASTER_MATCHES.exists() else None,
@@ -821,6 +858,8 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
         _, _, _, state = cs2_build_state(rows)
         return {"artifact": artifact, "state": state}
     except Exception:
+        if artifact is not None and artifact.metadata.get("pistol_opponent_version"):
+            raise  # A broken candidate contract must not become an invisible fallback.
         return None
 
 
@@ -839,6 +878,22 @@ def model_external_features_for_order(features: dict[str, Any], reverse: bool = 
             out[col] = float(features.get(col) or 0.0)
         except (TypeError, ValueError):
             out[col] = 0.0
+    for col in CS2_ODDS_FEATURE_COLUMNS:
+        try:
+            value = float(features.get(col, math.nan))
+        except (TypeError, ValueError):
+            value = math.nan
+        out[col] = -value if reverse and col == "opening_odds_prob_centered" and math.isfinite(value) else value
+    for col in CS2_ENHANCED_AUDIT_COLUMNS:
+        try:
+            out[col] = float(features.get(col) or 0.0)
+        except (TypeError, ValueError):
+            out[col] = 0.0
+    pistol_directional = set(PISTOL_DIFF_COLUMNS + OPPONENT_DIFF_COLUMNS)
+    for col in PISTOL_COLUMNS + OPPONENT_COLUMNS:
+        if col in features:
+            value = float(features[col])
+            out[col] = -value if reverse and col in pistol_directional else value
     return out
 
 
@@ -862,8 +917,17 @@ def model_probability_team1(
     """
     artifact = engine["artifact"]
     f1, f2 = _match_feature_pair(
-        engine, team1_key, team2_key, match_dt, event, fmt,
-        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+        engine,
+        team1_key,
+        team2_key,
+        match_dt,
+        event,
+        fmt,
+        analytics_match,
+        match_context,
+        extra_features,
+        announced_lineups,
+        event_metadata,
     )
     p1 = float(artifact.predict_proba_team1([f1])[0])
     p2 = float(artifact.predict_proba_team1([f2])[0])
@@ -886,13 +950,36 @@ def _match_feature_pair(
     """Par de features simetrico (A vs B, B vs A). Compartido por el scoring y la
     estimacion de incertidumbre (A2) para no duplicar logica."""
     state = engine["state"]
+    if engine["artifact"].metadata.get("pistol_opponent_version"):
+        if match_dt is None:
+            raise ValueError("Opponent-pistol model requires a prediction day")
+        day = match_dt.date().isoformat()
+        if day not in engine["states_by_day"]:
+            engine["states_by_day"][day] = state_before_day(engine["history_rows"], day)
+        state = engine["states_by_day"][day]
     fmt = fmt if fmt in {"bo1", "bo3", "bo5"} else "bo3"
-    f1 = state.emit_features(team1_key, team2_key, match_dt, event or "", fmt)
-    f2 = state.emit_features(team2_key, team1_key, match_dt, event or "", fmt)
+    lineup_team1 = (announced_lineups or {}).get("team1")
+    lineup_team2 = (announced_lineups or {}).get("team2")
+    f1 = state.emit_features(
+        team1_key,
+        team2_key,
+        match_dt,
+        event or "",
+        fmt,
+        lineup_team1,
+        lineup_team2,
+    )
+    f2 = state.emit_features(
+        team2_key,
+        team1_key,
+        match_dt,
+        event or "",
+        fmt,
+        lineup_team2,
+        lineup_team1,
+    )
     if hasattr(state, "regime_features"):
-        regime_features = state.regime_features(
-            {"date_obj": match_dt, "match_context": match_context or {}}
-        )
+        regime_features = state.regime_features({"date_obj": match_dt, "match_context": match_context or {}})
         f1.update(regime_features)
         f2.update(regime_features)
     if match_context:
@@ -932,6 +1019,8 @@ def _match_feature_pair(
     if extra_features:
         f1.update(model_external_features_for_order(extra_features, reverse=False))
         f2.update(model_external_features_for_order(extra_features, reverse=True))
+    f1.update(cs2_segment_interaction_features(f1))
+    f2.update(cs2_segment_interaction_features(f2))
     return f1, f2
 
 
@@ -947,22 +1036,37 @@ def model_probability_and_uncertainty(
     extra_features: dict[str, float] | None = None,
     announced_lineups: dict[str, Any] | None = None,
     event_metadata: dict[str, Any] | None = None,
-) -> tuple[float, float]:
-    """A2: (prob_team1 calibrada simetrica, std_epistemica del ensemble).
+) -> tuple[float, float, float]:
+    """A2: (prob_team1, dispersion simetrizada, dispersion legacy).
 
-    std = cuanto discrepan los miembros del ensemble => incertidumbre del modelo,
-    usada para reducir el stake cuando no lo tiene claro.
+    La segunda salida es la desviacion ponderada entre los estimados por miembro
+    ya simetrizados y alimenta la banda nueva. La tercera conserva el promedio
+    direccional historico que ya consumia la capa de staking; separarlas evita
+    cambiar Kelly/bankroll como efecto lateral de este contrato.
     """
     artifact = engine["artifact"]
     f1, f2 = _match_feature_pair(
-        engine, team1_key, team2_key, match_dt, event, fmt,
-        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+        engine,
+        team1_key,
+        team2_key,
+        match_dt,
+        event,
+        fmt,
+        analytics_match,
+        match_context,
+        extra_features,
+        announced_lineups,
+        event_metadata,
     )
-    m1, s1 = artifact.predict_proba_team1_with_uncertainty([f1])
-    m2, s2 = artifact.predict_proba_team1_with_uncertainty([f2])
-    prob = clamp(0.5 * (float(m1[0]) + (1.0 - float(m2[0]))), 1e-4, 1 - 1e-4)
-    std = 0.5 * (float(s1[0]) + float(s2[0]))
-    return prob, std
+    mean, disagreement = artifact.predict_symmetric_proba_team1_with_uncertainty([f1], [f2])
+    _forward_mean, forward_disagreement = artifact.predict_proba_team1_with_uncertainty([f1])
+    _reverse_mean, reverse_disagreement = artifact.predict_proba_team1_with_uncertainty([f2])
+    legacy_disagreement = 0.5 * (float(forward_disagreement[0]) + float(reverse_disagreement[0]))
+    return (
+        clamp(float(mean[0]), 1e-4, 1 - 1e-4),
+        float(disagreement[0]),
+        legacy_disagreement,
+    )
 
 
 def model_series_score_distribution(
@@ -983,8 +1087,17 @@ def model_series_score_distribution(
         return None
     artifact = engine["artifact"]
     f1, _f2 = _match_feature_pair(
-        engine, team1_key, team2_key, match_dt, event, fmt,
-        analytics_match, match_context, extra_features, announced_lineups, event_metadata,
+        engine,
+        team1_key,
+        team2_key,
+        match_dt,
+        event,
+        fmt,
+        analytics_match,
+        match_context,
+        extra_features,
+        announced_lineups,
+        event_metadata,
     )
     distributions = artifact.predict_series_score_distribution([f1])
     return distributions[0] if distributions else None
@@ -1020,11 +1133,15 @@ def event_volatility(event_outcomes: dict[str, list[int]], event: str) -> dict[s
     return {"n": n, "volatility": volatility, "label": label}
 
 
-def similar_probability_bucket(history_predictions: list[dict[str, Any]], p: float, width: float = 0.05) -> dict[str, Any]:
+def similar_probability_bucket(
+    history_predictions: list[dict[str, Any]], p: float, width: float = 0.05
+) -> dict[str, Any]:
     bucket = [row for row in history_predictions if abs(row["p"] - p) <= width]
     if len(bucket) < 30:
         return {"n": len(bucket), "favorite_loss_rate": None}
-    fav_losses = [int((row["p"] >= 0.5 and not row["team1_win"]) or (row["p"] < 0.5 and row["team1_win"])) for row in bucket]
+    fav_losses = [
+        int((row["p"] >= 0.5 and not row["team1_win"]) or (row["p"] < 0.5 and row["team1_win"])) for row in bucket
+    ]
     return {"n": len(bucket), "favorite_loss_rate": sum(fav_losses) / len(fav_losses)}
 
 
@@ -1059,7 +1176,9 @@ def odds_average_from(odds: dict[str, Any] | None) -> dict[str, Any] | None:
     return average
 
 
-def odds_history_points(match_id: str, master: dict[str, Any], current_snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def odds_history_points(
+    match_id: str, master: dict[str, Any], current_snapshot: dict[str, Any]
+) -> list[dict[str, Any]]:
     record = master.get(match_id, {})
     points = list(record.get("odds_history") or [])
     seen = {(point.get("captured_at"), point.get("run_id")) for point in points}
@@ -1082,7 +1201,9 @@ def odds_history_points(match_id: str, master: dict[str, Any], current_snapshot:
     return points
 
 
-def market_metrics(odds: dict[str, Any], history_points: list[dict[str, Any]], model_prob_team1: float) -> dict[str, Any]:
+def market_metrics(
+    odds: dict[str, Any], history_points: list[dict[str, Any]], model_prob_team1: float
+) -> dict[str, Any]:
     average = odds_average_from(odds)
     providers = odds.get("providers") or []
     provider_probs = [
@@ -1152,7 +1273,11 @@ def market_metrics(odds: dict[str, Any], history_points: list[dict[str, Any]], m
         "consensus_std": consensus_std,
         "consensus_range": consensus_range,
         "consensus_label": consensus_label,
-        "market_favorite_side": "team1" if latest_p is not None and latest_p >= 0.5 else "team2" if latest_p is not None else None,
+        "market_favorite_side": "team1"
+        if latest_p is not None and latest_p >= 0.5
+        else "team2"
+        if latest_p is not None
+        else None,
         "model_edge_team1": edge_team1,
         "model_edge_abs": abs(edge_team1) if edge_team1 is not None else None,
         "value_label": value_label,
@@ -1192,10 +1317,8 @@ def reliability_score(entry: dict[str, Any], features: dict[str, Any]) -> float:
     if not (entry.get("data_quality") or {}).get("real_pre_match_snapshot", True):
         score *= 0.85
     coverage = min(
-        features.get("player_coverage_team1")
-        if features.get("player_coverage_team1") is not None else 1,
-        features.get("player_coverage_team2")
-        if features.get("player_coverage_team2") is not None else 1,
+        features.get("player_coverage_team1") if features.get("player_coverage_team1") is not None else 1,
+        features.get("player_coverage_team2") if features.get("player_coverage_team2") is not None else 1,
     )
     if coverage < 0.6:
         score *= 0.75
@@ -1259,8 +1382,12 @@ def _prediction_market_prob(entry: dict[str, Any]) -> float | None:
     pred = entry.get("prediction") or {}
     if pred.get("odds_prob_team1") is not None:
         return safe_float(pred.get("odds_prob_team1"))
-    market = ((entry.get("controls") or {}).get("market") or {})
-    for source in (market.get("latest") or {}, (entry.get("odds") or {}).get("average") or {}, market.get("opening") or {}):
+    market = (entry.get("controls") or {}).get("market") or {}
+    for source in (
+        market.get("latest") or {},
+        (entry.get("odds") or {}).get("average") or {},
+        market.get("opening") or {},
+    ):
         p = safe_float(source.get("team1_implied_prob_norm"))
         if p is not None and 0.0 < p < 1.0:
             return p
@@ -1313,13 +1440,17 @@ def build_market_blend_policy(master: dict[str, Any]) -> dict[str, Any]:
         market_p = _prediction_market_prob(entry)
         if model_p is None or market_p is None:
             continue
-        samples.append({
-            "match_id": match_id,
-            "completed_at": (master.get(str(match_id), {}) or {}).get("completed_at") or entry.get("captured_at") or "",
-            "model_p": model_p,
-            "market_p": market_p,
-            "y": y,
-        })
+        samples.append(
+            {
+                "match_id": match_id,
+                "completed_at": (master.get(str(match_id), {}) or {}).get("completed_at")
+                or entry.get("captured_at")
+                or "",
+                "model_p": model_p,
+                "market_p": market_p,
+                "y": y,
+            }
+        )
     samples.sort(key=lambda row: row["completed_at"])
     n = len(samples)
     base = {
@@ -1497,9 +1628,8 @@ def staking_recommendation(
         p_model = decision_p_team1 if side == "team1" else 1.0 - decision_p_team1
         p_raw_model = model_p_team1 if side == "team1" else 1.0 - model_p_team1
         decimal = safe_float(latest.get(f"{side}_decimal")) or safe_float(avg.get(f"{side}_decimal"))
-        market_prob = (
-            safe_float(latest.get(f"{side}_implied_prob_norm"))
-            or safe_float(avg.get(f"{side}_implied_prob_norm"))
+        market_prob = safe_float(latest.get(f"{side}_implied_prob_norm")) or safe_float(
+            avg.get(f"{side}_implied_prob_norm")
         )
         if decimal is None or decimal <= 1.0:
             continue
@@ -1644,8 +1774,8 @@ def map_pool_estimate(team1_name: str, team2_name: str, map_state: dict[str, Any
         team1_best = max(usable, key=lambda row: row["diff_team1"] or -99)
         team2_best = min(usable, key=lambda row: row["diff_team1"] or 99)
         decider = min(usable, key=lambda row: abs(row["diff_team1"] or 0))
-        permaban_team1 = min(rows, key=lambda row: (row["team1_winrate"] if row["team1_winrate"] is not None else 1.0))
-        permaban_team2 = min(rows, key=lambda row: (row["team2_winrate"] if row["team2_winrate"] is not None else 1.0))
+        permaban_team1 = min(rows, key=lambda row: row["team1_winrate"] if row["team1_winrate"] is not None else 1.0)
+        permaban_team2 = min(rows, key=lambda row: row["team2_winrate"] if row["team2_winrate"] is not None else 1.0)
     else:
         advantage = None
         team1_best = team2_best = decider = permaban_team1 = permaban_team2 = None
@@ -1708,7 +1838,9 @@ def build_roster_history(run_dir: Path, profiles: dict[str, Any]) -> dict[str, A
     return history
 
 
-def roster_stability(team_id: str | None, profile: dict[str, Any] | None, roster_history: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+def roster_stability(
+    team_id: str | None, profile: dict[str, Any] | None, roster_history: dict[str, Any], run_dir: Path
+) -> dict[str, Any]:
     profile = profile or {}
     team_id = str(team_id or "")
     squad = profile.get("squad") or []
@@ -1830,11 +1962,7 @@ def _match_datetime_utc(snapshot: dict[str, Any], lineup_store: dict[str, Any]) 
     local_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
     if local_dt is None:
         return None
-    return (
-        local_dt.replace(tzinfo=ZoneInfo("Europe/Madrid"))
-        .astimezone(timezone.utc)
-        .replace(tzinfo=None)
-    )
+    return local_dt.replace(tzinfo=ZoneInfo("Europe/Madrid")).astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _announced_lineup(
@@ -1847,11 +1975,7 @@ def _announced_lineup(
     candidate = lineups.get(side) or {}
     if expected and str(candidate.get("hltv_team_id") or "") != expected:
         candidate = next(
-            (
-                lineup
-                for lineup in lineups.values()
-                if str((lineup or {}).get("hltv_team_id") or "") == expected
-            ),
+            (lineup for lineup in lineups.values() if str((lineup or {}).get("hltv_team_id") or "") == expected),
             {},
         )
 
@@ -1950,8 +2074,7 @@ def roster_change_90d(
     history = [
         record
         for record in (lineup_store.get("teams") or {}).get(str(team.get("id") or ""), [])
-        if window_start <= record["datetime"] < match_dt
-        and record["match_id"] != current_match_id
+        if window_start <= record["datetime"] < match_dt and record["match_id"] != current_match_id
     ]
     history.sort(key=lambda item: (item["datetime"], item["match_id"]), reverse=True)
     result["window_start_utc"] = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1964,11 +2087,7 @@ def roster_change_90d(
     latest = history[0]
     signatures = Counter(record["player_ids"] for record in history)
     max_count = max(signatures.values())
-    modal_signature = next(
-        record["player_ids"]
-        for record in history
-        if signatures[record["player_ids"]] == max_count
-    )
+    modal_signature = next(record["player_ids"] for record in history if signatures[record["player_ids"]] == max_count)
     current_ids = current["player_ids"]
     changed_latest = current_ids != latest["player_ids"]
     historical_player_ids = set().union(*(record["player_ids"] for record in history))
@@ -2014,7 +2133,11 @@ def build_player_match_form(master: dict[str, Any]) -> dict[str, list[dict[str, 
         detail = record.get("detail") or (record.get("result") or {}).get("detail")
         if not isinstance(detail, dict):
             continue
-        completed_at = parse_iso(record.get("completed_at")) or parse_match_datetime(record.get("date"), record.get("hour")) or datetime.min
+        completed_at = (
+            parse_iso(record.get("completed_at"))
+            or parse_match_datetime(record.get("date"), record.get("hour"))
+            or datetime.min
+        )
         for table in detail.get("stats") or []:
             team_key = clean_team(table.get("team"))
             for player in table.get("stats") or []:
@@ -2097,8 +2220,7 @@ def player_form_summary(roster: dict[str, Any], player_forms: dict[str, list[dic
     team_windows = {}
     for window, metrics in window_team_values.items():
         team_windows[f"last{window}"] = {
-            metric: avg(values, default=None) if values else None
-            for metric, values in metrics.items()
+            metric: avg(values, default=None) if values else None for metric, values in metrics.items()
         }
         team_windows[f"last{window}"]["covered_players"] = sum(
             1 for player in players if player["windows"][f"last{window}"]["samples"] > 0
@@ -2109,8 +2231,7 @@ def player_form_summary(roster: dict[str, Any], player_forms: dict[str, list[dic
         "season_form_coverage": season_covered / max(len(players), 1),
         "team_windows": team_windows,
         "season_avg": {
-            metric: avg(values, default=None) if values else None
-            for metric, values in season_values.items()
+            metric: avg(values, default=None) if values else None for metric, values in season_values.items()
         },
         "source_note": "last5/10/20 require completed real match details; season stats come from HLTV compare.",
     }
@@ -2217,7 +2338,11 @@ def tournament_context(
         "playoff",
         "lower_bracket",
     }
-    source = "hltv_maps_box" if match_context.get("raw_meta") or match_context.get("stage_detail") else "heuristic_event_text"
+    source = (
+        "hltv_maps_box"
+        if match_context.get("raw_meta") or match_context.get("stage_detail")
+        else "heuristic_event_text"
+    )
     return {
         "stage": stage,
         "stage_detail": match_context.get("stage_detail"),
@@ -2241,13 +2366,21 @@ def tournament_context(
     }
 
 
-def add_schedule_item(index: dict[str, list[dict[str, Any]]], team_name: str | None, when: datetime | None, source: str, match_id: str | None) -> None:
+def add_schedule_item(
+    index: dict[str, list[dict[str, Any]]],
+    team_name: str | None,
+    when: datetime | None,
+    source: str,
+    match_id: str | None,
+) -> None:
     if not team_name or not when:
         return
     index[clean_team(team_name)].append({"datetime": when, "source": source, "match_id": match_id})
 
 
-def build_schedule_index(history: list[dict[str, Any]], master: dict[str, Any], snapshots: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+def build_schedule_index(
+    history: list[dict[str, Any]], master: dict[str, Any], snapshots: list[dict[str, Any]]
+) -> dict[str, list[dict[str, Any]]]:
     index: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in history:
         when = row.get("date_obj")
@@ -2274,7 +2407,9 @@ def build_schedule_index(history: list[dict[str, Any]], master: dict[str, Any], 
     return index
 
 
-def fatigue_metrics(team_name: str, match_dt: datetime | None, schedule_index: dict[str, list[dict[str, Any]]], match_id: str) -> dict[str, Any]:
+def fatigue_metrics(
+    team_name: str, match_dt: datetime | None, schedule_index: dict[str, list[dict[str, Any]]], match_id: str
+) -> dict[str, Any]:
     if not match_dt:
         return {"status": "unknown_time", "last24_count": 0, "last48_count": 0, "same_day_total": 0}
     rows = [row for row in schedule_index.get(clean_team(team_name), []) if row.get("match_id") != match_id]
@@ -2291,7 +2426,8 @@ def fatigue_metrics(team_name: str, match_dt: datetime | None, schedule_index: d
         "same_day_total": len(same_day) + 1,
         "next24_count": len(next24),
         "back_to_back": len(last24) > 0 or len(same_day) > 0,
-        "schedule_density_48h": len(last48) + len([row for row in next24 if row["datetime"] - match_dt <= timedelta(hours=48)]),
+        "schedule_density_48h": len(last48)
+        + len([row for row in next24 if row["datetime"] - match_dt <= timedelta(hours=48)]),
         "online_lan": "unknown",
         "travel_risk": "unknown",
         "sources": sorted({row["source"] for row in last48 + same_day + next24}),
@@ -2311,10 +2447,15 @@ def calibration_metrics(samples: list[dict[str, Any]]) -> dict[str, Any]:
         }
     eps = 1e-6
     brier = avg([(row["p"] - row["y"]) ** 2 for row in samples])
-    log_loss = avg([
-        -(row["y"] * math.log(clamp(row["p"], eps, 1 - eps)) + (1 - row["y"]) * math.log(clamp(1 - row["p"], eps, 1 - eps)))
-        for row in samples
-    ])
+    log_loss = avg(
+        [
+            -(
+                row["y"] * math.log(clamp(row["p"], eps, 1 - eps))
+                + (1 - row["y"]) * math.log(clamp(1 - row["p"], eps, 1 - eps))
+            )
+            for row in samples
+        ]
+    )
     accuracy = avg([int((row["p"] >= 0.5) == bool(row["y"])) for row in samples])
     bins = [[] for _ in range(10)]
     for row in samples:
@@ -2386,86 +2527,95 @@ def compute_daily_calibration(master: dict[str, Any], run_dir: Path) -> dict[str
     return calibration
 
 
-def _market_probability_team1(entry: dict[str, Any], record: dict[str, Any]) -> float | None:
-    """Normalized market probability for team1 from a saved pre-match snapshot.
+MODEL_FAVORITE_MIN_PROBABILITY = 0.51
 
-    Favorite/upset history should be an external market fact, not a model echo.
-    Prefer the odds captured in the prediction snapshot; fall back to the
-    master opening odds if the snapshot did not embed odds.
+
+def _team_history_key(hltv_team_id: Any, team_name: Any) -> str:
+    """Return the stable team key used by the read-only upset audit."""
+
+    stable_id = str(hltv_team_id or "").strip()
+    if stable_id:
+        return f"hltv:{stable_id}"
+    normalized_name = clean_team(str(team_name or ""))
+    return f"name:{normalized_name}" if normalized_name else ""
+
+
+def build_favorite_upset_records(
+    conn_or_path: sqlite3.Connection | str | Path = LIVE_DB,
+    *,
+    min_probability: float = MODEL_FAVORITE_MIN_PROBABILITY,
+) -> list[dict[str, Any]]:
+    """Read every settled causal model favorite from ``prediction_ledger``.
+
+    The ledger freezes one official pre-match probability per match and does
+    not require odds. Historical matches without a frozen prospective model
+    prediction are deliberately excluded: scoring those now would leak the
+    present model into the past.
     """
-    sources = [
-        ((entry.get("odds") or {}).get("average") or {}),
-        record.get("opening_odds") or {},
-        record.get("latest_odds_point") or {},
-    ]
-    for source in sources:
+
+    threshold = float(min_probability)
+    if not 0.5 < threshold < 1.0:
+        raise ValueError("min_probability must be strictly between 0.5 and 1")
+    owns_connection = not isinstance(conn_or_path, sqlite3.Connection)
+    if owns_connection:
+        path = Path(conn_or_path).resolve()
         try:
-            p = float(source.get("team1_implied_prob_norm"))
-        except (TypeError, ValueError):
-            continue
-        if 0.0 < p < 1.0 and abs(p - 0.5) >= 0.005:
-            return p
-    return None
-
-
-def build_favorite_upset_records(master: dict[str, Any]) -> list[dict[str, Any]]:
-    """Completed pre-match predictions used to audit market-favorite upset history."""
-    latest_prediction: dict[str, dict[str, Any]] = {}
-    for path in sorted(RUNS_DIR.glob("*/predictions_enriched.json")):
-        for entry in read_json(path, []):
-            if not (entry.get("data_quality") or {}).get("real_pre_match_snapshot"):
-                continue
-            match_id = str(entry.get("id") or "")
-            if not match_id:
-                continue
-            captured_at = entry.get("captured_at") or ""
-            current = latest_prediction.get(match_id)
-            if current is None or captured_at > (current.get("captured_at") or ""):
-                latest_prediction[match_id] = entry
+            conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        except sqlite3.Error:
+            return []
+    else:
+        conn = conn_or_path
+    try:
+        rows = conn.execute(
+            """
+            SELECT pl.hltv_match_id, pl.kickoff_utc, pl.prob_team1,
+                   pl.actual_team1_win, pl.prediction_regime,
+                   t1.hltv_id, t1.name, t2.hltv_id, t2.name
+            FROM prediction_ledger pl
+            JOIN teams t1 ON t1.team_id=pl.team1_id
+            JOIN teams t2 ON t2.team_id=pl.team2_id
+            WHERE pl.ledger_status='evaluated'
+              AND pl.actual_team1_win IN (0, 1)
+              AND pl.prob_team1 > 0 AND pl.prob_team1 < 1
+            ORDER BY pl.kickoff_utc, pl.ledger_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        if owns_connection:
+            conn.close()
 
     records: list[dict[str, Any]] = []
-    for match_id, entry in latest_prediction.items():
-        record = master.get(match_id, {})
-        if record.get("status") != "completed" or not record.get("score"):
+    for row in rows:
+        probability = float(row[2])
+        favorite_probability = max(probability, 1.0 - probability)
+        if favorite_probability < threshold:
             continue
-        captured_at = parse_iso(entry.get("captured_at"))
-        completed_at = parse_iso(record.get("completed_at"))
-        if captured_at and completed_at and captured_at > completed_at:
+        team1_key = _team_history_key(row[5], row[6])
+        team2_key = _team_history_key(row[7], row[8])
+        if not team1_key or not team2_key:
             continue
-
-        score = record.get("score") or {}
-        score1 = parse_int(score.get("team1"))
-        score2 = parse_int(score.get("team2"))
-        if score1 is None or score2 is None or score1 == score2:
-            continue
-        match_detail = ((record.get("detail") or {}).get("match") or {})
-        team1 = ((entry.get("team1") or {}).get("name") or (match_detail.get("team1") or {}).get("name"))
-        team2 = ((entry.get("team2") or {}).get("name") or (match_detail.get("team2") or {}).get("name"))
-        t1, t2 = clean_team(team1), clean_team(team2)
-        if not t1 or not t2:
-            continue
-        market_p1 = _market_probability_team1(entry, record)
-        favorite_side = "team1" if market_p1 is not None and market_p1 >= 0.5 else "team2" if market_p1 is not None else None
-        favorite_key = t1 if favorite_side == "team1" else t2 if favorite_side == "team2" else None
-        winner_key = t1 if score1 > score2 else t2
+        favorite_side = "team1" if probability >= 0.5 else "team2"
+        favorite_key = team1_key if favorite_side == "team1" else team2_key
+        actual_team1_win = bool(int(row[3]))
+        winner_key = team1_key if actual_team1_win else team2_key
         records.append(
             {
-                "match_id": match_id,
-                "date": record.get("date") or entry.get("date"),
-                "date_obj": parse_date(record.get("date") or entry.get("date")),
-                "team1_key": t1,
-                "team2_key": t2,
+                "match_id": str(row[0] or ""),
+                "date": str(row[1] or "")[:10],
+                "date_obj": parse_iso(str(row[1] or "")),
+                "team1_key": team1_key,
+                "team2_key": team2_key,
                 "favorite_key": favorite_key,
                 "favorite_side": favorite_side,
-                "favorite_probability": (
-                    max(market_p1, 1.0 - market_p1) if market_p1 is not None else None
-                ),
-                "favorite_source": "market_opening_or_snapshot_odds" if market_p1 is not None else "missing_market_odds",
+                "favorite_probability": favorite_probability,
+                "favorite_source": "prediction_ledger_frozen_model",
+                "prediction_regime": row[4],
                 "winner_key": winner_key,
-                "favorite_lost": bool(favorite_key and winner_key != favorite_key),
+                "favorite_lost": winner_key != favorite_key,
             }
         )
-    records.sort(key=lambda row: (row.get("date_obj") or datetime.min, row.get("match_id") or ""))
     return records
 
 
@@ -2473,35 +2623,41 @@ def favorite_upset_summary(
     records: list[dict[str, Any]],
     favorite_key: str,
     match_dt: datetime | None,
-    window_days: int = 90,
+    window_days: int | None = None,
 ) -> dict[str, Any]:
+    """Summarize how often this team lost when the model favored it >=51%."""
+
+    source = "prediction_ledger_evaluated_frozen_prematch"
     if not favorite_key:
         return {
             "window_days": window_days,
             "favorite_losses": 0,
             "favorite_matches": 0,
             "played_matches": 0,
-            "market_odds_matches": 0,
             "favorite_loss_rate": None,
             "risk_label": "sin datos",
-            "source": "market_opening_or_snapshot_odds",
+            "source": source,
+            "odds_required": False,
+            "minimum_favorite_probability": MODEL_FAVORITE_MIN_PROBABILITY,
+            "history_scope": "all_database_history" if window_days is None else "rolling_window",
         }
     asof = match_dt or datetime.utcnow()
-    start = asof - timedelta(days=window_days)
+    start = asof - timedelta(days=window_days) if window_days is not None else None
     team_rows = [
-        row for row in records
-        if row.get("date_obj") and start <= row["date_obj"] < asof
+        row
+        for row in records
+        if row.get("date_obj")
+        and (start is None or start <= row["date_obj"])
+        and row["date_obj"] < asof
         and favorite_key in {row.get("team1_key"), row.get("team2_key")}
     ]
-    market_rows = [row for row in team_rows if row.get("favorite_source") == "market_opening_or_snapshot_odds"]
-    favorite_rows = [row for row in market_rows if row.get("favorite_key") == favorite_key]
+    favorite_rows = [row for row in team_rows if row.get("favorite_key") == favorite_key]
     favorite_losses = sum(1 for row in favorite_rows if row.get("favorite_lost"))
     favorite_matches = len(favorite_rows)
     played_matches = len(team_rows)
-    market_odds_matches = len(market_rows)
     loss_rate = favorite_losses / favorite_matches if favorite_matches else None
-    if market_odds_matches == 0:
-        risk_label = "sin odds hist."
+    if favorite_matches == 0:
+        risk_label = "sin predicciones hist."
     elif favorite_matches < 3:
         risk_label = "muestra baja"
     elif loss_rate is not None and loss_rate >= 0.35:
@@ -2515,17 +2671,40 @@ def favorite_upset_summary(
         "favorite_losses": favorite_losses,
         "favorite_matches": favorite_matches,
         "played_matches": played_matches,
-        "market_odds_matches": market_odds_matches,
         "favorite_loss_rate": loss_rate,
         "risk_label": risk_label,
-        "source": "market_opening_or_snapshot_odds",
-        "window_start": start.strftime("%Y-%m-%d"),
+        "source": source,
+        "odds_required": False,
+        "minimum_favorite_probability": MODEL_FAVORITE_MIN_PROBABILITY,
+        "history_scope": "all_database_history" if window_days is None else "rolling_window",
+        "database_evaluated_predictions": len(records),
+        "window_start": start.strftime("%Y-%m-%d") if start is not None else None,
         "as_of": asof.strftime("%Y-%m-%d"),
     }
 
 
 def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict[str, Any]) -> list[dict[str, str]]:
     flags = []
+    freshness = entry.get("data_freshness") or {}
+    if freshness.get("status") == "stale":
+        age = freshness.get("age_hours")
+        age_text = f"{float(age):.1f} h" if age is not None else "edad desconocida"
+        cause = freshness.get("cause") or "unknown"
+        flags.append(
+            {
+                "level": "danger",
+                "code": "DATA_STALE",
+                "message": f"Datos HLTV obsoletos ({age_text}); causa={cause}.",
+            }
+        )
+    if freshness.get("fallback_used"):
+        flags.append(
+            {
+                "level": "warning",
+                "code": "DATA_FALLBACK",
+                "message": "El scrape falló y esta predicción reutiliza el último lote HLTV disponible.",
+            }
+        )
     odds = entry.get("odds") or {}
     controls = entry.get("controls") or {}
     market = controls.get("market") or {}
@@ -2543,7 +2722,9 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         flags.append({"level": "info", "code": "LOW_ODDS_SOURCES", "message": "Pocas casas de apuestas disponibles."})
 
     if market.get("drift_abs") is not None and market["drift_abs"] >= 0.06:
-        flags.append({"level": "warning", "code": "ODDS_STRONG_DRIFT", "message": "Movimiento fuerte de odds desde apertura."})
+        flags.append(
+            {"level": "warning", "code": "ODDS_STRONG_DRIFT", "message": "Movimiento fuerte de odds desde apertura."}
+        )
     if market.get("consensus_label") == "low":
         flags.append({"level": "warning", "code": "LOW_MARKET_CONSENSUS", "message": "Las casas no estan alineadas."})
 
@@ -2551,7 +2732,13 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         flags.append({"level": "warning", "code": "BO1_HIGH_VARIANCE", "message": "BO1 suele tener mas varianza."})
 
     if min(features["matches_team1"], features["matches_team2"]) < 10:
-        flags.append({"level": "warning", "code": "LOW_TEAM_HISTORY", "message": "Al menos un equipo tiene poca historia reciente."})
+        flags.append(
+            {
+                "level": "warning",
+                "code": "LOW_TEAM_HISTORY",
+                "message": "Al menos un equipo tiene poca historia reciente.",
+            }
+        )
 
     if abs(features["elo_diff"]) < 40:
         flags.append({"level": "info", "code": "CLOSE_ELO", "message": "Elo muy parejo; partido menos estable."})
@@ -2562,11 +2749,12 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         flags.append({"level": "info", "code": "UNKNOWN_EVENT", "message": "Poco historico para este torneo."})
 
     if min(features["player_coverage_team1"], features["player_coverage_team2"]) < 0.8:
-        flags.append({"level": "warning", "code": "LOW_PLAYER_STATS", "message": "Baja cobertura de stats de jugadores."})
+        flags.append(
+            {"level": "warning", "code": "LOW_PLAYER_STATS", "message": "Baja cobertura de stats de jugadores."}
+        )
 
     roster_integrities = [
-        ((entry.get("rosters") or {}).get(side) or {}).get("integrity") or {}
-        for side in ("team1", "team2")
+        ((entry.get("rosters") or {}).get(side) or {}).get("integrity") or {} for side in ("team1", "team2")
     ]
     if any(integrity.get("status") == "mismatch" for integrity in roster_integrities):
         flags.append(
@@ -2586,7 +2774,13 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         )
 
     if map_pool.get("status") == "low_data":
-        flags.append({"level": "info", "code": "LOW_MAP_POOL_DATA", "message": "Poco dato real para estimar pool de mapas pre-partido."})
+        flags.append(
+            {
+                "level": "info",
+                "code": "LOW_MAP_POOL_DATA",
+                "message": "Poco dato real para estimar pool de mapas pre-partido.",
+            }
+        )
     elif abs(map_pool.get("map_pool_advantage_team1") or 0) >= 0.12:
         flags.append({"level": "info", "code": "MAP_POOL_EDGE", "message": "Hay ventaja relevante en pool de mapas."})
 
@@ -2602,12 +2796,10 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
         details = []
         for side_roster in changed_rosters:
             players_in = (
-                ", ".join(player["name"] for player in side_roster.get("players_in") or [])
-                or "sin alta identificada"
+                ", ".join(player["name"] for player in side_roster.get("players_in") or []) or "sin alta identificada"
             )
             players_out = (
-                ", ".join(player["name"] for player in side_roster.get("players_out") or [])
-                or "sin baja identificada"
+                ", ".join(player["name"] for player in side_roster.get("players_out") or []) or "sin baja identificada"
             )
             details.append(
                 f"{side_roster.get('team_name') or 'Equipo'}: entra {players_in}; "
@@ -2623,10 +2815,7 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
             },
         )
 
-    if any(
-        side_roster.get("announced_standins")
-        for side_roster in roster_changes.values()
-    ):
+    if any(side_roster.get("announced_standins") for side_roster in roster_changes.values()):
         flags.append(
             {
                 "level": "warning",
@@ -2634,12 +2823,8 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
                 "message": "La alineacion anunciada identifica al menos un stand-in.",
             }
         )
-    elif any(
-        (roster.get(side) or {}).get("standin_risk")
-        for side in ("team1", "team2")
-    ) and not all(
-        (entry.get("rosters", {}).get(side) or {}).get("announced_lineup_complete")
-        for side in ("team1", "team2")
+    elif any((roster.get(side) or {}).get("standin_risk") for side in ("team1", "team2")) and not all(
+        (entry.get("rosters", {}).get(side) or {}).get("announced_lineup_complete") for side in ("team1", "team2")
     ):
         flags.append(
             {
@@ -2649,15 +2834,41 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
             }
         )
 
-    if min((player_form.get("team1") or {}).get("real_form_coverage", 0), (player_form.get("team2") or {}).get("real_form_coverage", 0)) < 0.6:
-        flags.append({"level": "info", "code": "PLAYER_FORM_BACKFILL_ONLY", "message": "Forma 5/10/20 aun depende poco de matches reales."})
+    if (
+        min(
+            (player_form.get("team1") or {}).get("real_form_coverage", 0),
+            (player_form.get("team2") or {}).get("real_form_coverage", 0),
+        )
+        < 0.6
+    ):
+        flags.append(
+            {
+                "level": "info",
+                "code": "PLAYER_FORM_BACKFILL_ONLY",
+                "message": "Forma 5/10/20 aun depende poco de matches reales.",
+            }
+        )
 
     if context.get("incentive_uncertainty") == "high":
-        flags.append({"level": "warning", "code": "INCENTIVE_RISK", "message": "Contexto con incentivo competitivo potencialmente raro."})
+        flags.append(
+            {
+                "level": "warning",
+                "code": "INCENTIVE_RISK",
+                "message": "Contexto con incentivo competitivo potencialmente raro.",
+            }
+        )
     elif context.get("incentive_uncertainty") == "medium" and not context.get("prize_context_known"):
-        flags.append({"level": "info", "code": "INCENTIVE_UNKNOWN", "message": "No se conoce aun el incentivo exacto del partido."})
+        flags.append(
+            {
+                "level": "info",
+                "code": "INCENTIVE_UNKNOWN",
+                "message": "No se conoce aun el incentivo exacto del partido.",
+            }
+        )
     if context.get("high_stakes"):
-        flags.append({"level": "info", "code": "HIGH_STAKES_PLAYOFF", "message": "Partido de alto contexto competitivo."})
+        flags.append(
+            {"level": "info", "code": "HIGH_STAKES_PLAYOFF", "message": "Partido de alto contexto competitivo."}
+        )
     if context.get("environment") == "lan":
         flags.append({"level": "info", "code": "LAN_MATCH", "message": "Partido marcado por HLTV como LAN."})
     elif context.get("environment") == "online":
@@ -2665,98 +2876,159 @@ def flag_match(entry: dict[str, Any], features: dict[str, Any], prediction: dict
     if context.get("winner_advances"):
         flags.append({"level": "info", "code": "WINNER_ADVANCES", "message": "HLTV indica que el ganador avanza."})
     if context.get("loser_eliminated"):
-        flags.append({"level": "warning", "code": "ELIMINATION_MATCH", "message": "HLTV indica contexto de eliminacion."})
+        flags.append(
+            {"level": "warning", "code": "ELIMINATION_MATCH", "message": "HLTV indica contexto de eliminacion."}
+        )
     if context.get("has_substitution_note"):
-        flags.append({"level": "warning", "code": "SUBSTITUTION_NOTE", "message": "HLTV indica sustitucion o stand-in en el partido."})
+        flags.append(
+            {
+                "level": "warning",
+                "code": "SUBSTITUTION_NOTE",
+                "message": "HLTV indica sustitucion o stand-in en el partido.",
+            }
+        )
 
     fatigue_values = [fatigue.get("team1") or {}, fatigue.get("team2") or {}]
     if any(row.get("last24_count", 0) > 0 for row in fatigue_values):
-        flags.append({"level": "warning", "code": "FATIGUE_BACK_TO_BACK", "message": "Equipo con partido en las ultimas 24h."})
+        flags.append(
+            {"level": "warning", "code": "FATIGUE_BACK_TO_BACK", "message": "Equipo con partido en las ultimas 24h."}
+        )
     elif any(row.get("same_day_total", 0) >= 2 for row in fatigue_values):
-        flags.append({"level": "warning", "code": "MULTI_MATCH_DAY", "message": "Equipo con varios partidos el mismo dia."})
+        flags.append(
+            {"level": "warning", "code": "MULTI_MATCH_DAY", "message": "Equipo con varios partidos el mismo dia."}
+        )
     if any(row.get("last48_count", 0) >= 2 for row in fatigue_values):
-        flags.append({"level": "warning", "code": "HIGH_SCHEDULE_DENSITY", "message": "Densidad alta de partidos en 48h."})
+        flags.append(
+            {"level": "warning", "code": "HIGH_SCHEDULE_DENSITY", "message": "Densidad alta de partidos en 48h."}
+        )
 
     if odds.get("available") and odds.get("average"):
         odds_p = odds["average"]["team1_implied_prob_norm"]
         if abs(odds_p - prediction["model_prob_team1"]) > 0.18:
-            flags.append({"level": "warning", "code": "MODEL_ODDS_DISAGREE", "message": "Modelo y mercado discrepan fuerte."})
+            flags.append(
+                {"level": "warning", "code": "MODEL_ODDS_DISAGREE", "message": "Modelo y mercado discrepan fuerte."}
+            )
 
     if market.get("model_edge_abs") is not None and market["model_edge_abs"] >= 0.08:
-        flags.append({"level": "info", "code": "VALUE_EDGE", "message": "El modelo ve edge relevante contra el mercado."})
+        flags.append(
+            {"level": "info", "code": "VALUE_EDGE", "message": "El modelo ve edge relevante contra el mercado."}
+        )
 
     if prediction["confidence"] < 0.58:
         flags.append({"level": "info", "code": "LOW_CONFIDENCE", "message": "Prediccion cerca de 50/50."})
 
+    if prediction.get("prediction_regime") == "no_odds" and prediction.get("estimate_confidence_level") == "low":
+        flags.append(
+            {
+                "level": "warning",
+                "code": "NO_ODDS_LOW_CONFIDENCE",
+                "message": "Sin opening odds y con incertidumbre alta del estimado.",
+            }
+        )
+
     fav_matches = favorite_upset.get("favorite_matches") or 0
     fav_loss_rate = favorite_upset.get("favorite_loss_rate")
     if fav_matches >= 3 and fav_loss_rate is not None and fav_loss_rate >= 0.35:
-        flags.append({
-            "level": "warning",
-            "code": "FAV_UPSET_HISTORY",
-            "message": "El favorito actual ha perdido a menudo cuando era favorito en la ventana reciente.",
-        })
+        flags.append(
+            {
+                "level": "warning",
+                "code": "FAV_UPSET_HISTORY",
+                "message": (
+                    "El favorito actual ha perdido a menudo cuando el modelo "
+                    "lo marcó favorito (>=51%) en el historial causal disponible."
+                ),
+            }
+        )
     elif fav_matches >= 3 and fav_loss_rate is not None and fav_loss_rate >= 0.20:
-        flags.append({
-            "level": "info",
-            "code": "FAV_UPSET_HISTORY",
-            "message": "El favorito actual tiene algunos upsets recientes como favorito.",
-        })
+        flags.append(
+            {
+                "level": "info",
+                "code": "FAV_UPSET_HISTORY",
+                "message": (
+                    "El favorito actual registra algunos upsets cuando el modelo "
+                    "lo marcó favorito (>=51%) en el historial causal disponible."
+                ),
+            }
+        )
 
     rel = prediction.get("reliability_score")
     decision_conf = prediction.get("decision_confidence")
     if rel is not None and rel < 0.35 and prediction.get("confidence", 0.5) >= 0.65:
-        flags.append({
-            "level": "warning",
-            "code": "LOW_RELIABILITY_OVERCONFIDENCE",
-            "message": "Modelo seguro, pero con respaldo de datos bajo.",
-        })
+        flags.append(
+            {
+                "level": "warning",
+                "code": "LOW_RELIABILITY_OVERCONFIDENCE",
+                "message": "Modelo seguro, pero con respaldo de datos bajo.",
+            }
+        )
     if decision_conf is not None and decision_conf < 0.58 and prediction.get("confidence", 0.5) >= 0.58:
-        flags.append({
-            "level": "info",
-            "code": "DECISION_SHRUNK_TO_COINFLIP",
-            "message": "La capa operativa reduce la confianza por fiabilidad/mercado.",
-        })
+        flags.append(
+            {
+                "level": "info",
+                "code": "DECISION_SHRUNK_TO_COINFLIP",
+                "message": "La capa operativa reduce la confianza por fiabilidad/mercado.",
+            }
+        )
 
     if (calibration.get("all") or {}).get("n", 0) < 30:
-        flags.append({"level": "info", "code": "CALIBRATION_LOW_SAMPLE", "message": "Aun hay pocos resultados reales para calibracion diaria."})
+        flags.append(
+            {
+                "level": "info",
+                "code": "CALIBRATION_LOW_SAMPLE",
+                "message": "Aun hay pocos resultados reales para calibracion diaria.",
+            }
+        )
 
     return flags
 
 
 def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
     history = load_history(history_path)
+    freshness_report = read_json(run_dir / "freshness.json", {})
+    hltv_freshness = next(
+        (
+            source
+            for source in freshness_report.get("sources", [])
+            if isinstance(source, dict) and source.get("source_id") == "hltv"
+        ),
+        {},
+    )
+    freshness_degraded = bool(hltv_freshness) and (
+        hltv_freshness.get("status") != "fresh" or bool(hltv_freshness.get("fallback_used"))
+    )
     engine = load_model_engine(history_path)
     print(
         "[model] artefacto entrenado cargado: "
         + (engine["artifact"].metadata.get("production_model", "?") if engine else "NO (fallback logístico)")
     )
     model_metadata = engine["artifact"].metadata if engine else {}
+    production_architecture = (
+        str(getattr(engine["artifact"], "prediction_architecture", "model_a_no_odds") or "model_a_no_odds")
+        if engine
+        else "logistic_fallback"
+    )
     artifact_path = ROOT / "MODEL" / "artifacts" / "model.pkl"
     model_trace = {
         "model_version": (
-            f"{model_metadata.get('production_model', 'model')}@"
-            f"{model_metadata.get('trained_at', 'unknown')}"
-            if engine else "logistic_fallback"
+            f"{model_metadata.get('production_model', 'model')}@{model_metadata.get('trained_at', 'unknown')}"
+            if engine
+            else "logistic_fallback"
         ),
         "artifact_sha256": sha256_file(artifact_path) if engine else None,
         "config_sha256": model_metadata.get("config_sha256") if engine else None,
-        "feature_policy_sha256": (
-            sha256_json(model_metadata.get("feature_policies") or {})
-            if engine else None
-        ),
+        "feature_policy_sha256": (sha256_json(model_metadata.get("feature_policies") or {}) if engine else None),
         "production_model": model_metadata.get("production_model") if engine else None,
         "trained_at": model_metadata.get("trained_at") if engine else None,
+        "prediction_architecture": production_architecture,
         "is_fallback": not bool(engine),
     }
     external_feature_store = (
         cs2_dataio.load_external_feature_store(LIVE_DB)
-        if _CS2_OK and LIVE_DB.exists() else {"rankings": {}, "rosters": {}}
+        if _CS2_OK and LIVE_DB.exists()
+        else {"rankings": {}, "rosters": {}}
     )
     actual_lineup_store = (
-        load_actual_lineup_store(LIVE_DB)
-        if LIVE_DB.exists()
-        else {"teams": {}, "match_datetimes": {}}
+        load_actual_lineup_store(LIVE_DB) if LIVE_DB.exists() else {"teams": {}, "match_datetimes": {}}
     )
     master = load_master()
     state = build_history_state(history)
@@ -2776,7 +3048,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
     schedule_index = build_schedule_index(history, master, snapshots)
     calibration = compute_daily_calibration(master, run_dir)
     market_blend_policy = build_market_blend_policy(master)
-    favorite_upset_records = build_favorite_upset_records(master)
+    favorite_upset_records = build_favorite_upset_records()
     enriched = []
     skipped_unpublishable: dict[str, int] = defaultdict(int)
 
@@ -2809,8 +3081,12 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         player_form1 = player_form_summary(roster1, player_forms)
         player_form2 = player_form_summary(roster2, player_forms)
         map_pool = map_pool_estimate(team1.get("name") or t1, team2.get("name") or t2, map_state)
-        roster_control1 = roster_stability(team1.get("id"), profiles.get(str(team1.get("id") or "")), roster_history, run_dir)
-        roster_control2 = roster_stability(team2.get("id"), profiles.get(str(team2.get("id") or "")), roster_history, run_dir)
+        roster_control1 = roster_stability(
+            team1.get("id"), profiles.get(str(team1.get("id") or "")), roster_history, run_dir
+        )
+        roster_control2 = roster_stability(
+            team2.get("id"), profiles.get(str(team2.get("id") or "")), roster_history, run_dir
+        )
         match_context = match_context_from_snapshot(snapshot)
         match_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
         roster_change1 = roster_change_90d(
@@ -2879,7 +3155,8 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "winrate_diff": winrate(wins1) - winrate(wins2),
             "last10_winrate_diff": winrate(wins1, 10) - winrate(wins2, 10),
             "avg_score_diff": avg(diffs1) - avg(diffs2),
-            "recent_opponent_elo_diff": avg(state["opponent_elos"][t1], 1500.0) - avg(state["opponent_elos"][t2], 1500.0),
+            "recent_opponent_elo_diff": avg(state["opponent_elos"][t1], 1500.0)
+            - avg(state["opponent_elos"][t2], 1500.0),
             "h2h_winrate_centered": 0.0,
             "event_team1_matches": event1["matches"],
             "event_team2_matches": event2["matches"],
@@ -2921,14 +3198,20 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "player_weak_link_gap_team1": rating1 - rating1_min,
             "player_weak_link_gap_team2": rating2 - rating2_min,
             "player_weak_link_gap_diff": (rating1 - rating1_min) - (rating2 - rating2_min),
-            "player_kpr_diff": (roster_metric(roster1, "kpr", "avg", 0.0) or 0.0) - (roster_metric(roster2, "kpr", "avg", 0.0) or 0.0),
-            "player_kast_diff": (roster_metric(roster1, "kast", "avg", 70.0) or 70.0) - (roster_metric(roster2, "kast", "avg", 70.0) or 70.0),
-            "player_adr_diff": (roster_metric(roster1, "adr", "avg", 75.0) or 75.0) - (roster_metric(roster2, "adr", "avg", 75.0) or 75.0),
-            "player_impact_diff": (roster_metric(roster1, "impact", "avg", 1.0) or 1.0) - (roster_metric(roster2, "impact", "avg", 1.0) or 1.0),
-            "player_round_swing_diff": (roster_metric(roster1, "round_swing", "avg", 0.0) or 0.0) - (roster_metric(roster2, "round_swing", "avg", 0.0) or 0.0),
+            "player_kpr_diff": (roster_metric(roster1, "kpr", "avg", 0.0) or 0.0)
+            - (roster_metric(roster2, "kpr", "avg", 0.0) or 0.0),
+            "player_kast_diff": (roster_metric(roster1, "kast", "avg", 70.0) or 70.0)
+            - (roster_metric(roster2, "kast", "avg", 70.0) or 70.0),
+            "player_adr_diff": (roster_metric(roster1, "adr", "avg", 75.0) or 75.0)
+            - (roster_metric(roster2, "adr", "avg", 75.0) or 75.0),
+            "player_impact_diff": (roster_metric(roster1, "impact", "avg", 1.0) or 1.0)
+            - (roster_metric(roster2, "impact", "avg", 1.0) or 1.0),
+            "player_round_swing_diff": (roster_metric(roster1, "round_swing", "avg", 0.0) or 0.0)
+            - (roster_metric(roster2, "round_swing", "avg", 0.0) or 0.0),
             "player_round_swing_top2_avg_diff": (roster_metric(roster1, "round_swing", "top2_avg", 0.0) or 0.0)
             - (roster_metric(roster2, "round_swing", "top2_avg", 0.0) or 0.0),
-            "player_opening_kpr_diff": (roster_metric(roster1, "opening_kpr", "avg", 0.0) or 0.0) - (roster_metric(roster2, "opening_kpr", "avg", 0.0) or 0.0),
+            "player_opening_kpr_diff": (roster_metric(roster1, "opening_kpr", "avg", 0.0) or 0.0)
+            - (roster_metric(roster2, "opening_kpr", "avg", 0.0) or 0.0),
             "player_opening_kpr_top2_avg_diff": (roster_metric(roster1, "opening_kpr", "top2_avg", 0.0) or 0.0)
             - (roster_metric(roster2, "opening_kpr", "top2_avg", 0.0) or 0.0),
             "player_stats_window_team1": roster1.get("preferred_time_filter"),
@@ -2937,19 +3220,28 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "player_real_form_coverage_team2": player_form2["real_form_coverage"],
             "player_real_rating_team1": real_rating1,
             "player_real_rating_team2": real_rating2,
-            "player_real_rating_diff": (real_rating1 - real_rating2) if real_rating1 is not None and real_rating2 is not None else 0.0,
+            "player_real_rating_diff": (real_rating1 - real_rating2)
+            if real_rating1 is not None and real_rating2 is not None
+            else 0.0,
             "map_pool_advantage_team1": map_advantage,
             "map_pool_coverage": map_pool.get("coverage"),
             "roster_days_team1": roster_days1,
             "roster_days_team2": roster_days2,
-            "roster_days_log_diff": math.log1p(roster_days1) - math.log1p(roster_days2) if roster_snapshot_available else 0.0,
+            "roster_days_log_diff": math.log1p(roster_days1) - math.log1p(roster_days2)
+            if roster_snapshot_available
+            else 0.0,
             "roster_available": float(roster_snapshot_available),
             "roster_days_min": min(roster_days1, roster_days2) if roster_snapshot_available else 0.0,
-            "roster_size_min": min(roster_control1.get("roster_size", 0), roster_control2.get("roster_size", 0)) if roster_snapshot_available else 0.0,
-            "roster_size_diff": roster_control1.get("roster_size", 0) - roster_control2.get("roster_size", 0) if roster_snapshot_available else 0.0,
+            "roster_size_min": min(roster_control1.get("roster_size", 0), roster_control2.get("roster_size", 0))
+            if roster_snapshot_available
+            else 0.0,
+            "roster_size_diff": roster_control1.get("roster_size", 0) - roster_control2.get("roster_size", 0)
+            if roster_snapshot_available
+            else 0.0,
             "roster_standin_risk_advantage": (
                 float(bool(roster_control2.get("standin_risk"))) - float(bool(roster_control1.get("standin_risk")))
-                if roster_snapshot_available else 0.0
+                if roster_snapshot_available
+                else 0.0
             ),
             "fatigue_last24_team1": fatigue1.get("last24_count", 0),
             "fatigue_last24_team2": fatigue2.get("last24_count", 0),
@@ -2966,14 +3258,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "analytics": snapshot.get("analytics"),
         }
         announced_lineups = snapshot.get("prematch_lineups") or {}
-        event_metadata = snapshot.get("event_metadata") or ((snapshot.get("analytics") or {}).get("event_metadata")) or {}
+        event_metadata = (
+            snapshot.get("event_metadata") or ((snapshot.get("analytics") or {}).get("event_metadata")) or {}
+        )
         features.update(cs2_analytics_match_features(analytics_match))
         features.update(cs2_announced_lineup_features({"prematch_lineups": announced_lineups}))
         features.update(cs2_event_metadata_features({"event_metadata": event_metadata}))
         volatility = event_volatility(state["event_outcomes"], event)
         features["event_volatility"] = volatility["volatility"]
         features["event_volatility_label"] = volatility["label"]
-        tournament = tournament_context(event, snapshot.get("link"), snapshot.get("format"), volatility["label"], match_context)
+        tournament = tournament_context(
+            event, snapshot.get("link"), snapshot.get("format"), volatility["label"], match_context
+        )
         fatigue1["online_lan"] = tournament.get("environment") or "unknown"
         fatigue2["online_lan"] = tournament.get("environment") or "unknown"
         features.update(
@@ -2988,6 +3284,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             }
         )
         features.update(cs2_context_match_features({"match_context": tournament}))
+        ranking_snapshot_evidence: dict[str, Any] = {}
         if _CS2_OK:
             external = cs2_dataio.external_snapshot_features_asof(
                 external_feature_store,
@@ -2996,16 +3293,72 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                 match_dt,
             )
             ranking_features = external.get("ranking_snapshot_features") or {}
+            features.update(external.get("pistol_snapshot_features") or {})
+            if engine and engine.get("pistol_opponents") and match_dt is not None:
+                features.update(engine["pistol_opponents"].features(
+                    str(team1.get("id")), str(team2.get("id")),
+                    cs2_dataio.clean_team(team1.get("name")), cs2_dataio.clean_team(team2.get("name")),
+                    match_dt.date(),
+                ))
+            ranking_snapshot_evidence = external.get("ranking_snapshot_evidence") or {}
             roster_features = external.get("roster_snapshot_features") or {}
             features.update(ranking_features)
             if roster_features.get("roster_available"):
                 features.update(roster_features)
 
+        master_record = master.get(str(snapshot.get("id") or ""), {})
+        kickoff_utc = kickoff_utc_from_local(match_dt)
+        opening_odds = (
+            cs2_resolve_opening_odds(
+                current_market=snapshot.get("odds") or {},
+                current_captured_at_utc=snapshot.get("captured_at"),
+                stored_opening=master_record.get("opening_odds") or {},
+                odds_history=master_record.get("odds_history") or (),
+                kickoff_utc=kickoff_utc,
+            )
+            if _CS2_OK
+            else None
+        )
+        features.update(
+            opening_odds.feature_values() if opening_odds is not None else (cs2_no_odds_features() if _CS2_OK else {})
+        )
+        if _CS2_OK:
+            captured_at = snapshot.get("captured_at")
+            analytics_evidence = dict(snapshot.get("analytics") or {})
+            analytics_evidence["captured_at"] = captured_at
+            lineup_evidence = dict(announced_lineups)
+            lineup_evidence["captured_at"] = captured_at
+            features.update(
+                cs2_enhanced_feature_values(
+                    {
+                        "kickoff_utc": kickoff_utc,
+                        "opening_odds_captured_at_utc": (
+                            opening_odds.captured_at_utc if opening_odds is not None else None
+                        ),
+                        "player_snapshot_features": {
+                            "captured_at_max": captured_at,
+                        },
+                        "ranking_snapshot_evidence": ranking_snapshot_evidence,
+                        "analytics": analytics_evidence,
+                        "context_captured_at_utc": captured_at,
+                        "prematch_lineups": lineup_evidence,
+                    },
+                    features,
+                )
+            )
+        features.update(cs2_segment_interaction_features(features))
+
         model_epistemic_std = None
+        ensemble_disagreement = None
+        uncertainty_component_weights = [1.0]
         series_score_distribution = None
         if engine is not None:
             try:
-                model_p, model_epistemic_std = model_probability_and_uncertainty(
+                (
+                    model_p,
+                    ensemble_disagreement,
+                    model_epistemic_std,
+                ) = model_probability_and_uncertainty(
                     engine,
                     t1,
                     t2,
@@ -3039,15 +3392,50 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                 features["glicko_rd_team2"] = card2["glicko_rd"]
                 features["glicko_rating_diff"] = card1["glicko_rating"] - card2["glicko_rating"]
                 features["model_source"] = engine["artifact"].metadata.get("production_model", "model")
+                uncertainty_component_weights = engine["artifact"].component_weights_for_row(features)
             except Exception:
                 model_p = logistic_probability(features)
+                model_epistemic_std = None
+                ensemble_disagreement = None
+                uncertainty_component_weights = [1.0]
                 features["model_source"] = "logistic_fallback"
         else:
             model_p = logistic_probability(features)
             features["model_source"] = "logistic_fallback"
+        prediction_regime = (
+            engine["artifact"].prediction_regime(features)
+            if engine is not None and production_architecture in {"router_two_models", "single_mixed_lgbm"}
+            else "no_odds"
+        )
+        estimate_uncertainty = cs2_estimate_probability_uncertainty(
+            model_p,
+            ensemble_disagreement or 0.0,
+            team1_history_matches=cs2_count_history_before(state["match_dates"][t1], match_dt),
+            team2_history_matches=cs2_count_history_before(state["match_dates"][t2], match_dt),
+            component_weights=uncertainty_component_weights,
+        )
         odds = snapshot.get("odds") or {}
-        market = market_metrics(odds, odds_history_points(snapshot["id"], master, snapshot), model_p)
-        odds_p = (odds.get("average") or {}).get("team1_implied_prob_norm")
+        model_opening_market = (
+            {
+                "available": True,
+                "bookmaker_count": opening_odds.bookmaker_count,
+                "average": {
+                    "team1_decimal": opening_odds.decimal_team1,
+                    "team2_decimal": opening_odds.decimal_team2,
+                    "team1_implied_prob_norm": opening_odds.fair_prob_team1,
+                    "team2_implied_prob_norm": opening_odds.fair_prob_team2,
+                    "overround": opening_odds.overround,
+                },
+            }
+            if opening_odds is not None
+            else {}
+        )
+        market = market_metrics(
+            model_opening_market,
+            odds_history_points(snapshot["id"], master, snapshot),
+            model_p,
+        )
+        odds_p = opening_odds.fair_prob_team1 if opening_odds is not None else None
         reliability_entry = {
             "format": snapshot.get("format"),
             "data_quality": snapshot.get("data_quality"),
@@ -3055,13 +3443,59 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "team2": team2,
         }
         reliability = reliability_score(reliability_entry, features)
-        decision = decision_probability_team1(model_p, odds_p, reliability, market=market, policy=market_blend_policy)
+        if freshness_degraded:
+            freshness_factor = 0.60 if hltv_freshness.get("status") == "stale" else 0.75
+            reliability = max(0.05, min(1.0, reliability * freshness_factor))
+        market_is_embedded = prediction_regime == "odds" and production_architecture in {
+            "router_two_models",
+            "single_mixed_lgbm",
+        }
+        decision = decision_probability_team1(
+            model_p,
+            None if market_is_embedded else odds_p,
+            reliability,
+            market=market,
+            policy=market_blend_policy,
+        )
+        if market_is_embedded:
+            decision["source"] = f"{production_architecture}_opening_odds"
+            decision["market_weight"] = 0.0
+            decision["market_weight_reasons"] = ["opening_odds_embedded_in_model"]
         decision_p = decision["prob_team1"]
         decision_side = "team1" if decision_p >= 0.5 else "team2"
-        decision_favorite_key = t1 if decision_side == "team1" else t2
-        favorite_upset = favorite_upset_summary(favorite_upset_records, decision_favorite_key, match_dt)
+        decision_favorite_team = team1 if decision_side == "team1" else team2
+        decision_favorite_key = _team_history_key(
+            decision_favorite_team.get("id"),
+            decision_favorite_team.get("name"),
+        )
+        favorite_upset = favorite_upset_summary(
+            favorite_upset_records,
+            decision_favorite_key,
+            parse_iso(kickoff_utc) or match_dt,
+        )
         market_weight = decision["market_weight"]
-        blended = clamp((1.0 - market_weight) * model_p + market_weight * odds_p, 1e-4, 1 - 1e-4) if odds_p is not None else model_p
+        blended = (
+            model_p
+            if market_is_embedded
+            else clamp(
+                (1.0 - market_weight) * model_p + market_weight * odds_p,
+                1e-4,
+                1 - 1e-4,
+            )
+            if odds_p is not None
+            else model_p
+        )
+
+        estimate_fields = estimate_uncertainty.prediction_fields()
+        genuinely_uncertain_without_odds = prediction_regime == "no_odds" and (
+            reliability < 0.55
+            or max(model_p, 1.0 - model_p) < 0.60
+            or float(estimate_fields.get("estimate_band_half_width") or 0.0) >= 0.08
+        )
+        if genuinely_uncertain_without_odds:
+            estimate_fields["estimate_confidence_level"] = "low"
+        if freshness_degraded:
+            estimate_fields["estimate_confidence_level"] = "low"
 
         # Primary fields keep the calibrated stats model (Model A). Decision
         # fields are an operational layer for ranking/staking: shrink weak-data
@@ -3071,17 +3505,28 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         prediction = {
             "model_prob_team1": model_p,
             "model_epistemic_std": round(model_epistemic_std, 5) if model_epistemic_std is not None else None,
+            **estimate_fields,
+            "prediction_regime": prediction_regime,
+            "prediction_architecture": production_architecture,
+            "opening_odds_recovered": bool(opening_odds and opening_odds.recovered),
+            "opening_odds_captured_at_utc": (opening_odds.captured_at_utc if opening_odds is not None else None),
+            "data_freshness_status": hltv_freshness.get("status"),
+            "data_freshness_age_hours": hltv_freshness.get("age_hours"),
+            "data_freshness_cause": hltv_freshness.get("cause"),
+            "fallback_source_used": bool(hltv_freshness.get("fallback_used")),
             "series_score_distribution": series_score_distribution,
             "predicted_series_score": (
-                max(series_score_distribution, key=series_score_distribution.get)
-                if series_score_distribution else None
+                max(series_score_distribution, key=series_score_distribution.get) if series_score_distribution else None
             ),
             "bo3_compositional_prob_team1": (
                 round(0.5 + float(features.get("bo3_compositional_prob_centered", 0.0)), 5)
                 if (
                     features.get("bo3_compositional_available", 0.0) >= 0.5
-                    and ((model_metadata.get("feature_policies") or {}).get("bo3_map_compositional") or {}).get("enabled")
-                ) else None
+                    and ((model_metadata.get("feature_policies") or {}).get("bo3_map_compositional") or {}).get(
+                        "enabled"
+                    )
+                )
+                else None
             ),
             "odds_prob_team1": odds_p,
             "blended_prob_team1": blended,
@@ -3095,6 +3540,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "decision_favorite": team1.get("name") if decision_p >= 0.5 else team2.get("name"),
             "decision_favorite_side": decision_side,
             "decision_confidence": max(decision_p, 1 - decision_p),
+            "favorite_upset_history": favorite_upset,
             "favorite_upset_90d": favorite_upset,
             "reliability_score": reliability,
             "team1_win_percent": round(model_p * 100, 2),
@@ -3123,6 +3569,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "fatigue": {"team1": fatigue1, "team2": fatigue2},
             "favorite_upset": favorite_upset,
             "decision_policy": market_blend_policy,
+            "model_opening_odds": (opening_odds.as_dict() if opening_odds is not None else {"available": False}),
             "calibration": {
                 "all": calibration.get("all"),
                 "last_50": calibration.get("last_50"),
@@ -3135,11 +3582,13 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "date": snapshot.get("date"),
             "hour": snapshot.get("hour"),
             "captured_at": snapshot.get("captured_at"),
-            "data_quality": snapshot.get("data_quality") or {
+            "data_quality": snapshot.get("data_quality")
+            or {
                 "real_pre_match_snapshot": True,
                 "legacy_backfill": False,
                 "training_weight_hint": "high_after_result",
             },
+            "data_freshness": hltv_freshness,
             "event": event,
             "format": snapshot.get("format"),
             "link": snapshot.get("link"),
@@ -3163,10 +3612,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
     integrity_report = roster_integrity_report(enriched)
     write_json(run_dir / "roster_integrity_report.json", integrity_report)
     if integrity_report["hard_violation_count"]:
-        raise RuntimeError(
-            "Roster integrity check failed; see "
-            f"{run_dir / 'roster_integrity_report.json'}"
-        )
+        raise RuntimeError(f"Roster integrity check failed; see {run_dir / 'roster_integrity_report.json'}")
     write_json(run_dir / "predictions_enriched.json", enriched)
     if skipped_unpublishable:
         write_json(

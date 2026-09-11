@@ -372,6 +372,15 @@ se sobrescribe un run. Un build incompleto o una ACL dañada en el puntero no
 mezclan artefactos ni reemplazan al activo anterior. Todas las rutas recibidas
 por la API/CLI se restringen al árbol `TENNIS/`.
 
+Después de activar o reactivar un run ya verificado, la poda automática conserva
+el activo y solo la generación anterior más reciente (máximo dos runs). La
+selección usa `created_at_utc`, vuelve a validar manifiestos, tamaños y hashes,
+y sella el SHA-256 del manifiesto de cada generación. Falla cerrada si el
+`output`, `runs/`, el puntero o cualquier árbol de run contiene un
+enlace/junction, si cambia el puntero o si el inventario sellado queda obsoleto.
+Ese inventario se revalida antes de cada borrado y al terminar; el puntero
+activo nunca forma parte de los candidatos.
+
 El loader de entrenamiento y el contexto diario recalculan
 `FEATURE_CODE_PATHS` y exigen igualdad exacta con `code_inventory` del run. Un
 inventario ausente, mal formado o con cualquier hash distinto falla cerrado y
@@ -410,3 +419,23 @@ El directorio canónico `data/processed/features_active` solo admite
 `--gender all`. Una construcción parcial debe usar un `--output-dir`
 diagnóstico distinto dentro de `TENNIS/`; así no puede sustituir el manifiesto
 activo de los dos universos con un único género.
+
+## Estadísticas TennisRatio candidatas
+
+Los perfiles públicos contienen, por partido, porcentajes de primer servicio,
+puntos ganados con primero/segundo, aces, dobles faltas, break points,
+hold/return games y rendimiento bajo presión. `match_statistics_v1` los expone
+como columnas normalizadas desde el JSON inmutable del sidecar, sin duplicar
+los cientos de miles de observaciones existentes. La API
+`load_mapped_match_stats(D)` exige
+fecha efectiva, publicación, captura e identidad estrictamente anteriores a
+`D`; una corrección posterior crea una versión posterior y no cambia consultas
+históricas.
+
+`build_tennisratio_stats_snapshot` produce agregados recientes, cobertura y
+tasas candidatas. No forman parte aún de `MODEL_FEATURE_COLUMNS`: la primera
+captura causal es de agosto de 2026 y retrofechar estadísticas históricas sería
+una fuga de disponibilidad. Se activarán solo cuando exista muestra forward
+etiquetada suficiente, una ablación temporal mejore log-loss (Brier desempata)
+y el challenger supere la puerta normal de promoción. Hasta entonces se
+recogen diariamente y el modelo vivo permanece compatible.

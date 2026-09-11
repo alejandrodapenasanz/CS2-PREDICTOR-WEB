@@ -1,5 +1,45 @@
 # Changelog / registro de decisiones
 
+## 2026-09-04 - Renovación visible de Cloudflare sin esperas de horas
+
+- Un `403` persistente en `/stats/` pasa directamente de Scrapling HTTP al
+  navegador stealth visible; ya no deriva primero a diez reintentos HTTP con
+  cooldown creciente.
+- Si la sesión sigue bloqueada, se abre una sola renovación interactiva de
+  `cf_session`. Si no produce una cookie nueva utilizable, la URL se pone en
+  cuarentena y la pipeline continúa con el asset parcial.
+- Las esperas solo se ejecutan entre intentos: nunca después del último. El
+  helper visible devuelve error real cuando no obtiene `cf_clearance`.
+- La renovación abre la URL exacta que falló (`grab_cf.py --url`); solo acepta
+  destinos HTTPS de HLTV. Un error de apertura o una sesión inválida se registra
+  como fallo y conserva la salida parcial. Los `429` y errores de servidor sin
+  challenge mantienen sus pausas y `Retry-After`.
+
+## 2026-08-24 - Rating causal sensible al roster como challenger
+
+- Se mantiene intacto el Elo/Glicko de organización y se añade un estado paralelo
+  que compara el 5v5 anunciado pre-match con el último 5v5 real ya observado.
+- Ante al menos dos sustituciones conserva crédito proporcional sobre 1500
+  (`f=0,20+0,80×retenidos/5`) e infla la varianza de RD hacia 350; parámetros
+  versionados en `MODEL/config.yaml`.
+- La alineación real del partido actual entra exclusivamente después de emitir sus
+  features. Hay regresión de invariancia al añadir futuro, descuento/RD/convergencia
+  y cableado de la puerta de promoción.
+- `roster_glicko_cal` es candidate-only: no se fuerza en la familia de lineups ni
+  en el learner genérico. El informe compara log loss, Brier, ECE y ejemplos de
+  reconstrucciones. Beneficio esperado: robustez, no gran salto de accuracy media.
+
+## 2026-08-24 - Calibración por segmento y vía opcional de interacciones
+
+- El backtest temporal mide fiabilidad, gap, ECE y N por tramo absoluto de Elo,
+  stage y LAN/online; `N<100` queda explícitamente sin interpretar.
+- `evaluate_live_ledger.py` replica el diagnóstico desde predicciones pre-match
+  congeladas, sin mutar el ledger. Los 1.000 resultados live son un mínimo de
+  revisión, no una puerta de promoción.
+- `--segment-interactions` habilita como challenger Elo×stage,
+  Elo×LAN/online y Elo×tramo. Está apagado por defecto y debe ganar tanto la
+  selección temporal fold-local como la puerta champion/challenger.
+
 ## 2026-07-31 - Robustez de entorno: deps del modelo, SQLite en OneDrive y Python del scraper
 
 - **Deps del modelo completadas.** `cs2model.config` importa `yaml` y

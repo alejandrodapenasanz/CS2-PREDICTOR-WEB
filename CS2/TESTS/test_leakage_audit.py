@@ -71,6 +71,8 @@ class LeakageAuditTests(unittest.TestCase):
             fresh = st.emit_features(
                 r["team1_key"], r["team2_key"], r.get("date_obj"),
                 r.get("event") or "", r.get("format") or "bo3",
+                (r.get("prematch_lineups") or {}).get("team1"),
+                (r.get("prematch_lineups") or {}).get("team2"),
             )
             for key, value in fresh.items():
                 ref = X_full[i].get(key)
@@ -167,11 +169,18 @@ class RealDatabaseLeakageAuditTests(unittest.TestCase):
                 for match_id, captured_at in selected.items():
                     captured = _iso_date(captured_at)
                     self.assertIsNotNone(captured, f"{source}: falta captured_at en {match_id}")
-                    self.assertLessEqual(
-                        captured,
-                        match_dates[match_id],
-                        f"{source}: snapshot futuro seleccionado para {match_id}",
-                    )
+                    if source == "announced lineups":
+                        self.assertLess(
+                            captured,
+                            match_dates[match_id],
+                            f"{source}: snapshot no estrictamente previo para {match_id}",
+                        )
+                    else:
+                        self.assertLess(
+                            captured,
+                            match_dates[match_id],
+                            f"{source}: snapshot no estrictamente previo para {match_id}",
+                        )
 
             sampled = matches[:: max(1, len(matches) // 100)]
             for match in sampled:
@@ -184,10 +193,10 @@ class RealDatabaseLeakageAuditTests(unittest.TestCase):
                     )
                     selected_at = _iso_date(summary.get("captured_at_max"))
                     if selected_at is not None:
-                        self.assertLessEqual(
+                        self.assertLess(
                             selected_at,
                             match_dt,
-                            f"player stats: snapshot futuro seleccionado para {match['match_id']}",
+                            f"player stats: snapshot no estrictamente previo para {match['match_id']}",
                         )
 
 

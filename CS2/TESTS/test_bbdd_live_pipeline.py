@@ -82,6 +82,73 @@ class LiveDatabasePipelineTests(unittest.TestCase):
         self.assertIn("prematch_captured_at_utc", columns)
         self.assertIn("result_filled_at_utc", columns)
 
+    def test_estimate_columns_migrate_as_null_without_rewriting_legacy_rows(self) -> None:
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        self.seed_completed_match(db_path)
+        estimate_columns = (
+            "ensemble_disagreement",
+            "estimate_band_half_width",
+            "estimate_confidence_level",
+            "estimate_history_coverage",
+        )
+        conn = sqlite3.connect(db_path)
+        for table in ("predictions", "prediction_ledger"):
+            for column in estimate_columns:
+                conn.execute(f'ALTER TABLE "{table}" DROP COLUMN "{column}"')
+        conn.execute(
+            """
+            INSERT INTO predictions(
+                match_id, hltv_match_id, model_version, predicted_at_utc, prob_team1,
+                decision_confidence, reliability_score, prediction_json
+            ) VALUES (
+                1, '2390001', 'legacy@v1', '2026-01-02T10:00:00Z', 0.7,
+                0.7, 0.8, '{}'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO prediction_ledger(
+                match_id, hltv_match_id, team1_id, team2_id, kickoff_utc,
+                predicted_at_utc, model_version, prob_team1, prediction_json,
+                ledger_status, created_at_utc, updated_at_utc
+            ) VALUES (
+                1, '2390001', 1, 2, '2026-01-02T18:00:00Z',
+                '2026-01-02T10:00:00Z', 'legacy@v1', 0.7, '{}',
+                'evaluated', '2026-01-02T10:00:00Z', '2026-01-02T20:00:00Z'
+            )
+            """
+        )
+        legacy_columns = {
+            table: [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+            for table in ("predictions", "prediction_ledger")
+        }
+        before = {
+            table: conn.execute(
+                f'SELECT {", ".join(f"[{column}]" for column in columns)} FROM "{table}"'
+            ).fetchone()
+            for table, columns in legacy_columns.items()
+        }
+
+        build_db.ensure_live_schema(conn)
+        build_db.ensure_live_schema(conn)
+
+        after = {
+            table: conn.execute(
+                f'SELECT {", ".join(f"[{column}]" for column in columns)} FROM "{table}"'
+            ).fetchone()
+            for table, columns in legacy_columns.items()
+        }
+        for table in ("predictions", "prediction_ledger"):
+            self.assertEqual(after[table], before[table])
+            self.assertTrue(set(estimate_columns) <= build_db.table_columns(conn, table))
+            migrated = conn.execute(
+                f'SELECT {", ".join(estimate_columns)} FROM "{table}"'
+            ).fetchone()
+            self.assertEqual(migrated, (None, None, None, None))
+        conn.close()
+
     def test_prematch_lineups_and_analytics_are_persisted_structurally(self) -> None:
         tmp, db_path = self.make_db()
         self.addCleanup(tmp.cleanup)
@@ -660,7 +727,9 @@ class LiveDatabasePipelineTests(unittest.TestCase):
 
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["id"], "2390001")
-        self.assertAlmostEqual(rows[0]["opening_odds_t1"], (0.538 + 0.513) / 2)
+        book_a = (1 / 1.80) / ((1 / 1.80) + (1 / 2.10))
+        book_b = (1 / 1.90) / ((1 / 1.90) + (1 / 2.00))
+        self.assertAlmostEqual(rows[0]["opening_odds_t1"], (book_a + book_b) / 2)
         self.assertEqual(rows[0]["opening_odds_captured_at"], "2026-01-02T09:00:00Z")
 
     def test_training_loader_deduplicates_historical_seed_and_hltv_copy(self) -> None:

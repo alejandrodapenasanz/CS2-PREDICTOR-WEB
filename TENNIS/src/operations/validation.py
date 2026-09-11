@@ -92,6 +92,7 @@ class PredictionValidity:
     match_date: str
     prediction_as_of_utc: str | None
     source_retrieved_at_utc: str | None
+    scheduled_start_utc: str | None
     player_a_slug: str | None
     player_b_slug: str | None
     model_probability_raw_a: float | None
@@ -203,6 +204,7 @@ def _prediction_failure_reasons(
     match_date: str,
     prediction_as_of_utc: str | None,
     source_retrieved_at_utc: str | None,
+    scheduled_start_utc: str | None,
     player_a_slug: str | None,
     player_b_slug: str | None,
     probability_a: float | None,
@@ -242,6 +244,8 @@ def _prediction_failure_reasons(
         reasons.append("prediction_timestamp_missing")
     if source_retrieved_at_utc is None:
         reasons.append("source_timestamp_missing")
+    if scheduled_start_utc is None:
+        reasons.append("scheduled_start_utc_missing")
     if (
         prediction_as_of_utc is not None
         and source_retrieved_at_utc is not None
@@ -250,6 +254,18 @@ def _prediction_failure_reasons(
     ):
         reasons.append("source_not_strictly_before_prediction")
     match_day = date.fromisoformat(match_date)
+    if (
+        scheduled_start_utc is not None
+        and pd.Timestamp(scheduled_start_utc).date() != match_day
+    ):
+        reasons.append("scheduled_start_date_conflict")
+    if (
+        prediction_as_of_utc is not None
+        and scheduled_start_utc is not None
+        and not pd.Timestamp(prediction_as_of_utc)
+        < pd.Timestamp(scheduled_start_utc)
+    ):
+        reasons.append("prediction_not_strictly_before_scheduled_start")
     if (
         prediction_as_of_utc is not None
         and pd.Timestamp(prediction_as_of_utc).date() > match_day
@@ -303,6 +319,11 @@ def validate_prediction_row(
         "source_retrieved_at_utc",
         required=False,
     )
+    scheduled_start = canonical_utc_datetime(
+        row.get("scheduled_start_utc"),
+        "scheduled_start_utc",
+        required=False,
+    )
     slug_a = canonical_slug(row.get("player_a_slug"), "player_a_slug")
     slug_b = canonical_slug(row.get("player_b_slug"), "player_b_slug")
     raw_probability = optional_float(
@@ -347,6 +368,7 @@ def validate_prediction_row(
         match_date=match_date,
         prediction_as_of_utc=prediction_as_of,
         source_retrieved_at_utc=source_retrieved,
+        scheduled_start_utc=scheduled_start,
         player_a_slug=slug_a,
         player_b_slug=slug_b,
         probability_a=probability_a,
@@ -362,6 +384,7 @@ def validate_prediction_row(
         match_date=match_date,
         prediction_as_of_utc=prediction_as_of,
         source_retrieved_at_utc=source_retrieved,
+        scheduled_start_utc=scheduled_start,
         player_a_slug=slug_a,
         player_b_slug=slug_b,
         model_probability_raw_a=raw_probability,

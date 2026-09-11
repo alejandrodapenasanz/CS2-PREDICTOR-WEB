@@ -1,6 +1,6 @@
+import json
 import os
 import time
-import json
 from abc import ABC, abstractmethod
 
 
@@ -8,17 +8,18 @@ class Condition(ABC):
     @abstractmethod
     def __init__(self, *args, **kwargs) -> None:
         pass
-    
+
     @abstractmethod
     def check(self) -> bool:
         pass
+
 
 # Check if a file is older than a certain number of hours
 class FileTimeCondition(Condition):
     def __init__(self, file_path: str, hours: int = 1) -> None:
         self.file_path = file_path
         self.hours = hours
-    
+
     def check(self) -> bool:
         if not os.path.exists(self.file_path):
             return True
@@ -29,7 +30,7 @@ class FileTimeCondition(Condition):
 class JsonFileEmptyCondition(Condition):
     def __init__(self, file_path: str) -> None:
         self.file_path = file_path
-        
+
     def check(self) -> bool:
         if not os.path.exists(self.file_path):
             return True
@@ -41,10 +42,11 @@ class JsonFileEmptyCondition(Condition):
         except Exception as e:
             print(f"Error loading JSON file: {e}")
             return True
-        
+
+
 class FileExistsCondition(Condition):
-    def __init__(self, file_path:str) -> None:
+    def __init__(self, file_path: str) -> None:
         self.file_path = file_path
-        
+
     def check(self) -> bool:
         return os.path.exists(self.file_path)

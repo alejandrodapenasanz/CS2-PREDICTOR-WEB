@@ -1,0 +1,8 @@
+{
+  "brier_epsilon": 0.0005,
+  "holdout_seasons": 1,
+  "log_loss_epsilon": 0.001,
+  "metric_consistency_atol": 1e-12,
+  "minimum_holdout_rows": 120,
+  "retention_keep_latest": 2
+}

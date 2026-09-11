@@ -1,13 +1,15 @@
 from typing import Literal
-from flask import Blueprint, Response, jsonify
+
 from flasgger import swag_from
+from flask import Blueprint, Response, jsonify
 
 from hltv_scraper import HLTVScraper
 
 players_bp = Blueprint("players", __name__, url_prefix="/api/v1/players")
 
+
 @players_bp.route("/search/<string:name>", methods=["GET"])
-@swag_from('../swagger_specs/players_search.yml')
+@swag_from("../swagger_specs/players_search.yml")
 def player(name: str) -> Response | tuple[Response, Literal[404]] | tuple[Response, Literal[500]]:
     """Search player profiles by name from HLTV."""
     try:
@@ -18,8 +20,9 @@ def player(name: str) -> Response | tuple[Response, Literal[404]] | tuple[Respon
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @players_bp.route("/<string:id>/<string:player_name>", methods=["GET"])
-@swag_from('../swagger_specs/players_profile.yml')
+@swag_from("../swagger_specs/players_profile.yml")
 def player_profile(id: str, player_name: str) -> Response | tuple[Response, Literal[500]]:
     """Get player profile from HLTV."""
     try:
@@ -28,8 +31,9 @@ def player_profile(id: str, player_name: str) -> Response | tuple[Response, Lite
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 @players_bp.route("/stats/overview/<string:id>/<string:player_name>", methods=["GET"])
-@swag_from('../swagger_specs/players_stats_overview.yml')
+@swag_from("../swagger_specs/players_stats_overview.yml")
 def player_stats_overview(id: str, player_name: str) -> Response | tuple[Response, Literal[500]]:
     """Get player statistics overview from HLTV."""
     try:

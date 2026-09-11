@@ -117,78 +117,6 @@ function Invoke-Native {
     return $elapsed
 }
 
-# --- Resolucion de Python ----------------------------------------------------
-function Get-SystemPython {
-    $cmd = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $cmd) { throw "No se encontro Python en PATH." }
-    return $cmd.Source
-}
-
-function Find-CompatiblePython {
-    # Devuelve la ruta a un python.exe 3.10-3.13 registrado en el lanzador 'py',
-    # o $null. No emite errores si faltan versiones: con ErrorActionPreference=Stop
-    # el stderr de 'py' se convertiria en error terminante, asi que lo silenciamos.
-    $py = Get-Command py -ErrorAction SilentlyContinue
-    if (-not $py) { return $null }
-    $eap = $ErrorActionPreference
-    $ErrorActionPreference = 'SilentlyContinue'
-    try {
-        $listing = & py -0p 2>$null
-        foreach ($v in @('3.13', '3.12', '3.11', '3.10')) {
-            $hit = $listing | Where-Object { $_ -match ('-V:' + [regex]::Escape($v)) } | Select-Object -First 1
-            if ($hit -and ($hit -match '([A-Za-z]:\\.*python\.exe)')) { return $Matches[1] }
-        }
-    } catch {
-    } finally {
-        $ErrorActionPreference = $eap
-    }
-    return $null
-}
-
-function Get-ScraperBasePython {
-    # Scrapling (navegador stealth) requiere Python 3.10-3.13 (NO 3.14). Si no hay
-    # ninguno, intentamos instalar 3.13 automaticamente con winget (scope usuario,
-    # sin admin) para que "todo funcione" sin pasos manuales. Best-effort: si winget
-    # no esta o falla, degradamos al Python del sistema (scraper en modo HTTP).
-    $found = Find-CompatiblePython
-    if ($found) { return $found }
-
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        Write-Log "No hay Python 3.10-3.13; instalando Python 3.13 con winget (una vez, scope usuario)..." -Level WARN
-        $eap = $ErrorActionPreference
-        $ErrorActionPreference = 'Continue'
-        try {
-            & winget install --exact --id Python.Python.3.13 --scope user --silent `
-                --accept-package-agreements --accept-source-agreements 2>&1 |
-                ForEach-Object { Write-Log ([string]$_) -Level DEBUG }
-        } catch {
-            Write-Log ("winget no pudo instalar Python 3.13: " + $_.Exception.Message) -Level WARN
-        } finally {
-            $ErrorActionPreference = $eap
-        }
-        $found = Find-CompatiblePython
-        if (-not $found) {
-            $cand = Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'
-            if (Test-Path $cand) { $found = $cand }
-        }
-        if ($found) {
-            Write-Log ("Python 3.13 disponible: " + $found) -Level INFO -Color Green
-            return $found
-        }
-        Write-Log "No se pudo dejar disponible Python 3.13 tras winget; uso el del sistema (scraper en modo HTTP)." -Level WARN
-    } else {
-        Write-Log "No hay Python 3.10-3.13 ni winget para instalarlo; uso el del sistema (scraper en modo HTTP)." -Level WARN
-    }
-    return (Get-SystemPython)
-}
-
-function Test-PythonImports($python, $imports) {
-    $code = "import importlib.util, sys; sys.exit(0 if all(importlib.util.find_spec(m) for m in sys.argv[1:]) else 1)"
-    & $python -c $code @imports *> $null
-    return ($LASTEXITCODE -eq 0)
-}
-
 function Set-DefaultEnv($name, $value) {
     if (-not [Environment]::GetEnvironmentVariable($name, "Process")) {
         Set-Item -Path ("Env:" + $name) -Value $value
@@ -227,7 +155,8 @@ except ssl.SSLCertVerificationError:
 except Exception:
     print('TLS_OK')
 '@
-    $result = & (Get-SystemPython) -c $probe 2>$null
+    $python = Get-ModelBasePython -DryRun:$DryRun
+    $result = & $python -c $probe 2>$null
     if ($result -match "TLS_MITM") {
         if ($DryRun) { Write-Log "DRY-RUN: se generaria corp_ca_bundle.pem (inspeccion TLS detectada)." -Level WARN; return }
         Write-Log "Inspeccion TLS detectada; exporto el trust store de Windows a corp_ca_bundle.pem..." -Level WARN
@@ -255,90 +184,533 @@ except Exception:
     }
 }
 
-function Ensure-ModelPython {
-    <# Resuelve el Python del sistema y asegura las deps ML (instala si faltan). #>
-    param([string[]]$Imports, [string[]]$PipPackages, [switch]$DryRun)
-    $python = Get-SystemPython
-    if (-not (Test-PythonImports $python $Imports)) {
-        if ($DryRun) {
-            Write-Log "DRY-RUN: faltan deps ML; se instalarian: $($PipPackages -join ', ')" -Level WARN
-            return $python
-        }
-        Write-Log "Instalando dependencias ML en el Python del sistema..." -Level WARN
-        Invoke-Native $python (@("-m", "pip", "install") + $PipPackages) "Instalacion dependencias ML" | Out-Null
-        if (-not (Test-PythonImports $python $Imports)) {
-            throw "No se pudieron cargar las dependencias ML requeridas."
+function Test-PythonExact313 {
+    <# Devuelve true solo para CPython 3.13; no acepta otra implementacion ni minor. #>
+    param([Parameter(Mandatory)][string]$Python)
+    $code = "import platform, sys; sys.exit(0 if platform.python_implementation() == 'CPython' and sys.version_info[:2] == (3, 13) else 1)"
+    try {
+        & $Python -c $code *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
+function Find-ModelPython313 {
+    <# Localiza un CPython 3.13 exacto sin aceptar silenciosamente otro Python. #>
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($launcher) {
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            $resolved = & $launcher.Source -3.13 -c "import sys; print(sys.executable)" 2>$null | Select-Object -First 1
+            if (($LASTEXITCODE -eq 0) -and $resolved) {
+                [void]$candidates.Add(([string]$resolved).Trim())
+            }
+        } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
         }
     }
-    return $python
+
+    $system = Get-Command python -ErrorAction SilentlyContinue
+    if ($system) { [void]$candidates.Add($system.Source) }
+    if ($env:LOCALAPPDATA) {
+        [void]$candidates.Add((Join-Path $env:LOCALAPPDATA 'Programs\Python\Python313\python.exe'))
+    }
+
+    foreach ($candidate in ($candidates | Select-Object -Unique)) {
+        if ($candidate -and (Test-PythonExact313 -Python $candidate)) { return $candidate }
+    }
+    return $null
+}
+
+function Get-ModelBasePython {
+    <# Obtiene CPython 3.13 y, si es posible, lo aprovisiona con winget una vez. #>
+    param([switch]$DryRun)
+    $python = Find-ModelPython313
+    if ($python) { return $python }
+
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget -and (-not $DryRun)) {
+        Write-Log "CPython 3.13 no esta disponible; instalando Python.Python.3.13 con winget..." -Level WARN
+        $oldErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & $winget.Source install --exact --id Python.Python.3.13 --scope user --silent `
+                --accept-package-agreements --accept-source-agreements 2>&1 |
+                ForEach-Object { Write-Log ([string]$_) -Level DEBUG }
+        } finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+        }
+        $python = Find-ModelPython313
+        if ($python) { return $python }
+    }
+
+    throw "El modelo exige CPython 3.13 exacto. Instala Python 3.13 (por ejemplo, 'winget install --exact --id Python.Python.3.13 --scope user') y vuelve a ejecutar start.ps1."
+}
+
+function Assert-RequirementsLockDerived {
+    <# Valida que el lock tenga pins exactos con hashes para cada requisito directo. #>
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$RequirementsPath,
+        [Parameter(Mandatory)][string]$LockPath
+    )
+    if (-not (Test-Path -LiteralPath $RequirementsPath)) {
+        throw "No existe el manifiesto de dependencias del modelo: $RequirementsPath"
+    }
+    if (-not (Test-Path -LiteralPath $LockPath)) {
+        throw "No existe el lock de dependencias del modelo: $LockPath"
+    }
+
+    $validator = @'
+import pathlib
+import re
+import sys
+
+try:
+    from packaging.requirements import Requirement
+    from packaging.version import Version
+except ModuleNotFoundError:
+    from pip._vendor.packaging.requirements import Requirement
+    from pip._vendor.packaging.version import Version
+
+requirements_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+canonical = lambda value: re.sub(r'[-_.]+', '-', value).lower()
+
+direct = []
+for raw in requirements_path.read_text(encoding='utf-8').splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#'):
+        continue
+    try:
+        direct.append(Requirement(line))
+    except Exception as exc:
+        raise SystemExit(f'unsupported direct requirement {line!r}: {exc}') from exc
+
+pin_pattern = re.compile(
+    r'^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;\\]+)(?:\s*;\s*.+)?$'
+)
+hash_pattern = re.compile(r'--hash=sha256:[0-9a-fA-F]{64}(?:\s|\\|$)')
+pins = []
+current = None
+for raw in lock_path.read_text(encoding='utf-8').splitlines():
+    line = raw.strip()
+    candidate = line[:-1].rstrip() if line.endswith('\\') else line
+    match = pin_pattern.match(candidate)
+    if match:
+        try:
+            locked_requirement = Requirement(candidate)
+        except Exception as exc:
+            raise SystemExit(f'invalid lock requirement {candidate!r}: {exc}') from exc
+        exact = [
+            spec.version
+            for spec in locked_requirement.specifier
+            if spec.operator == '==' and '*' not in spec.version
+        ]
+        if len(exact) != 1 or len(list(locked_requirement.specifier)) != 1:
+            raise SystemExit(f'lock requirement is not one exact pin: {candidate}')
+        current = {
+            'name': canonical(locked_requirement.name),
+            'version': exact[0],
+            'active': locked_requirement.marker is None or locked_requirement.marker.evaluate(),
+            'hashed': bool(hash_pattern.search(raw)),
+        }
+        pins.append(current)
+        continue
+    if current is not None and hash_pattern.search(raw):
+        current['hashed'] = True
+
+if not direct:
+    raise SystemExit('requirements.txt has no direct requirements')
+if not pins:
+    raise SystemExit('requirements.lock.txt has no exact pins')
+active_pins = {item['name']: item['version'] for item in pins if item['active']}
+active_direct = [item for item in direct if item.marker is None or item.marker.evaluate()]
+missing = sorted(
+    canonical(item.name) for item in active_direct if canonical(item.name) not in active_pins
+)
+unhashed = sorted({item['name'] for item in pins if not item['hashed']})
+if missing:
+    raise SystemExit('direct requirements missing from lock: ' + ', '.join(missing))
+if unhashed:
+    raise SystemExit('lock pins without sha256 hashes: ' + ', '.join(unhashed))
+incompatible = []
+for requirement in active_direct:
+    version = active_pins[canonical(requirement.name)]
+    if requirement.specifier and not requirement.specifier.contains(Version(version), prereleases=True):
+        incompatible.append(f'{requirement.name} locked={version} requires={requirement.specifier}')
+if incompatible:
+    raise SystemExit('lock pins incompatible with requirements.txt: ' + ', '.join(incompatible))
+'@
+    $output = & $Python -c $validator $RequirementsPath $LockPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "requirements.lock.txt no es un lock completo derivado de requirements.txt: $($output -join ' ')"
+    }
+}
+
+function Test-LockedEnvironment {
+    <# Comprueba que cada pin activo del lock coincide exactamente con el venv. #>
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$LockPath
+    )
+    $validator = @'
+import importlib.metadata
+import pathlib
+import re
+import sys
+
+from packaging.requirements import Requirement
+from packaging.version import Version
+
+errors = []
+canonical = lambda value: re.sub(r'[-_.]+', '-', value).lower()
+active_pins = set()
+for raw in pathlib.Path(sys.argv[1]).read_text(encoding='utf-8').splitlines():
+    line = raw.strip()
+    if not line or line.startswith(('#', '--')) or '==' not in line:
+        continue
+    candidate = line[:-1].rstrip() if line.endswith('\\') else line
+    try:
+        requirement = Requirement(candidate)
+    except Exception as exc:
+        errors.append(f'invalid lock requirement {candidate!r}: {exc}')
+        continue
+    if requirement.marker is not None and not requirement.marker.evaluate():
+        continue
+    exact = [spec.version for spec in requirement.specifier if spec.operator == '==' and '*' not in spec.version]
+    if len(exact) != 1 or len(list(requirement.specifier)) != 1:
+        errors.append(f'lock requirement is not one exact pin: {candidate}')
+        continue
+    active_pins.add(canonical(requirement.name))
+    try:
+        installed = importlib.metadata.version(requirement.name)
+    except importlib.metadata.PackageNotFoundError:
+        errors.append(f'missing: {requirement.name}=={exact[0]}')
+        continue
+    if Version(installed) != Version(exact[0]):
+        errors.append(f'version mismatch: {requirement.name} installed={installed} locked={exact[0]}')
+
+installed_names = {
+    canonical(distribution.metadata['Name'])
+    for distribution in importlib.metadata.distributions()
+    if distribution.metadata.get('Name')
+}
+extras = sorted(installed_names - active_pins - {'pip'})
+if extras:
+    errors.append('unexpected distributions not present in active lock pins: ' + ', '.join(extras))
+
+if errors:
+    print('; '.join(errors))
+    raise SystemExit(1)
+'@
+    $output = & $Python -c $validator $LockPath 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Log ("El entorno Python no satisface exactamente el lock: " + ($output -join ' ')) -Level WARN
+        return $false
+    }
+    return $true
+}
+
+function Test-PipCheck {
+    <# Ejecuta pip check en el interprete indicado sin alterar el entorno. #>
+    param([Parameter(Mandatory)][string]$Python)
+    & $Python -m pip check *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-ModelRuntimeImports {
+    <# Carga dependencias criticas y sus binarios bajo la politica de Windows. #>
+    param([Parameter(Mandatory)][string]$Python)
+    & $Python -B -c @'
+import catboost
+import lightgbm
+import matplotlib
+import numpy
+import optuna
+import pandas
+import parsel
+import scipy
+import shap
+import sklearn
+import xgboost
+import yaml
+'@ *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Test-ScraperRuntimeImports {
+    <# Carga el transporte/parser compilado antes de aceptar el venv scraper. #>
+    param([Parameter(Mandatory)][string]$Python)
+    & $Python -B -c @'
+import curl_cffi
+import flask
+import lxml.etree
+import parsel
+import scrapling
+import scrapy
+'@ *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function Ensure-ModelPython {
+    <# Aprovisiona CS2/.venv desde el unico lock con hashes y valida su integridad. #>
+    param(
+        [Parameter(Mandatory)][string]$ProjectRoot,
+        [switch]$DryRun
+    )
+    $resolvedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
+    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv'))
+    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv.build'))
+    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv.previous'))
+    foreach ($managedDir in @($venvDir, $buildDir, $previousDir)) {
+        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $resolvedRoot) {
+            throw "Ruta de venv fuera del proyecto: $managedDir"
+        }
+    }
+    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
+    $requirements = Join-Path $resolvedRoot 'requirements.txt'
+    $lock = Join-Path $resolvedRoot 'requirements.lock.txt'
+    $stamp = Join-Path $venvDir '.requirements-lock.sha256'
+    $basePython = Get-ModelBasePython -DryRun:$DryRun
+
+    Assert-RequirementsLockDerived -Python $basePython -RequirementsPath $requirements -LockPath $lock
+    $lockHash = (Get-FileHash -LiteralPath $lock -Algorithm SHA256).Hash.ToLowerInvariant()
+    $venvVersionOk = (Test-Path -LiteralPath $venvPython) -and (Test-PythonExact313 -Python $venvPython)
+    $stampOk = $false
+    if ($venvVersionOk -and (Test-Path -LiteralPath $stamp)) {
+        $stampOk = ((Get-Content -LiteralPath $stamp -Raw).Trim().ToLowerInvariant() -eq $lockHash)
+    }
+    if ($venvVersionOk -and $stampOk -and (Test-PipCheck -Python $venvPython) -and
+        (Test-LockedEnvironment -Python $venvPython -LockPath $lock) -and
+        (Test-ModelRuntimeImports -Python $venvPython)) {
+        return $venvPython
+    }
+
+    if ($DryRun) {
+        Write-Log "DRY-RUN: se crearia/repararia CS2/.venv con CPython 3.13 y requirements.lock.txt." -Level WARN
+        return $venvPython
+    }
+
+    Write-Log "Construyendo un reemplazo limpio del venv del modelo sin tocar el entorno activo." -Level WARN
+    if (Test-Path -LiteralPath $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    }
+    Invoke-Native $basePython @('-m', 'venv', $buildDir) 'Creacion candidato venv modelo CPython 3.13' | Out-Null
+    $buildPython = Join-Path $buildDir 'Scripts\python.exe'
+    Invoke-Native $buildPython @(
+        '-m', 'pip', 'install', '--no-deps', '--only-binary=:all:', '--require-hashes',
+        '-r', $lock
+    ) 'Instalacion lock candidato modelo' | Out-Null
+    if (-not (Test-PythonExact313 -Python $buildPython)) {
+        throw "El candidato del modelo no usa CPython 3.13 exacto; el entorno activo no se modifico."
+    }
+    if (-not (Test-PipCheck -Python $buildPython)) {
+        throw "pip check fallo en el candidato del modelo; el entorno activo no se modifico."
+    }
+    if (-not (Test-LockedEnvironment -Python $buildPython -LockPath $lock)) {
+        throw "El candidato del modelo no coincide exactamente con el lock; el entorno activo no se modifico."
+    }
+    if (-not (Test-ModelRuntimeImports -Python $buildPython)) {
+        throw "El candidato del modelo no puede cargar sus binarios; el entorno activo no se modifico."
+    }
+    Set-Content -LiteralPath (Join-Path $buildDir '.requirements-lock.sha256') -Value $lockHash -Encoding ascii -NoNewline
+
+    $activeBackedUp = $false
+    $candidateActivated = $false
+    try {
+        $activeExists = Test-Path -LiteralPath $venvDir
+        if ($activeExists -and (Test-Path -LiteralPath $previousDir)) {
+            Remove-Item -LiteralPath $previousDir -Recurse -Force
+        }
+        if ($activeExists) {
+            Move-Item -LiteralPath $venvDir -Destination $previousDir
+            $activeBackedUp = $true
+        } elseif (Test-Path -LiteralPath $previousDir) {
+            # Conserva un backup de una transaccion previa si el activo falta.
+            $activeBackedUp = $true
+        }
+        Move-Item -LiteralPath $buildDir -Destination $venvDir
+        $candidateActivated = $true
+
+        # Los venv no son portables: regenera scripts y entrypoints despues del
+        # rename, siempre desde el mismo interprete base y el mismo lock.
+        Invoke-Native $basePython @('-m', 'venv', '--upgrade', $venvDir) 'Reparacion rutas venv modelo' | Out-Null
+        Invoke-Native $venvPython @(
+            '-m', 'pip', 'install', '--force-reinstall', '--no-deps', '--only-binary=:all:',
+            '--require-hashes', '-r', $lock
+        ) 'Reinstalacion lock tras swap modelo' | Out-Null
+        if (-not (Test-PythonExact313 -Python $venvPython)) {
+            throw "El venv activado del modelo dejo de usar CPython 3.13."
+        }
+        if (-not (Test-PipCheck -Python $venvPython)) {
+            throw "pip check fallo despues del swap del venv del modelo."
+        }
+        if (-not (Test-LockedEnvironment -Python $venvPython -LockPath $lock)) {
+            throw "El venv del modelo no coincide con el lock despues del swap."
+        }
+        if (-not (Test-ModelRuntimeImports -Python $venvPython)) {
+            throw "El venv activado del modelo no puede cargar sus binarios."
+        }
+        Set-Content -LiteralPath $stamp -Value $lockHash -Encoding ascii -NoNewline
+    } catch {
+        $swapError = $_.Exception.Message
+        try {
+            if ($candidateActivated -and (Test-Path -LiteralPath $venvDir)) {
+                Move-Item -LiteralPath $venvDir -Destination $buildDir
+            }
+            if ($activeBackedUp -and (Test-Path -LiteralPath $previousDir)) {
+                Move-Item -LiteralPath $previousDir -Destination $venvDir
+            }
+        } catch {
+            throw "Fallo el swap del venv del modelo ($swapError) y tambien su rollback: $($_.Exception.Message)"
+        }
+        if ($activeBackedUp) {
+            throw "Fallo el swap del venv del modelo; el entorno anterior fue restaurado: $swapError"
+        }
+        if ($activeExists) {
+            throw "Fallo el swap del venv del modelo; el entorno activo original permanecio intacto: $swapError"
+        }
+        throw "Fallo el swap del venv del modelo y no existia un entorno anterior que restaurar: $swapError"
+    }
+    return $venvPython
 }
 
 function Ensure-ScraperPython {
-    <# Crea/repara el venv del scraper (Python 3.10-3.13 para Scrapling stealth). #>
+    <# Aprovisiona el venv del scraper desde su lock con hashes y wheels locales. #>
     param(
         [Parameter(Mandatory)][string]$ScraperDir,
-        [Parameter(Mandatory)][string[]]$BaseImports,
-        [Parameter(Mandatory)][string[]]$StealthImports,
         [switch]$Recreate,
         [switch]$DryRun
     )
-    $VenvPython = Join-Path $ScraperDir ".venv\Scripts\python.exe"
-    $Requirements = Join-Path $ScraperDir "requirements.txt"
-    $BasePython = Get-ScraperBasePython
+    $resolvedScraperDir = [System.IO.Path]::GetFullPath($ScraperDir).TrimEnd('\', '/')
+    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv'))
+    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv.build'))
+    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv.previous'))
+    foreach ($managedDir in @($venvDir, $buildDir, $previousDir)) {
+        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $resolvedScraperDir) {
+            throw "Ruta de venv del scraper fuera de su componente: $managedDir"
+        }
+    }
+    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
+    $requirements = Join-Path $resolvedScraperDir 'requirements.txt'
+    $lock = Join-Path $resolvedScraperDir 'requirements.lock.txt'
+    $wheelDir = Join-Path $resolvedScraperDir 'wheels'
+    $stamp = Join-Path $venvDir '.requirements-lock.sha256'
+    $basePython = Get-ModelBasePython -DryRun:$DryRun
 
-    $valid = $false
-    if ((Test-Path $VenvPython) -and (-not $Recreate)) {
-        $valid = Test-PythonImports $VenvPython ($BaseImports + $StealthImports + @('scrapling.fetchers'))
-        if (-not $valid) {
-            $valid = Test-PythonImports $VenvPython $BaseImports
-            if ($valid) {
-                Write-Log "El venv del scraper no tiene Scrapling; se recreara para anadirlo." -Level WARN
-                $valid = $false
+    if (-not (Test-Path -LiteralPath $wheelDir -PathType Container)) {
+        throw "No existe el directorio de wheels verificados del scraper: $wheelDir"
+    }
+    Assert-RequirementsLockDerived -Python $basePython -RequirementsPath $requirements -LockPath $lock
+    $lockHash = (Get-FileHash -LiteralPath $lock -Algorithm SHA256).Hash.ToLowerInvariant()
+    $versionOk = (Test-Path -LiteralPath $venvPython) -and (Test-PythonExact313 -Python $venvPython)
+    $stampOk = $false
+    if ($versionOk -and (Test-Path -LiteralPath $stamp)) {
+        $stampOk = ((Get-Content -LiteralPath $stamp -Raw).Trim().ToLowerInvariant() -eq $lockHash)
+    }
+    $valid = (-not $Recreate) -and $versionOk -and $stampOk -and
+        (Test-PipCheck -Python $venvPython) -and
+        (Test-LockedEnvironment -Python $venvPython -LockPath $lock) -and
+        (Test-ScraperRuntimeImports -Python $venvPython)
+    if ($valid) { return $venvPython }
+
+    if ($DryRun) {
+        Write-Log "DRY-RUN: se crearia/repararia el venv del scraper con CPython 3.13 y su requirements.lock.txt." -Level WARN
+        return $venvPython
+    }
+
+    Write-Log "Construyendo un reemplazo limpio del venv del scraper sin tocar el entorno activo." -Level WARN
+    if (Test-Path -LiteralPath $buildDir) {
+        Remove-Item -LiteralPath $buildDir -Recurse -Force
+    }
+    Invoke-Native $basePython @('-m', 'venv', $buildDir) 'Creacion candidato venv scraper CPython 3.13' | Out-Null
+    $buildPython = Join-Path $buildDir 'Scripts\python.exe'
+    Invoke-Native $buildPython @(
+        '-m', 'pip', 'install', '--no-deps', '--only-binary=:all:', '--require-hashes',
+        '--find-links', $wheelDir, '-r', $lock
+    ) 'Instalacion lock candidato scraper' | Out-Null
+    if (-not (Test-PythonExact313 -Python $buildPython)) {
+        throw "El candidato del scraper no usa CPython 3.13 exacto; el entorno activo no se modifico."
+    }
+    if (-not (Test-PipCheck -Python $buildPython)) {
+        throw "pip check fallo en el candidato del scraper; el entorno activo no se modifico."
+    }
+    if (-not (Test-LockedEnvironment -Python $buildPython -LockPath $lock)) {
+        throw "El candidato del scraper no coincide exactamente con el lock; el entorno activo no se modifico."
+    }
+    if (-not (Test-ScraperRuntimeImports -Python $buildPython)) {
+        throw "El candidato del scraper no puede cargar sus binarios; el entorno activo no se modifico."
+    }
+    Set-Content -LiteralPath (Join-Path $buildDir '.requirements-lock.sha256') -Value $lockHash -Encoding ascii -NoNewline
+
+    $activeBackedUp = $false
+    $candidateActivated = $false
+    try {
+        $activeExists = Test-Path -LiteralPath $venvDir
+        if ($activeExists -and (Test-Path -LiteralPath $previousDir)) {
+            Remove-Item -LiteralPath $previousDir -Recurse -Force
+        }
+        if ($activeExists) {
+            Move-Item -LiteralPath $venvDir -Destination $previousDir
+            $activeBackedUp = $true
+        } elseif (Test-Path -LiteralPath $previousDir) {
+            $activeBackedUp = $true
+        }
+        Move-Item -LiteralPath $buildDir -Destination $venvDir
+        $candidateActivated = $true
+
+        Invoke-Native $basePython @('-m', 'venv', '--upgrade', $venvDir) 'Reparacion rutas venv scraper' | Out-Null
+        Invoke-Native $venvPython @(
+            '-m', 'pip', 'install', '--force-reinstall', '--no-deps', '--only-binary=:all:',
+            '--require-hashes', '--find-links', $wheelDir, '-r', $lock
+        ) 'Reinstalacion lock tras swap scraper' | Out-Null
+        if (-not (Test-PythonExact313 -Python $venvPython)) {
+            throw "El venv activado del scraper dejo de usar CPython 3.13."
+        }
+        if (-not (Test-PipCheck -Python $venvPython)) {
+            throw "pip check fallo despues del swap del venv del scraper."
+        }
+        if (-not (Test-LockedEnvironment -Python $venvPython -LockPath $lock)) {
+            throw "El venv del scraper no coincide con el lock despues del swap."
+        }
+        if (-not (Test-ScraperRuntimeImports -Python $venvPython)) {
+            throw "El venv activado del scraper no puede cargar sus binarios."
+        }
+        Set-Content -LiteralPath $stamp -Value $lockHash -Encoding ascii -NoNewline
+    } catch {
+        $swapError = $_.Exception.Message
+        try {
+            if ($candidateActivated -and (Test-Path -LiteralPath $venvDir)) {
+                Move-Item -LiteralPath $venvDir -Destination $buildDir
             }
-        }
-    }
-
-    if (-not $valid) {
-        if ($DryRun) {
-            Write-Log "DRY-RUN: se prepararia el venv del scraper con $BasePython (venv + pip install -r requirements)." -Level WARN
-            return $VenvPython
-        }
-        Write-Log ("Preparando venv online del scraper con: " + $BasePython) -Level WARN
-        if (Test-Path (Join-Path $ScraperDir ".venv")) {
-            Remove-Item -LiteralPath (Join-Path $ScraperDir ".venv") -Recurse -Force
-        }
-        Invoke-Native $BasePython @("-m", "venv", (Join-Path $ScraperDir ".venv")) "Creacion venv scraper" | Out-Null
-        Invoke-Native $VenvPython @("-m", "pip", "install", "--upgrade", "pip") "Upgrade pip scraper" | Out-Null
-        try {
-            Invoke-Native $VenvPython @("-m", "pip", "install", "-r", $Requirements) "Instalacion requirements scraper" | Out-Null
+            if ($activeBackedUp -and (Test-Path -LiteralPath $previousDir)) {
+                Move-Item -LiteralPath $previousDir -Destination $venvDir
+            }
         } catch {
-            # Fallo tipico: Scrapling/curl_cffi/nodriver sin wheels para el Python
-            # del venv (p.ej. 3.14). Degradamos a HTTP: instalamos solo lo base y
-            # desactivamos el navegador stealth para no abortar toda la pipeline.
-            Write-Log ("Fallo instalando requirements completos del scraper; reintento solo deps HTTP base y desactivo stealth: " + $_.Exception.Message) -Level WARN
-            Invoke-Native $VenvPython @("-m", "pip", "install", "Scrapy", "cloudscraper", "requests") "Instalacion base scraper (sin stealth)" | Out-Null
-            Set-Item -Path "Env:HLTV_USE_SCRAPLING" -Value "0"
+            throw "Fallo el swap del venv del scraper ($swapError) y tambien su rollback: $($_.Exception.Message)"
         }
-        try {
-            & $VenvPython -c "from scrapling.cli import install; install([], standalone_mode=False)"
-            if ($LASTEXITCODE -ne 0) { Write-Log "'scrapling install' devolvio error; el navegador stealth podria no estar disponible." -Level WARN }
-        } catch {
-            Write-Log ("No se pudieron instalar los navegadores de Scrapling: " + $_.Exception.Message) -Level WARN
+        if ($activeBackedUp) {
+            throw "Fallo el swap del venv del scraper; el entorno anterior fue restaurado: $swapError"
         }
+        if ($activeExists) {
+            throw "Fallo el swap del venv del scraper; el entorno activo original permanecio intacto: $swapError"
+        }
+        throw "Fallo el swap del venv del scraper y no existia un entorno anterior que restaurar: $swapError"
     }
 
-    if ($DryRun) { return $VenvPython }
+    # Scrapling gestiona los binarios del navegador fuera de pip. Su fallo no
+    # altera el entorno bloqueado y queda registrado para diagnostico operativo.
+    try {
+        & $venvPython -c "from scrapling.cli import install; install([], standalone_mode=False)" `
+            2>&1 | ForEach-Object { Write-Host $_ }
+        if ($LASTEXITCODE -ne 0) { Write-Log "'scrapling install' devolvio error; revisa los binarios del navegador." -Level WARN }
+    } catch {
+        Write-Log ("No se pudieron instalar los navegadores de Scrapling: " + $_.Exception.Message) -Level WARN
+    }
 
-    if (-not (Test-PythonImports $VenvPython $BaseImports)) {
-        throw "El venv del scraper no tiene las dependencias base requeridas."
-    }
-    if (Test-PythonImports $VenvPython $StealthImports) {
-        if (Test-PythonImports $VenvPython @('scrapling.fetchers')) {
-            Write-Log "Scrapling disponible (tier HTTP impersonation + navegador stealth)." -Level DEBUG
-        }
-    } else {
-        Write-Log "Scrapling no disponible en el venv; el scraper usara requests/cloudscraper. Instala Python 3.13 para el modo stealth." -Level WARN
-        Set-Item -Path "Env:HLTV_USE_SCRAPLING" -Value "0"
-    }
-    return $VenvPython
+    return $venvPython
 }

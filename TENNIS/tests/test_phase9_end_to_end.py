@@ -21,7 +21,9 @@ from src.daily_pipeline import (
     PREDICTION_OUTPUT_COLUMNS,
     run_daily_prediction_pipeline,
 )
+from src.daily_pipeline.pipeline import _attach_feature_agenda
 from src.operations import OperationsStore
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY
 from src.tennis_explorer import (
     TennisExplorerSchemaError,
     empty_matches_dataframe,
@@ -161,6 +163,11 @@ def _parse_real_fixture() -> pd.DataFrame:
     assert len(scheduled) == 4, "La fixture debe contener cuatro ATP futuros."
     scheduled["retrieved_at_utc"] = FIXTURE_CAPTURED_AT
     scheduled["snapshot_sha256"] = FIXTURE_SHA256
+    scheduled["scheduled_start_utc"] = pd.date_range(
+        "2026-07-30T18:00:00Z",
+        periods=len(scheduled),
+        freq="1h",
+    )
     return scheduled
 
 
@@ -188,11 +195,12 @@ def _feature_context() -> object:
 
     gender_context = SimpleNamespace(
         builder=_FixtureFeatureBuilder(),
-        training_metadata=SimpleNamespace(max_date=date(2026, 7, 20)),
+        training_metadata=SimpleNamespace(max_date=date(2026, 6, 20)),
         ranking_max_date=date(2026, 7, 20),
     )
     return SimpleNamespace(
         feature_fingerprint="d" * 64,
+        source_date_policy=DEFAULT_SOURCE_DATE_POLICY,
         by_gender={"M": gender_context},
     )
 
@@ -204,14 +212,23 @@ def _run_offline_pipeline(
     """Ejecuta el orquestador con las fronteras externas inyectadas."""
 
     clock_values = iter((PREDICTION_AT, PREDICTION_AT))
+    causal = scraped.copy()
+    if not causal.empty:
+        causal["retrieved_at_utc"] = pd.Timestamp("2026-07-29T09:48:28Z")
+        causal["snapshot_sha256"] = "c" * 64
+    loaded = _attach_feature_agenda(scraped, causal)
+    mapped_with_features = mapped.copy()
+    for column in loaded.columns:
+        if column.startswith("feature_"):
+            mapped_with_features[column] = loaded[column]
     with (
         patch(
-            "src.daily_pipeline.pipeline.get_daily_matches",
-            return_value=scraped.copy(),
+            "src.daily_pipeline.pipeline._load_daily_agenda",
+            return_value=loaded,
         ) as scraper,
         patch(
             "src.daily_pipeline.pipeline.resolve_scraped_matches",
-            return_value=mapped.copy(),
+            return_value=mapped_with_features,
         ) as mapper,
         patch(
             "src.daily_pipeline.pipeline._load_active_quarantine_keys",
@@ -231,7 +248,10 @@ def _run_offline_pipeline(
             clock=lambda: next(clock_values),
             publish=False,
         )
-    scraper.assert_called_once_with(match_date=FIXTURE_DATE)
+    scraper.assert_called_once_with(
+        FIXTURE_DATE,
+        observed_local_date=FIXTURE_DATE,
+    )
     mapper.assert_called_once()
     return run.predictions
 

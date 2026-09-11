@@ -1,9 +1,11 @@
 """Transporte Scrapling mínimo y no evasivo para Tennis Explorer.
 
 El módulo adapta ``FetcherSession`` de Scrapling 0.4.12 al pequeño contrato
-HTTP usado por el cliente del proyecto. Desactiva explícitamente
-impersonación, cabeceras stealth, HTTP/3 y redirects; configura una sola
-tentativa real y no admite proxies, navegadores ni resolución de desafíos.
+HTTP usado por el cliente del proyecto. Por defecto conserva el perfil mínimo
+de Tennis Explorer; TennisRatio activa identidad TLS/cabeceras de Chrome y
+reintentos acotados. HTTP/3 permanece desactivado por fallo real de handshake.
+No admite proxies, navegadores ni resolución de desafíos cuando el HTML
+estático público ya contiene todos los datos necesarios.
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ from typing import Any, Final, Protocol
 
 SCRAPLING_REQUIRED_VERSION: Final[str] = "0.4.12"
 SCRAPLING_TIMEOUT_SECONDS: Final[int] = 30
+SCRAPLING_STATIC_BROWSER_IDENTITY: Final[str] = "chrome"
 SCRAPLING_SESSION_OPTIONS: Final[dict[str, object]] = {
     "impersonate": None,
     "stealthy_headers": False,
@@ -23,6 +26,7 @@ SCRAPLING_SESSION_OPTIONS: Final[dict[str, object]] = {
     # En Scrapling 0.4.12 este valor es el total de tentativas, no las
     # repeticiones posteriores a una primera llamada.
     "retries": 1,
+    "retry_delay": 1.0,
     "follow_redirects": False,
     "timeout": SCRAPLING_TIMEOUT_SECONDS,
     "verify": True,
@@ -75,12 +79,20 @@ class ScraplingHttpSession:
     def __init__(
         self,
         *,
+        browser_impersonation: bool = False,
+        stealthy_headers: bool = False,
+        retry_attempts: int = 1,
+        retry_delay_seconds: float = 1.0,
         session_factory: Callable[..., _ScraplingSessionManager] | None = None,
         backend_error_types: tuple[type[BaseException], ...] | None = None,
     ) -> None:
         """Crea y abre una sesión Scrapling con configuración no evasiva.
 
         Args:
+            browser_impersonation: Usa la identidad TLS fija ``chrome``.
+            stealthy_headers: Genera cabeceras coherentes con esa identidad.
+            retry_attempts: Total acotado de intentos ante errores de red.
+            retry_delay_seconds: Espera determinista entre esos intentos.
             session_factory: Factoría inyectable para tests. Si se omite,
                 carga ``FetcherSession`` de Scrapling 0.4.12 de forma perezosa.
             backend_error_types: Excepciones de transporte que deben traducirse
@@ -92,6 +104,24 @@ class ScraplingHttpSession:
                 no coincide o el backend no puede abrirse.
         """
 
+        if not isinstance(browser_impersonation, bool):
+            raise TypeError("browser_impersonation debe ser booleano.")
+        if not isinstance(stealthy_headers, bool):
+            raise TypeError("stealthy_headers debe ser booleano.")
+        if (
+            isinstance(retry_attempts, bool)
+            or not isinstance(retry_attempts, int)
+            or retry_attempts <= 0
+            or retry_attempts > 5
+        ):
+            raise ValueError("retry_attempts debe estar entre 1 y 5.")
+        if (
+            isinstance(retry_delay_seconds, bool)
+            or not isinstance(retry_delay_seconds, (int, float))
+            or retry_delay_seconds <= 0
+            or retry_delay_seconds > 30
+        ):
+            raise ValueError("retry_delay_seconds debe estar entre 0 y 30.")
         if session_factory is None:
             factory, default_error_types = _load_scrapling_dependencies()
             session_factory = factory
@@ -106,12 +136,16 @@ class ScraplingHttpSession:
         self._backend: _ScraplingBackend | None = None
 
         try:
-            manager = session_factory(**dict(SCRAPLING_SESSION_OPTIONS))
+            session_options = dict(SCRAPLING_SESSION_OPTIONS)
+            if browser_impersonation:
+                session_options["impersonate"] = SCRAPLING_STATIC_BROWSER_IDENTITY
+            session_options["stealthy_headers"] = stealthy_headers
+            session_options["retries"] = retry_attempts
+            session_options["retry_delay"] = float(retry_delay_seconds)
+            manager = session_factory(**session_options)
             backend = manager.__enter__()
         except self._backend_error_types as exc:
-            raise ScraplingTransportError(
-                f"No se pudo abrir la sesión Scrapling: {exc}"
-            ) from exc
+            raise ScraplingTransportError(f"No se pudo abrir la sesión Scrapling: {exc}") from exc
         except (TypeError, AttributeError) as exc:
             raise ScraplingTransportError(
                 f"La factoría Scrapling no cumple el contrato esperado: {exc}"
@@ -155,9 +189,7 @@ class ScraplingHttpSession:
             allow_redirects=allow_redirects,
         )
         if self._backend is None:
-            raise ScraplingTransportError(
-                "La sesión Scrapling ya está cerrada."
-            )
+            raise ScraplingTransportError("La sesión Scrapling ya está cerrada.")
 
         try:
             response = self._backend.get(url, headers=dict(headers))
@@ -178,17 +210,13 @@ class ScraplingHttpSession:
         try:
             manager.__exit__(None, None, None)
         except self._backend_error_types as exc:
-            raise ScraplingTransportError(
-                f"Falló el cierre de la sesión Scrapling: {exc}"
-            ) from exc
+            raise ScraplingTransportError(f"Falló el cierre de la sesión Scrapling: {exc}") from exc
 
     def __enter__(self) -> ScraplingHttpSession:
         """Devuelve el transporte ya abierto para uso como context manager."""
 
         if self._backend is None:
-            raise ScraplingTransportError(
-                "No se puede reabrir una sesión Scrapling cerrada."
-            )
+            raise ScraplingTransportError("No se puede reabrir una sesión Scrapling cerrada.")
         return self
 
     def __exit__(
@@ -203,8 +231,7 @@ class ScraplingHttpSession:
         self.close()
 
 
-def _load_scrapling_dependencies(
-) -> tuple[
+def _load_scrapling_dependencies() -> tuple[
     Callable[..., _ScraplingSessionManager],
     tuple[type[BaseException], ...],
 ]:
@@ -228,8 +255,7 @@ def _load_scrapling_dependencies(
         from scrapling.fetchers import FetcherSession
     except (ImportError, ModuleNotFoundError) as exc:
         raise ScraplingTransportError(
-            "Scrapling está instalado sin las dependencias oficiales "
-            "del extra [fetchers]."
+            "Scrapling está instalado sin las dependencias oficiales del extra [fetchers]."
         ) from exc
     return FetcherSession, (CurlError,)
 
@@ -240,13 +266,10 @@ def _validate_error_types(
     """Comprueba que las excepciones inyectadas forman una tupla segura."""
 
     if not isinstance(error_types, tuple) or any(
-        not isinstance(error_type, type)
-        or not issubclass(error_type, BaseException)
+        not isinstance(error_type, type) or not issubclass(error_type, BaseException)
         for error_type in error_types
     ):
-        raise TypeError(
-            "backend_error_types debe ser una tupla de excepciones."
-        )
+        raise TypeError("backend_error_types debe ser una tupla de excepciones.")
 
 
 def _validate_protocol_arguments(
@@ -259,33 +282,22 @@ def _validate_protocol_arguments(
     """Valida el contrato requests-like sin relajar la política de red."""
 
     if not isinstance(url, str) or not url.startswith("https://"):
-        raise ScraplingTransportError(
-            "ScraplingHttpSession solo admite URLs HTTPS explícitas."
-        )
+        raise ScraplingTransportError("ScraplingHttpSession solo admite URLs HTTPS explícitas.")
     if not isinstance(headers, Mapping) or any(
-        not isinstance(key, str) or not isinstance(value, str)
-        for key, value in headers.items()
+        not isinstance(key, str) or not isinstance(value, str) for key, value in headers.items()
     ):
-        raise ScraplingTransportError(
-            "Las cabeceras deben ser un mapping de cadenas."
-        )
+        raise ScraplingTransportError("Las cabeceras deben ser un mapping de cadenas.")
     if (
         not isinstance(timeout, tuple)
         or len(timeout) != 2
         or any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or value <= 0
+            isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0
             for value in timeout
         )
     ):
-        raise ScraplingTransportError(
-            "timeout debe ser una tupla positiva (connect, read)."
-        )
+        raise ScraplingTransportError("timeout debe ser una tupla positiva (connect, read).")
     if allow_redirects is not False:
-        raise ScraplingTransportError(
-            "ScraplingHttpSession prohíbe seguir redirects."
-        )
+        raise ScraplingTransportError("ScraplingHttpSession prohíbe seguir redirects.")
 
 
 def _adapt_response(response: Any) -> TransportResponse:
@@ -294,28 +306,14 @@ def _adapt_response(response: Any) -> TransportResponse:
     status = getattr(response, "status", None)
     body = getattr(response, "body", None)
     headers_value = getattr(response, "headers", None)
-    if (
-        not isinstance(status, int)
-        or isinstance(status, bool)
-        or status < 100
-        or status > 599
-    ):
-        raise ScraplingTransportError(
-            "Scrapling devolvió un estado HTTP inválido."
-        )
+    if not isinstance(status, int) or isinstance(status, bool) or status < 100 or status > 599:
+        raise ScraplingTransportError("Scrapling devolvió un estado HTTP inválido.")
     if not isinstance(body, (bytes, bytearray)):
-        raise ScraplingTransportError(
-            "Scrapling devolvió un body que no son bytes."
-        )
+        raise ScraplingTransportError("Scrapling devolvió un body que no son bytes.")
     if not isinstance(headers_value, Mapping):
-        raise ScraplingTransportError(
-            "Scrapling devolvió headers incompatibles."
-        )
+        raise ScraplingTransportError("Scrapling devolvió headers incompatibles.")
 
-    headers = {
-        str(key): str(value)
-        for key, value in headers_value.items()
-    }
+    headers = {str(key): str(value) for key, value in headers_value.items()}
     return TransportResponse(
         status_code=status,
         content=bytes(body),

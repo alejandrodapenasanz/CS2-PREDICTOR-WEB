@@ -14,6 +14,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.tennis_explorer.transport import (  # noqa: E402
     SCRAPLING_SESSION_OPTIONS,
+    SCRAPLING_STATIC_BROWSER_IDENTITY,
     ScraplingHttpSession,
     ScraplingTransportError,
 )
@@ -135,6 +136,7 @@ class ScraplingTransportTest(unittest.TestCase):
                 "stealthy_headers": False,
                 "http3": False,
                 "retries": 1,
+                "retry_delay": 1.0,
                 "follow_redirects": False,
                 "timeout": 30,
                 "verify": True,
@@ -194,6 +196,28 @@ class ScraplingTransportTest(unittest.TestCase):
                 allow_redirects=False,
             )
 
+    def test_optional_browser_identity_can_enable_coherent_stealth_headers(self) -> None:
+        """TennisRatio opts into a fixed TLS identity and coherent headers."""
+
+        backend = FakeBackend(FakePage(200, b"ok", {"Content-Type": "text/html"}))
+        manager = FakeSessionManager(backend)
+        factory = RecordingFactory(manager)
+        transport = ScraplingHttpSession(
+            browser_impersonation=True,
+            stealthy_headers=True,
+            retry_attempts=3,
+            retry_delay_seconds=2.0,
+            session_factory=factory,
+            backend_error_types=(FakeCurlError,),
+        )
+
+        self.assertEqual(factory.calls[0]["impersonate"], SCRAPLING_STATIC_BROWSER_IDENTITY)
+        self.assertIs(factory.calls[0]["stealthy_headers"], True)
+        self.assertEqual(factory.calls[0]["retries"], 3)
+        self.assertEqual(factory.calls[0]["retry_delay"], 2.0)
+        self.assertNotIn("proxy", factory.calls[0])
+        transport.close()
+
     def test_curl_error_is_translated_without_second_attempt(self) -> None:
         """Traduce CurlError y comprueba una sola llamada al backend."""
 
@@ -252,9 +276,7 @@ class ScraplingTransportTest(unittest.TestCase):
             FakePage(200, "not-bytes", {"Content-Type": "text/html"})  # type: ignore[arg-type]
         )
         transport = ScraplingHttpSession(
-            session_factory=RecordingFactory(
-                FakeSessionManager(backend)
-            ),
+            session_factory=RecordingFactory(FakeSessionManager(backend)),
             backend_error_types=(FakeCurlError,),
         )
 

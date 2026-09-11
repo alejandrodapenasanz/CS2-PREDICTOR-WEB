@@ -31,9 +31,9 @@ de fiabilidad y, donde hay, el contraste con el mercado de apuestas.
         │                          │                          │
         ▼                          ▼                          ▼
   MODEL/train.py            BBDD/build_db.py          PIPELINE/
-  → artifacts/model.pkl     → cs2.db (3 capas)        enrich_predictions.py
-    (modelo calibrado         staging/core/mart        (carga el modelo, puntúa
-     + métricas + SHAP)       + ratings point-in-time   los partidos del día +
+  → artifacts/registry/     → cs2.db (3 capas)        enrich_predictions.py
+    (versiones, métricas,     staging/core/mart        (carga la copia runtime
+     SHAP y punteros)         + ratings point-in-time   artifacts/model.pkl +
                                                         odds, roster, fatiga…)
         │                                                       │
         └──────────────────────────► ../WEB/build_web.py ◄───────┘
@@ -67,7 +67,7 @@ cd CS2
 | [`BBDD/`](BBDD/) | Esquema SQLite + `build_db.py` (init/semilla), `ingest.py` (upsert incremental), `export_master_json.py`. La base como fuente de verdad. | Documentado aquí y en `PROJECT.md` |
 | [`PIPELINE/`](PIPELINE/) | Pipeline diario: snapshot pre-partido, odds por casa, predicción del modelo, flags de fiabilidad, calibración real rolling. | Documentado aquí y en `PROJECT.md` |
 | [`../WEB/`](../WEB/) | Dashboard compartido entre deportes. La build actual publica CS2. | — |
-| [`SCRAPER/`](SCRAPER/) | Scraper online de HLTV con sesión Cloudflare, backoff, caché y fallback HTTP directo para listados. | Documentado aquí y en `PROJECT.md` |
+| [`SCRAPER/`](SCRAPER/) | Scraper online de HLTV con sesión Cloudflare, backoff, caché y entorno bloqueado fail-closed. | Documentado aquí y en `PROJECT.md` |
 | [`TESTS/`](TESTS/) | Tests transversales, simulador de cartera, gráficos y cachés locales de tooling. | `python -m pytest` |
 | [`DOCS/`](DOCS/) | Changelog, runbooks y catálogo de features futuras. | Documentación auxiliar |
 
@@ -125,6 +125,12 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
   `ROSTER_CHANGE_90D` rojo con altas, bajas y partido de referencia. Si falta
   cualquiera de las dos alineaciones completas, el estado se muestra como no
   verificable y no se genera una red flag.
+- **Rating sensible al roster (challenger):** usa esa misma evidencia causal para
+  descontar de forma proporcional el crédito Elo/Glicko cuando cambian al menos
+  2 de 5 jugadores y aumenta la RD. No sustituye al rating actual: ambos se miden
+  sobre el mismo hold-out temporal y `roster_glicko_cal` solo puede promocionar
+  pasando la selección walk-forward y la puerta champion/challenger. Sin 5v5
+  completo coincide con el rating normal y la predicción sigue disponible.
 - **Box score/mapas, historial de evento, rankings y roster:** cada familia tiene
   su columna de disponibilidad y umbral propio. `MODEL/train.py` decide `ON/OFF`
   en cada reentrenamiento; no hay switches manuales.
@@ -139,9 +145,12 @@ Hay bloques opcionales preparados pero protegidos por muestra mínima:
   probabilidades. Se activa con 500 series elegibles y al menos 10 mapas por lado;
   el veto real obtenido después del partido nunca entra como predictor.
 
-El entrenamiento también audita la calibración por formato, LAN/online, fase y
-tier de evento. Los segmentos con menos de 30 predicciones walk-forward se
-marcan como no concluyentes. La poda automática es deliberadamente conservadora:
+El entrenamiento también audita la calibración por tramos absolutos de Elo,
+LAN/online, fase, formato y tier de evento. Los segmentos con menos de 100
+predicciones walk-forward se marcan como no concluyentes; el ledger live se
+monitoriza por separado y su muestra actual no decide. La vía opcional de
+interacciones y la escalera manual están documentadas en
+[`DOCS/SEGMENT_CALIBRATION.md`](DOCS/SEGMENT_CALIBRATION.md). La poda automática es deliberadamente conservadora:
 solo retira columnas constantes o exactamente redundantes sin usar el resultado;
 VIF, permutation importance cronológica, RFE y SHAP quedan en un informe para no
 introducir selección supervisada fuera de una validación temporal anidada.
@@ -156,7 +165,8 @@ modelo por mapa todavía espera una muestra point-in-time suficiente.
 
 Walk-forward semanal (ventana expansiva, nunca k-fold aleatorio). Se evalúan
 baselines (base-rate, Elo, Glicko-2), logística, LightGBM, CatBoost y ensembles
-calibrados con Platt/isotónica/beta; se elige el de producción por **menor log loss**.
+calibrados con Platt/isotónica/beta; por **menor log loss** se elige el
+challenger interno, que aún debe superar la puerta contra el vivo.
 
 ### 4.4. Resultados vigentes (27-07-2026, 9.726 series, 7.290 OOS)
 
@@ -179,8 +189,9 @@ calibrados con Platt/isotónica/beta; se elige el de producción por **menor log
 
 ### 4.5. Accuracy por probabilidad predicha
 
-Desglose walk-forward del favorito puro del modelo. La probabilidad de esta tabla
-es siempre `max(p_team1, 1-p_team1)`; las odds no cambian el equipo elegido:
+Desglose histórico walk-forward del favorito del Modelo A sin odds. La
+probabilidad de esta tabla es `max(p_team1, 1-p_team1)`; no representa todavía
+el ranking de arquitecturas con odds incorporadas al artefacto:
 
 | Banda predicha | Partidos | Aciertos | Accuracy observada | Prob. media predicha |
 |---|---:|---:|---:|---:|
@@ -200,14 +211,20 @@ sigue en los partidos cercanos al 50%.
 Con odds de apertura guardadas (hoy `n=237`, todavía ilustrativo), el **mercado**
 queda en log loss `0.6107`; el benchmark solo se compara en ese subconjunto, no
 contra las 7.290 predicciones completas del modelo. Confirma que las odds son muy
-informativas (PROJECT.md §6.5): se usan como **benchmark a batir** y como blend
-de mercado en la web, no como feature única (canibalizaría el interés
-académico). El modelo entrenado es "Model A" (solo stats) por diseño.
+informativas (PROJECT.md §6.5). Producción compara ahora un router de dos modelos
+contra un LightGBM mixto con `NaN` nativo, siempre sobre el mismo hold-out
+temporal; la puerta champion/challenger decide si la arquitectura ganadora puede
+reemplazar al vivo. Contrato completo en `DOCS/ODDS_ARCHITECTURES.md`.
 
 ## 5. La web (dashboard)
 
 Estática (HTML+JS sobre `data.js`), **sin servidor**, estilo cyberpunk
 (negro/rojo neón). Tres vistas:
+
+La build compartida obtiene la etiqueta del modelo CS2 desde el puntero vivo
+`MODEL/artifacts/registry/latest.json` y su `metadata.json`; no deserializa el
+`model.pkl` desde WEB ni desde el entorno de TENNIS. Así, un desajuste de
+dependencias de presentación no puede ocultar en el dashboard un modelo vivo.
 
 - **Partidos** — cartelera con predicción del modelo, mercado, **fiabilidad** y
   señales; panel de detalle con ratings Glicko, mercado, pool de mapas, roster,
@@ -215,7 +232,8 @@ Estática (HTML+JS sobre `data.js`), **sin servidor**, estilo cyberpunk
 - **★ Best Opportunity** — ranking por **confianza del modelo × fiabilidad de
   los datos** (penaliza RD alta, poca historia, BO1, rival por definir). Muestra
   dónde el modelo está seguro **y** respaldado por datos. La política por
-  defecto exige confianza `>=60%` y fiabilidad `>=45%`. Cada run congela en
+  defecto conserva elegibilidad desde confianza `>=60%` y fiabilidad `>=45%`;
+  la pestaña web aplica además un mínimo visible de `>=65%`. Cada run congela en
   SQLite el score, la elegibilidad y los rankings global/diario;
   `is_best_opportunity=1` identifica el número 1 de su día. Para cada partido,
   la alineación anunciada 5v5 tiene prioridad sobre el perfil general del equipo;
@@ -226,6 +244,17 @@ Estática (HTML+JS sobre `data.js`), **sin servidor**, estilo cyberpunk
   Partidos con el flag `PREMATCH_LINEUP_INCOMPLETE`, pero nunca en Best Opportunity.
   Cada enrich escribe `roster_integrity_report.json` y aborta antes de publicar si
   detecta un roster completo incoherente.
+  También muestra la banda heurística sobre la probabilidad pura del modelo
+  (`±` puntos porcentuales y nivel alto/medio/bajo). Mide incertidumbre sobre
+  el estimado `p`, no la varianza del resultado, y no altera por sí sola el
+  ranking ni se conecta al bankroll. La penalización de staking heredada sigue
+  aislada en `model_epistemic_std`; contrato y límites en
+  `DOCS/ESTIMATE_UNCERTAINTY.md`.
+  Cada tarjeta muestra también la tasa histórica de derrotas del equipo cuando
+  una predicción oficial congelada en `prediction_ledger` lo marcó favorito con
+  probabilidad `>=51%`. Usa todo el historial causal anterior disponible y no
+  exige que el partido tuviera odds; filas sin predicción prospectiva no se
+  reconstruyen retrospectivamente.
 - **Modelo** — métricas walk-forward, importancia SHAP, curva de calibración y
   evolución temporal de la accuracy real. El selector ofrece últimos 7 días,
   1 mes, 3 meses, 6 meses y 1 año; usa agregación diaria, semanal o mensual
@@ -234,36 +263,72 @@ Estática (HTML+JS sobre `data.js`), **sin servidor**, estilo cyberpunk
 
 ## 6. Cómo ejecutarlo
 
-Requiere `python` en PATH. Instala dependencias desde `CS2/`:
+El componente de modelo exige **CPython 3.13 exacto** y vive en `CS2/.venv`.
+`start.ps1` crea o repara ese entorno sin modificar el Python global, instala
+exclusivamente el lock con hashes y valida tanto los pins como `pip check`.
+Las reparaciones se preparan primero en `.venv.build`; solo tras validarlas se
+intercambian por el entorno activo, conservando el anterior en `.venv.previous`
+para restaurarlo automáticamente si el swap falla.
+Para aprovisionarlo manualmente desde `CS2/`:
 
 ```powershell
-python -m pip install -r requirements.txt
+py -3.13 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --no-deps --only-binary=:all: `
+  --require-hashes -r requirements.lock.txt
+.\.venv\Scripts\python.exe -m pip check
 ```
 
-Para reproducir exactamente el entorno validado de Python 3.12, usa el lock:
+`requirements.txt` declara solo dependencias del modelo, enriquecimiento y
+tooling. El scraper mantiene su manifiesto, lock, wheels y venv dentro de
+`SCRAPER/hltv-scraper-api/`. `requirements.lock.txt` es el resultado completo
+para CPython 3.13 que usan producción y CI. Se regenera deliberadamente con
+hashes (nunca durante `start.ps1`) mediante:
 
 ```powershell
-python -m pip install -r requirements.lock.txt
+py -3.13 -m pip install pip==25.3 pip-tools==7.5.2
+py -3.13 -m piptools compile --resolver=backtracking --generate-hashes `
+  --allow-unsafe --strip-extras --no-emit-index-url `
+  --pip-args="--only-binary=:all:" `
+  --output-file=requirements.lock.txt requirements.txt
 ```
 
-`requirements.txt` declara rangos mantenibles; `requirements.lock.txt` es el
-resultado resuelto que usa CI. Se actualiza deliberadamente con:
+Ese pin de pip es exclusivo de la herramienta de generación: pip-tools 7.5.2
+no funciona con las APIs internas de pip 26. Es preferible usar un entorno
+temporal separado para estas herramientas, no instalarlas en el venv de producción.
 
-```powershell
-python -m pip install pip-tools==7.5.2
-python -m piptools compile --resolver backtracking --strip-extras `
-  --output-file requirements.lock.txt requirements.txt
-```
+El constraint de `numba` se mantiene en `0.65.1`: su wheel CPython 3.13 pasa
+import, JIT y SHAP `TreeExplainer` bajo Windows Application Control. La versión
+`0.66.0` fue rechazada por esa política; cualquier subida debe superar primero
+el smoke binario que ejecutan los `Ensure-*Python`.
+
+`scikit-learn==1.8.0` queda fijado en el manifiesto y en el lock: es la versión
+con la que se serializaron el vivo y `last_good`. Un cambio de versión requiere
+validar los artefactos por la puerta, no solo que `pip check` pase. El
+[contrato de persistencia de scikit-learn](https://scikit-learn.org/stable/model_persistence.html#security-maintainability-limitations)
+no garantiza cargar modelos entre versiones. No se ocultan esos avisos.
+
+Si una carpeta residual del registro deniega acceso incluso a `stat/lstat`,
+`check_retrain.py` omite únicamente esa entrada y publica `registry_warnings`
+en su JSON. `start.ps1` muestra esos avisos en consola/log y continúa usando
+los cortes de los intentos legibles y del vivo. No toma propiedad, no borra el
+residuo, no activa modelos y no modifica los punteros ni el ledger.
+
+El aprovisionamiento del scraper tambien exige CPython 3.13 exacto: instala solo
+`SCRAPER/hltv-scraper-api/requirements.lock.txt` con hashes y usa
+`SCRAPER/hltv-scraper-api/wheels/` para artefactos locales verificados. No existe
+un fallback que instale paquetes sueltos; cualquier divergencia falla antes del
+scraping.
 
 SQLite va incluido en Python.
 
 **Scraper por tiers (anti-bloqueo Cloudflare).** El scraper usa
 [Scrapling](https://scrapling.readthedocs.io): Tier 1 HTTP con impersonation TLS/JA3
 (`curl_cffi`) y Tier 2 navegador stealth que resuelve el challenge, con
-`requests`/`cloudscraper` como red de seguridad. `start.ps1` crea el venv del scraper
-con **Python 3.13** (Scrapling **no** soporta 3.14) e instala `scrapling[fetchers]` +
-navegadores automáticamente. Si no hay Python 3.10-3.13, el scraper degrada a
-`requests`/`cloudscraper` con aviso. En redes con inspección TLS (proxy corporativo),
+`requests`/`cloudscraper` como transporte HTTP incluido en el lock. `start.ps1`
+exige **CPython 3.13 exacto**, instala `scrapling[fetchers]` desde el lock y
+aprovisiona sus navegadores. Si el entorno no se puede validar, falla de forma
+explícita: no degrada a otra versión de Python ni instala dependencias sueltas.
+En redes con inspección TLS (proxy corporativo),
 `start.ps1` genera un CA bundle automáticamente. Todos los cambios de esta iteración
 están documentados en [`DOCS/runbooks/LAST_CHANGE_2026-07-06.md`](DOCS/runbooks/LAST_CHANGE_2026-07-06.md).
 
@@ -279,15 +344,25 @@ start ..\WEB\index.html      # abrir el dashboard compartido
 
 Si el scraping falla o devuelve cero datos, `start.ps1` falla por defecto: la
 pipeline principal es online y no acepta silenciosamente un run viejo. Para un
-debug puntual se puede pasar `-AllowOfflineFallback`. Entrena el modelo solo si
-falta el artefacto; fuerza reentrenamiento con `-Retrain` cuando incorpores
-features nuevas, mucho histórico nuevo o quieras recalibrar. Flags: `-SkipScrape`,
-`-AllowOfflineFallback`, `-Retrain`, `-NoDb`, `-MaxMatches N`,
+debug puntual se puede pasar `-AllowOfflineFallback`. Si existe un modelo vivo,
+su `metadata.date_max` define `live_cutoff`. Para programar el siguiente intento,
+el pipeline usa
+`attempt_cutoff = max(live_cutoff, último intento terminal válido registrado)`
+y cuenta únicamente etiquetas estrictamente posteriores a `attempt_cutoff`; al
+acumular **100** lanza el reentreno automático. Así un rechazo o aplazamiento no
+repite el mismo entrenamiento en cada run. `-Retrain` fuerza el intento manual,
+pero ambos caminos atraviesan exactamente la misma puerta de promoción, cuyo
+hold-out sigue empezando después de `live_cutoff`; entrenar no implica sustituir
+producción. `-RollbackModel` restaura el
+`last_good` validado. Flags: `-SkipScrape`, `-AllowOfflineFallback`, `-Retrain`,
+`-RollbackModel`, `-NoDb`, `-MaxMatches N`,
 `-SkipPlayerStats`, `-SkipTeamProfiles`, `-SkipSameDayRecovery`,
 `-RecoveryWindowDays N`, `-RecoveryDelay S`, `-RecreateScraperVenv`.
 
 Cada ejecución de `start.ps1` crea un transcript completo en `PIPELINE/logs/start_*.log`
-y muestra cada comando con hora, exit code y duración. Si Cloudflare bloquea el
+y muestra cada comando con hora, exit code y duración. Al cerrarse, rota como
+una unidad el transcript, JSONL, tiempos y decisiones, y conserva solo la
+ejecución actual y la anterior. Si Cloudflare bloquea el
 navegador stealth durante demasiado tiempo, el pipeline lanza automáticamente
 `grab_cf.py` para abrir una ventana visible y renovar `cf_clearance`.
 Con `-Retrain`, el trainer también recibe `--verbose` y muestra folds, estudios
@@ -317,11 +392,12 @@ desde el ultimo run completo publicado.
 Pasos sueltos (si los necesitas):
 
 ```powershell
+.\.venv\Scripts\Activate.ps1             # comandos de modelo/BBDD/tooling
 python MODEL\train.py                          # entrena desde BBDD\cs2.db → MODEL\results\REPORT.md
 python MODEL\train.py --warmup-weeks 10 --min-train 800
 python MODEL\train.py --raw <results_all.json> # modo legacy/debug si necesitas saltarte SQLite
 python MODEL\run_professional_training.py --install-deps  # sweep CatBoost/half-life/gap + output .md
-python PIPELINE\start.py                # scrape diario + update pendientes (necesita HLTV)
+& .\SCRAPER\hltv-scraper-api\.venv\Scripts\python.exe PIPELINE\start.py  # scraper aislado
 python PIPELINE\enrich_predictions.py   # puntúa el último run con el modelo
 python BBDD\build_db.py                        # crea/migra/siembra BBDD\cs2.db solo si hace falta
 python BBDD\ingest.py --run-dir <PIPELINE\runs\RUN_ID>  # upsert incremental del run
@@ -334,10 +410,26 @@ python MODEL\train.py --verbose                  # entrenamiento productivo: cor
 python MODEL\train.py --optuna-trials 8 --verbose # Optuna purgado; ya son los valores automaticos por defecto
 python MODEL\train.py --config MODEL\config.yaml --verbose # configuracion versionada; CLI tiene prioridad
 python MODEL\monitor_drift.py                  # log loss rodante, Page-Hinkley y CLV
+python MODEL\manage_models.py rollback         # restaura last_good sin reentrenar
+python MODEL\audit_promotion_consistency.py <VERSION>  # audita una puerta historica sin mutar produccion
 python MODEL\smoke_pipeline.py                 # smoke completo aislado, sin promover
 python -m ruff check MODEL BBDD PIPELINE TESTS
 python -m mypy
 python MODEL\run_professional_training.py --algorithms all --feature-profile core --half-lives 45,60,90,120,180 --wf-gaps 0,1
+```
+
+Los tests respetan la misma frontera de entornos que producción. La suite de
+modelo/BBDD usa `CS2/.venv`; los tests que importan `PIPELINE/start.py` usan el
+venv del scraper, porque ese es su intérprete productivo. CI ejecuta exactamente
+esta separación:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pytest TESTS -q `
+  --ignore=TESTS/test_hltv_parsers.py `
+  --ignore=TESTS/test_bbdd_live_pipeline.py
+& .\SCRAPER\hltv-scraper-api\.venv\Scripts\python.exe -m pytest -q `
+  SCRAPER/hltv-scraper-api/tests/test_dependency_contract.py `
+  TESTS/test_hltv_parsers.py TESTS/test_bbdd_live_pipeline.py
 ```
 
 El simulador apuesta siempre al favorito puro del modelo. Las cuotas solo
@@ -348,13 +440,17 @@ tabla `accuracy_by_confidence_band.csv` en `TESTS/graphs/`.
 Para entrenar con la mejor calidad posible: ejecuta primero un `start.ps1`
 completo para tener snapshots, odds, Analytics, contexto de torneo, rosters y
 stats de jugador actualizados e ingeridos en SQLite; luego usa
-`python MODEL\run_professional_training.py --install-deps`
+`.\.venv\Scripts\python.exe MODEL\run_professional_training.py --install-deps`
 para probar CatBoost, ensembles, half-life y gap con salida verbosa en
 `MODEL\results\professional_training_output.md`. El entrenamiento usa validacion walk-forward temporal.
 `nested_model_policy` elige cada semana solo con OOS de semanas anteriores y es
-la metrica primaria sin sesgo L1. Tras cerrar el OOS, se elige por log loss el
-candidato que se ajusta para el siguiente periodo y se guarda el artefacto final en
-`MODEL\artifacts\model.pkl` y versiona una copia en `MODEL\artifacts\registry`.
+la metrica primaria sin sesgo L1. Si hay incumbente, la receta productiva se
+congela al final de `live_cutoff` y se ajusta una única vez sobre ese prefijo. Ese
+shadow fijo predice el sufijo completo sin aprender de él. La misma receta puede
+refitearse sobre el histórico completo antes de materializar la decisión; ese
+trabajo no alimenta al shadow. El resultado puede registrarse para auditoría,
+pero **solo se publica si gana**. El commit de punteros decide si actualiza la copia runtime
+`MODEL\artifacts\model.pkl`.
 Analytics, contexto, stats de jugador, box score/mapas, historial de evento,
 rankings y roster se calculan y guardan siempre que exista evidencia previa al
 partido. Cada familia entra sola unicamente cuando supera el umbral de
@@ -373,7 +469,8 @@ valor de `C` y el log loss objetivo. Optuna se ejecuta automáticamente durante
 
 La configuracion operativa vive en `MODEL/config.yaml`. Sus dataclasses
 validadas centralizan semillas, defaults de entrenamiento, umbrales de
-auto-activacion, hiperparametros principales, drift y limites del backtest.
+auto-activacion, hiperparametros principales, drift, promoción, reentreno
+automático, retención y limites del backtest.
 Cada entreno conserva `config.effective.yaml` y `experiment_manifest.json`
 con SHA-256 de datos/config, commit Git, estado dirty, argumentos y versiones.
 
@@ -384,11 +481,136 @@ empeoramiento de CLV; el map pool se reconstruye con mapas anteriores y el
 parche solo se marca si una fuente pre-match lo proporciona explicitamente.
 
 Antes de entrenar, `start.ps1` ejecuta `BBDD/repair_integrity.py` y el health
-gate de datos. La promocion de `MODEL/artifacts/model.pkl` se bloquea si hay
-participantes provisionales, partidos online sin dos IDs HLTV confirmados, FK rotas, duplicados inequivocos, cobertura
-reciente degradada, metricas no reproducibles desde el CSV o peor log loss que
-Glicko. `prediction_ledger` congela una unica prediccion trazable por partido y
-`MODEL/evaluate_live_ledger.py` evalua exactamente el hash desplegado.
+gate de datos. El challenger se bloquea si hay participantes provisionales,
+partidos online sin dos IDs HLTV confirmados, FK rotas, duplicados inequivocos,
+cobertura reciente degradada, metricas no reproducibles desde el CSV o peor log
+loss que Glicko. Superados esos controles, todavía debe batir al modelo vivo en
+la puerta común de promoción. `prediction_ledger` congela una unica prediccion
+trazable por partido y `MODEL/evaluate_live_ledger.py` evalua exactamente el hash
+desplegado.
+
+### 6.1. Promoción, rollback y retención
+
+`MODEL/artifacts/model.pkl` es la **copia runtime** que carga el pipeline. La
+fuente versionada está en `MODEL/artifacts/registry/<timestamp>/`:
+`registry/latest.json` identifica lógicamente al vivo validado y
+`registry/last_good.json` conserva al incumbente saliente de la última promoción.
+Los punteros incluyen versión, ruta canónica y SHA-256; publicar o restaurar
+`model.pkl` se hace mediante reemplazo atómico.
+
+Antes de abrir el bloque de promoción, `recipe_mask` limita todos los ajustes a
+filas con fecha `<= live_cutoff`. Con ese prefijo se congelan las features, la
+familia `best_name`, el ajuste Optuna purgado y los pesos; después se ajusta **una
+sola vez** el shadow. El mismo objeto predice todo el sufijo `> live_cutoff` sin
+refits, actualizaciones ni acceso a sus etiquetas. Solo después se revelan las
+etiquetas para comparar shadow e incumbente sobre exactamente las mismas filas
+point-in-time e IDs.
+
+Se requieren al menos **100** partidos comunes. La métrica primaria es log loss:
+una mejora mínima de `0.001` promociona y un empeoramiento de esa magnitud
+rechaza. Dentro de esa banda de empate solo promociona una mejora Brier mínima de
+`0.0005`. Una muestra insuficiente aplaza la decisión. Rechazo o aplazamiento
+dejan sin cambios `latest.json`, `last_good.json` y `model.pkl`, y el informe
+registra `n`, cutoff, ambas métricas, deltas y razón.
+
+`promotion_decision.json` sella además la evidencia: `holdout_sha256` cubre la
+identidad emparejada (ID, fecha y etiqueta), y `prediction_sha256` cubre esos
+mismos campos junto con las probabilidades de incumbente y shadow. Esta segunda
+huella queda vacía cuando la muestra no alcanza siquiera la evaluación.
+
+Se prepara un **refit** de la misma receta congelada sobre todo el histórico
+disponible; puede calcularse antes de cerrar la comparación porque no interviene
+en ella, pero solo se publica si el shadow gana. La evidencia probabilística de
+la puerta valida el shadow fijo y su receta as-of; no es una medición independiente
+de los bytes exactos del pickle full-history. El health gate final abre
+directamente `registry/<version>/model.pkl`. Su `candidate_reference` verifica el
+SHA-256 de esos bytes y ese mismo valor es el
+`expected_candidate_sha256` obligatorio del CAS.
+
+El bundle núcleo (`model.pkl`, metadata, SHAP, manifest y config) se construye en
+un directorio de staging oculto y se mueve una sola vez a
+`registry/<timestamp>/`; sus archivos no se reescriben. Solo se permiten los
+sidecars auditables aditivos sancionados, como `promotion_decision.json` y
+`deployment.json`, que no alteran esos archivos ni el SHA del modelo. La metadata
+del núcleo es deliberadamente pre-commit: puede indicar
+`promotion_approved` y `deployment_state=pending_pointer_commit`, pero eso **no**
+demuestra que esté publicada. `latest.json` junto con el hash runtime y el recibo
+`deployment.json` confirman el despliegue; los punteros son la autoridad si el
+recibo no pudo escribirse. Cuando existe, el recibo replica ambas huellas como
+`decision_holdout_sha256` y `decision_prediction_sha256`.
+
+La publicación toma `.deployment.lock` y aplica compare-and-swap (CAS): vuelve a
+comprobar la versión y el hash esperados del incumbente, además del hash del
+challenger. Esos parámetros CAS son obligatorios (`expected_incumbent` y
+`expected_candidate_sha256`; bootstrap exige el SHA esperado del candidato) y no
+existe una vía opcional que los omita. Si algo cambió desde la evaluación, falla
+cerrada sin mover punteros.
+
+Rollback operativo:
+
+```powershell
+.\start.ps1 -RollbackModel
+python MODEL\manage_models.py rollback
+```
+
+El rollback restaura `last_good` como `latest`/`model.pkl` y rota el vivo saliente
+a `last_good`, por lo que la operación puede deshacerse de nuevo sin reentrenar.
+
+Si una migración antigua dejó ambos punteros en la misma versión, la única vía
+sancionada para fijar un rollback distinto es:
+
+```powershell
+python MODEL\manage_models.py set-last-good --version <YYYYMMDD_HHMMSSZ> --expected-sha256 <SHA256>
+```
+
+El comando carga y puntúa el artefacto, exige semilla 42 y el SHA inspeccionado,
+y bajo `.deployment.lock` aplica CAS sobre `latest`, `last_good` y el hash runtime.
+Solo sustituye atómicamente `last_good.json`; `latest.json` y `model.pkl` quedan
+byte a byte intactos. No uses este comando para saltarte la puerta de promoción:
+el operador debe elegir una versión previamente validada.
+
+La retención configurada conserva **0 versiones adicionales** del registry:
+únicamente `latest` y `last_good`, que siempre están protegidos.
+`PIPELINE/runs/` conserva los **2** últimos no referenciados, el run publicado por
+`master/manifest.json`, cualquier run todavía referenciado y todo directorio de
+nombre desconocido/no canónico. La primera poda está bloqueada: primero se genera
+y revisa una keep-list/delete-list con token ligado al estado del filesystem y
+solo una confirmación manual explícita habilita esa política. Si el plan cambia,
+el token caduca y se exige un preview nuevo.
+
+Desde `CS2/`, el preview y su confirmación explícita son:
+
+```powershell
+python MODEL\manage_models.py prune --scope all
+python MODEL\manage_models.py prune --scope all --confirm "registry=<TOKEN_REGISTRY>,runs=<TOKEN_RUNS>"
+```
+
+El primer comando no borra nada y devuelve los tokens exactos que deben sustituir
+los placeholders del segundo. Después de aprobar esa política, `start.ps1` puede
+aplicar automáticamente planes compatibles; un cambio de política o de N exige
+otra revisión manual.
+
+La aplicación mueve primero todos los candidatos a
+`.retention-quarantine/<TOKEN>/` mediante renames atómicos. Si falla el staging,
+restaura todos los nombres; si falla el borrado, deja manifest y pendientes fuera
+de los nombres canónicos. Un bloqueo de ACL/handle/antivirus durante el preflight,
+staging o borrado es **no fatal para la pipeline**: queda registrado de forma
+persistente en `MODEL/artifacts/pending_cleanup.json`, el resumen y el dashboard
+muestran la advertencia, y `latest`/`last_good` siguen protegidos. Tras corregir la
+causa, la vía sancionada de reintento para una quarantine ya creada es
+`python MODEL\manage_models.py prune --scope registry --resume <TOKEN>`.
+Un candidato bloqueado antes del staging queda protegido con la razón
+`cleanup_pending`; así las podas posteriores pueden retirar el resto de
+versiones vencidas sin volver a tocar el residuo ni ocultar la advertencia.
+Si el corte ocurrió antes del primer `rmtree`, ese comando valida la identidad de
+cada bundle y revierte el staging completo; si ocurrió después, continúa el
+borrado solo dentro de quarantine. Cualquier quarantine pendiente bloquea un
+preview confirmable; la poda automática avisa y continúa sin intentar una nueva
+mutación hasta completar su recuperación. Los errores de seguridad estructural
+(punteros inválidos, symlinks/reparse points, token obsoleto o health inconsistente)
+siguen siendo fatales y nunca se degradan a una simple advertencia.
+En Windows, los atributos `ReadOnly` se limpian solo en la copia ya situada en
+quarantine; los bundles canónicos no se modifican durante el preflight.
 
 Las paginas con participantes provisionales se archivan igualmente en
 `raw_snapshots`, de modo que el siguiente `start.ps1` puede recuperarlas sin
@@ -416,15 +638,21 @@ modificarlas no puede cambiar el lado, EV ni stake decidido en apertura.
 
 Cada entrenamiento genera tambien `MODEL\results\favorite_accuracy_bands.json`
 con el acierto walk-forward del favorito en las franjas 50-60, 60-70, 70-80,
-80-90 y 90-100%. `start.ps1 -Retrain` reconstruye despues `..\WEB\data.js`, por lo
-que la tabla de la pestaña **BBDD** queda asociada automaticamente al modelo y
-timestamp del ultimo entreno.
+80-90 y 90-100%. `start.ps1 -Retrain` reconstruye despues `..\WEB\data.js`; si
+la puerta rechaza o aplaza el challenger, la web sigue asociada al hash del vivo
+y no presenta el reentreno descartado como producción.
 
-Rutina recomendada de lunes (rapida y suficiente para operativa normal):
+Rutina manual cuando quieras evaluar un challenger sin esperar a las 100
+etiquetas posteriores a `attempt_cutoff` (la promoción puede rechazarse o
+aplazarse):
 
 ```powershell
 .\start.ps1 -Retrain
 ```
+
+En la operativa normal basta `.\start.ps1`: al llegar a 100 partidos etiquetados
+estrictamente posteriores a `attempt_cutoff` activa el mismo reentreno y la misma
+puerta automáticamente.
 
 Rutina profesional profunda (cuando quieras repetir el sweep CatBoost/half-life/gap):
 
@@ -470,13 +698,25 @@ El mayor margen de mejora (banda de partidos parejos) sigue estando en box score
 por mapa, stats de jugador point-in-time, veto real y odds historicas. Plan
 detallado en `DOCS\extra_features.md`.
 
-El Model B (stats + odds de apertura) ya está implementado como evaluación
-walk-forward separada. A 2026-07-10 hay 98 partidos unicos completados con odds de
-apertura, por debajo del mínimo configurado para concluir; se activará
-automáticamente cuando el pipeline diario acumule muestra suficiente.
+El benchmark Model B (stats + odds de apertura) se conserva. Además, el entreno
+compara automáticamente las arquitecturas productivas router y mixta cuando hay
+al menos `feature_thresholds.opening_odds` filas causales (120 por defecto), con
+métricas separadas con/sin odds y promoción por la puerta común.
 
 Estado de cobertura medido el 2026-07-10 tras deduplicar semilla+HLTV: evento
 6017/200 (ON); box score/mapas 20/200, Analytics 100/120, jugadores 88/200,
 rankings 86/200 y roster 61/200 (OFF). Contexto tiene 65/200, con 7 LAN y 58 online, por lo que sigue OFF
 hasta alcanzar tambien 50 LAN. Estos estados se recalculan automaticamente en
 cada entrenamiento.
+
+### Pistols y conversiones (candidatas)
+
+Las capturas archivadas de rondas por mapa se incorporan a tablas laterales con
+disponibilidad original verificable. El experimento `MODEL/run_pistol_ablation.py`
+compara control, pistols y conversiones sin activar nuevas variables por defecto.
+Ver [contrato, comandos y límites causales](DOCS/PISTOL_ROUNDS.md).
+
+La opción `--opponent-adjusted` contrasta el rendimiento de pistols por encima de
+lo esperado según el Elo del rival. Mantiene la puerta de promoción y exige
+además muestra nueva tras el periodo ya examinado. Ver
+[fórmula, prueba temporal y ejecución](DOCS/PISTOL_OPPONENTS.md).

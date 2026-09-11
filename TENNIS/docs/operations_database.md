@@ -26,11 +26,21 @@ predicciones publicadas antes de conocer el desenlace.
   previa del partido.
   Ejecutar `-Date` después de la jornada conserva el replay para diagnóstico,
   pero lo marca no oficial.
+- Cuando la cartelera procede de TennisRatio, el estado visible de hoy y los
+  inputs del modelo son contratos distintos. La fila puede mostrar el estado y
+  las cuotas observados hoy, pero superficie, nivel, cuotas e identidad solo
+  son elegibles como features si su captura y su resolución estaban publicadas
+  en una fecha civil estrictamente anterior a `match_date`. Sin una captura
+  causal previa la fila permanece visible, pero no se predice.
 - Predicciones, estadísticas prepartido, observaciones, settlements y
   conflictos son append-only o inmutables mediante triggers SQLite.
 - El resultado se concilia comparando `winner_slug` con los slugs A/B de la
-  predicción oficial. La posición del jugador en la página y el nombre visible
-  no determinan el label, porque Tennis Explorer puede reordenar al ganador.
+  predicción oficial. Si Tennis Explorer y la agenda usan IDs de partido
+  distintos, la traducción exige fecha, género y el par no ordenado de IDs
+  Sackmann. También se admite completar una pareja cuando exactamente un
+  jugador ya está mapeado y ese jugador aparece en un único partido oficial de
+  la fecha. La posición y el nombre visible nunca determinan por sí solos el
+  label; cualquier duplicidad queda sin liquidar.
 - Solo se liquida `status=finished` con sets terminales, marcador, lado ganador,
   slug ganador y evidencia explícita coherentes. Walkovers, cancelaciones,
   estados parciales o contradicciones quedan pendientes o en revisión.
@@ -56,17 +66,44 @@ predicciones publicadas antes de conocer el desenlace.
 | `conflicts` | Contradicciones append-only que nunca se corrigen en silencio. |
 | `review_queue` | Casos sin identidad, sin predicción oficial o ambiguos. |
 
+## Metricas prospectivas publicadas en la web
+
+La web separa dos conceptos que no son intercambiables:
+
+- **Confianza del input**: es el nivel `HIGH`, `MEDIUM`, `LOW` o
+  `UNAVAILABLE` producido antes del partido por
+  `assess_vector_confidence()`. Resume cobertura y frescura de los inputs. Se
+  presenta como `ALTA`, `MEDIA`, `BAJA` o `NO DISPONIBLE`, nunca como un
+  porcentaje y nunca como accuracy.
+- **Acierto real (partidos liquidados)**: se calcula en modo solo lectura
+  sobre todas las predicciones oficiales que tienen `settlement_id`,
+  `settled_at_utc` y `actual_outcome_a`. No se limita a la jornada que aparece
+  en la tabla diaria.
+
+Para la segunda metrica, el builder compara la probabilidad calibrada del
+ganador previsto con el indicador de que ese ganador acerto. Publica numero de
+liquidados, numero evaluable, aciertos, accuracy, Brier, log-loss y una curva
+de calibracion por cuantiles de hasta diez bins. Si no hay muestra, accuracy,
+Brier y log-loss son nulos y la interfaz muestra `sin muestra / no calculado`;
+un conjunto inferior a 100 partidos se etiqueta como provisional. Este umbral
+coincide con el criterio de muestra pequena usado en la auditoria de segmentos.
+
+`WEB/build_web.py` abre SQLite con `mode=ro` y `PRAGMA query_only=ON`. La
+publicacion no actualiza `predictions`, `observations`, `settlements` ni ninguna
+otra tabla operativa.
+
 El esquema está versionado mediante `PRAGMA user_version` y
 `schema_versions`. Cada operación multi-fila se ejecuta en una transacción; un
 fallo estructural revierte la operación completa.
 
-Tennis Explorer no aporta una hora oficial con zona horaria que pueda
-compararse de forma universal. Para permitir el uso de cada mañana sin fingir
-esa precisión, el corte operativo usa fecha civil y exige además evidencia
-`scheduled` en el snapshot. Esta regla permite una captura del mismo día
-antes del inicio, pero falla cerrada ante estados `live`, `finished`,
-`walkover`, `cancelled`, capturas posteriores o cualquier resultado ya
-observado.
+TennisRatio publica un instante `data-utc` por partido y el adaptador lo
+conserva como `scheduled_start_utc`. La selección oficial exige de nuevo, en la
+capa SQLite, `prediction_as_of_utc < scheduled_start_utc`; igualdad y cualquier
+instante posterior quedan no oficiales. `None`/TBD también falla cerrado. Tennis
+Explorer solo aporta una hora local sin zona universal: sus filas pueden seguir
+visibles como respaldo, pero no reciben probabilidad ni se oficializan salvo
+que otro contrato de fuente aporte un instante UTC inequívoco. Nunca se inventa
+una zona horaria.
 
 En relojes con resolución insuficiente, el pipeline representa el orden real
 captura-antes-de-inferencia mediante el microtick lógico siguiente. La
@@ -80,10 +117,17 @@ validación SQLite conserva la desigualdad estricta entre ambos instantes.
 1. ejecuta el pipeline causal y publica su CSV;
 2. registra todas las filas, incluidas las no predichas, sin inventar valores;
 3. almacena las features individuales de jugadores mapeados en formato largo;
-4. selecciona una sola fecha anterior con predicciones oficiales sin liquidar;
-5. obtiene un snapshot append-only mediante `refresh_daily_results`;
-6. registra las observaciones y liquida únicamente las evidencias válidas.
-7. si todo lo anterior termina bien, `run_tennis.ps1` ejecuta el builder web
+4. reprocesa idempotentemente los snapshots Tennis Explorer ya almacenados y
+   añade solo observaciones canónicas nuevas mediante `OperationsStore`;
+5. selecciona una sola fecha anterior con predicciones oficiales sin liquidar;
+6. intenta resolver la fecha pendiente con TennisRatio usando solo
+   evidencia terminal, inequívoca y publicada antes de la fecha actual;
+7. si TennisRatio no aporta una coincidencia segura, usa Tennis Explorer como
+   fallback y enlaza únicamente resultados uno-a-uno por ID exacto o identidad
+   Sackmann; el HTML crudo conserva las filas no enlazadas;
+8. registra las observaciones por la API append-only sancionada y liquida
+   únicamente las evidencias válidas;
+9. si todo lo anterior termina bien, `run_tennis.ps1` ejecuta el builder web
    existente para regenerar `WEB/data.js` desde la SQLite en modo lectura.
 
 La selección prioriza la fecha pendiente más reciente que nunca se haya
@@ -92,15 +136,30 @@ refresco vacío también queda anotado, por lo que no bloquea eternamente otras
 fechas. La propia fecha que se está prediciendo nunca se consulta como
 resultado en esa ejecución.
 
-Cada invocación consulta como máximo una página anterior, pero no hay contador
-ni límite diario en el código. El usuario controla manualmente cuántas veces
-ejecuta el lanzador. No hay reintentos HTTP automáticos ni bypass de WAF.
+Cada invocación consulta como máximo una fecha anterior. El refresco diario de
+TennisRatio se ejecuta automáticamente antes de la inferencia mediante
+`run_tennis.ps1`; también existe el modo aislado `-UpdateOnly`, usado por la
+tarea programada diaria. Ambos caminos llaman al mismo adaptador idempotente y
+al mismo transporte Scrapling fijado. No acceden a `/api/`, no siguen
+redirecciones fuera del host permitido y validan `robots.txt` con matching
+wildcard completo, de modo que una regla de query como `/*?q=` no bloquea
+erróneamente `/atp-matches.html`.
 
-Si la observación de resultados falla por HTTP, caché, WAF o HTML inesperado,
-la predicción ya guardada se conserva y el script emite una advertencia clara.
-Un fallo de integridad SQLite sí detiene la ejecución.
+El replay de snapshots ya almacenados forma parte de
+`scripts/daily_predictions.py`, por lo que se ejecuta automáticamente desde
+ambos `start.ps1`. También puede invocarse de forma aislada y segura con:
 
-## Lanzador y reentreno semanal
+```powershell
+python scripts\reconcile_results.py --before-date 2026-08-31
+```
+
+Si ninguna fuente puede aportar evidencia inequívoca por HTTP, caché, identidad
+o HTML inesperado, la predicción ya guardada se conserva. Una coincidencia
+segura sí puede liquidarse aunque otras filas de la fecha sigan pendientes; el
+run audita cobertura, no mapeados y ambigüedades. Un fallo de integridad SQLite
+sí detiene la ejecución.
+
+## Lanzador y reentreno automático
 
 Desde cualquier directorio:
 
@@ -111,15 +170,17 @@ Desde cualquier directorio:
 .\TENNIS\run_tennis.ps1 -Retrain -Date 2026-07-30
 ```
 
-Sin `-Retrain` se ejecutan predicción, registro y conciliación. Con `-Retrain`,
-el lanzador falla rápido y respeta este orden antes del diario:
+Todo arranque operativo completo falla rápido y respeta este orden antes del
+diario; `-Retrain` se conserva como alias compatible del mismo flujo TENNIS:
 
 1. `scripts/update_sources.py`;
-2. `scripts/audit_identities.py`;
-3. `scripts/build_elo.py`;
-4. `scripts/build_features.py`;
-5. `scripts/retrain_models.py`;
-6. `scripts/daily_predictions.py --retrained`.
+2. `scripts/update_tennisratio.py`, incluido el remapeo append-only contra el
+   Sackmann que acaba de actualizarse;
+3. `scripts/audit_identities.py`;
+4. `scripts/build_elo.py`;
+5. `scripts/build_features.py`;
+6. `scripts/retrain_models.py`;
+7. `scripts/daily_predictions.py --retrained`.
 
 Después del paso diario, y solo si su código de salida es cero, se ejecuta
 `WEB/build_web.py`. Si el builder falla, el lanzador conserva la BBDD y el CSV,
@@ -128,7 +189,11 @@ una web cuyo `data.js` no se haya podido regenerar.
 
 Los constructores siguen siendo idempotentes: si las fuentes y fingerprints
 no han cambiado, reutilizan los artefactos compatibles en vez de fingir un
-modelo nuevo.
+modelo nuevo. `-UpdateOnly` queda fuera de este ciclo y solo realiza el refresco
+diario idempotente de TennisRatio. Un `-Date` explícito sin `-Retrain` también
+queda fuera del entrenamiento para que un replay histórico no active un modelo
+con corte antiguo; `-Retrain -Date` sigue disponible cuando ese corte se pide
+deliberadamente.
 
 ## Contrato v2 de fase 9
 
@@ -137,8 +202,9 @@ y una base completa sin `PRAGMA user_version` se migran atomicamente y se
 registra la version en `schema_versions`.
 
 La selección oficial aplica el mismo contrato descrito en los invariantes:
-exige ambos cortes y comprueba que el disponible sea exactamente el corte
-fuente más 21 días. Esta igualdad falla cerrada ante metadata incoherente.
+exige el corte preinicio UTC y ambos cortes causales, y comprueba que el
+disponible sea exactamente el corte fuente más 21 días. Cualquier igualdad en
+la puerta temporal falla cerrada ante metadata incoherente.
 
 Al rotar fechas pendientes, el scheduler compara el timestamp maximo del run
 de observacion con el timestamp maximo de sus observaciones y usa el mas

@@ -1,5 +1,7 @@
 from typing import Any, Generator
+
 import scrapy
+
 from .parsers import ParsersFactory as PF
 
 

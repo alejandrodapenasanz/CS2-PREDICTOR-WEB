@@ -27,8 +27,9 @@
   modelo está en log loss / calibración / AUC, **no** en la accuracy. Ver §6.
 - Riesgos principales detectados: (a) **selección de modelo sobre el mismo conjunto OOS que se
   reporta** (sesgo optimista leve); (b) el **test de fuga solo cubre el núcleo rolling**, no las
-  familias enriquecidas (analytics/jugador/odds); (c) **dependencias sin fijar y sin lockfile**,
-  CI instala versiones libres; (d) **cifras inconsistentes entre documentos** (drift de doc).
+  familias enriquecidas (analytics/jugador/odds); (c) **cifras inconsistentes entre documentos**
+  (drift de doc). El hallazgo original de dependencias quedó resuelto el 2026-08-11 con CPython
+  3.13 y locks hashados separados por componente.
 - Nada de esto es bloqueante para un TFM/proyecto académico; son mejoras de rigor. Detalle y
   preguntas al final.
 
@@ -201,15 +202,17 @@ JSON histórico que está gitignored (no versionado). Ver §7 (código legacy).
 1. Arranca un **transcript** completo en `PIPELINE/logs/start_<timestamp>.log`
    ([start.ps1:70-78](../start.ps1#L70-L78)) + `trap` global que loguea y hace exit 1
    ([start.ps1:80-94](../start.ps1#L80-L94)).
-2. `Ensure-ModelPython` ([start.ps1:265-276](../start.ps1#L265-L276)): resuelve el Python
-   del sistema y verifica/instala `numpy pandas scikit-learn scipy matplotlib lightgbm shap`.
+2. `Ensure-ModelPython` exige **CPython 3.13 exacto** y deriva `CS2/.venv`
+   exclusivamente de `requirements.lock.txt`: hashes, wheels, pins exactos, `pip check` e
+   imports binarios reales. Construye `.venv.build`, valida antes del swap y conserva rollback.
 3. Si va a scrapear: `Configure-ScrapeGuards` ([start.ps1:234-263](../start.ps1#L234-L263))
    fija ~30 variables `HLTV_*`/`BBDD_*` (rate limits, backoff, circuit breaker, cuarentena,
    TTLs, flags de Scrapling stealth). `Ensure-CaBundle` genera un CA bundle desde el trust
    store de Windows si detecta inspección TLS corporativa
    ([start.ps1:166-220](../start.ps1#L166-L220)). `Ensure-ScraperPython`
-   ([start.ps1:278-335](../start.ps1#L278-L335)) crea/repara el venv del scraper con
-   **Python 3.10-3.13** (Scrapling no soporta 3.14) e instala `scrapling[fetchers]`.
+   crea/repara el venv aislado del scraper también con **CPython 3.13 exacto** y solo desde
+   su propio lock hashado y wheels. Valida los imports reales antes y después del swap;
+   los binarios de navegador de Scrapling se provisionan fuera de pip.
 
 `$total` de etapas se calcula dinámicamente ([start.ps1:376-379](../start.ps1#L376-L379)):
 base 4, +4 si hay BBDD (`-not -NoDb`), +1 si toca entrenar.
@@ -478,21 +481,14 @@ del modelo sería engañosa**; el logro es la calibración a esa accuracy.
   (documentado como intencionalmente separado), `backtest_all_available.py` vs el backtest de
   `train.py`/`economic.py`. Conviene confirmar cuáles son mantenidos vs abandonados.
 
-### 7.3. Dependencias sin fijar / reproducibilidad de build
+### 7.3. Dependencias reproducibles — hallazgo resuelto
 
-- **`CS2/requirements.txt`:** el stack ML va con **floors `>=` sin techo** (`numpy>=1.26`,
-  `pandas>=2.2`, `scikit-learn>=1.7`, `lightgbm>=4.5`, `shap>=0.46`, `optuna>=4.5`…). Un modelo
-  serializado con scikit-learn/LightGBM es sensible a la versión → `model.pkl` puede no recargar
-  entre versiones. Solo el bloque scraper está exact-pinned (`Scrapy==2.14.2`,
-  `cloudscraper==1.2.71`, etc.). ([requirements.txt:1-31](../requirements.txt#L1-L31))
-- **CI instala versiones libres:** `pip install numpy pandas scikit-learn ... shap optuna` sin pins
-  ([ci.yml:26](../.github/workflows/ci.yml#L26)) → el CI no es reproducible en el tiempo.
-- **No hay lockfile** (`requirements.lock`/`poetry.lock`) en ninguno de los dos árboles.
-- **Contradicción de reproducibilidad:** el proyecto presume de manifiestos con SHA-256 de datos y
-  versiones de dependencias ([PROJECT.md §10.6, §13](../PROJECT.md)), pero las dependencias no
-  están fijadas para *reconstruir* ese entorno. El manifiesto **registra** versiones; no las **fija**.
-- `scrapling[fetchers]` requiere Python 3.10-3.13 + descarga de navegador post-install → build
-  frágil fuera de ese rango (ya mitigado con degradación a requests/cloudscraper).
+La auditoría original encontró rangos abiertos, instalación manual en CI y ausencia de lock
+del scraper. Quedó resuelto el **2026-08-11**: modelo, scraper y TENNIS tienen manifests directos
+y locks completos con hashes; cada componente usa un venv CPython 3.13 aislado. Los launchers
+instalan solo wheels del lock, comparan el conjunto exacto, ejecutan `pip check` e imports reales
+antes del swap transaccional. CI reproduce la misma separación. Los navegadores de Scrapling
+siguen siendo artefactos externos a pip y se provisionan explícitamente tras validar el venv.
 
 ### 7.4. Tests — inventario (existen, y son extensos)
 
@@ -546,9 +542,10 @@ fetch directo + parser no devuelve datos (p. ej. `run_spider('hltv_match'|'hltv_
 'hltv_results'|'hltv_upcoming_matches')`). `grab_cf.py` abre un navegador visible (`nodriver`)
 para renovar `cf_clearance` cuando el pipeline queda bloqueado.
 
-Deps del scraper: mezcla `==` exactos (Scrapy, cloudscraper, nodriver, itemadapter,
-scrapy-impersonate, flasgger) y `>=` (flask, requests, scrapling, pytest); sin lockfile.
-`Dockerfile` no ejecuta `scrapling install` → la imagen no provisiona el navegador stealth.
+Estado actual del scraper: `requirements.txt` declara las raíces mantenibles y
+`requirements.lock.txt` fija el cierre completo con hashes. Pipeline, Docker y Make consumen
+solo ese lock; el wheel reproducible de Flasgger vive verificado en `wheels/`. Los navegadores
+de Scrapling siguen siendo artefactos externos a pip y se provisionan explícitamente.
 
 ---
 
@@ -558,8 +555,8 @@ scrapy-impersonate, flasgger) y `>=` (flask, requests, scrapling, pytest); sin l
 > **BLACKBOX** (`CS2/BBDD/blackbox.py` export/verify/restore/autoheal, integrada en `start.ps1`,
 > con test de desastre) en la rama `feature/blackbox`. No se versionan datos. (2) Umbrales → **se dejan fijos**, documentados como decisión consciente.
 > (3) Sesgo de selección → **añadir hold-out temporal final limpio**. (4) Ramas → **PRs por área**
-> desde `pre-dev`. (5) Deps → fijar solo las críticas (`numpy/pandas/scikit-learn/lightgbm`) +
-> alinear CI. (6) Cifras → `REPORT.md` como única fuente viva; PROJECT/README pasan a
+> desde `pre-dev`. (5) Deps → **RESUELTO 2026-08-11**: locks hashados por componente,
+> CPython 3.13 y CI separada. (6) Cifras → `REPORT.md` como única fuente viva; PROJECT/README pasan a
 > "ilustrativo con fecha". (7) Código legacy → marcado, **no** se borra hasta confirmar uso.
 > (8) `feature_profile` → alinear el default de la firma a `core`. Los cambios de código quedan
 > **pendientes** de una sesión de implementación (esta fue solo auditoría).
@@ -574,9 +571,9 @@ scrapy-impersonate, flasgger) y `>=` (flask, requests, scrapling, pytest); sin l
 3. **Cobertura del test de fuga (§6.4/L2):** ¿priorizamos un test point-in-time para las familias
    enriquecidas (analytics/jugador/rankings/box scores/odds) sobre datos reales de `cs2.db`, o el
    test sintético del núcleo te parece suficiente garantía?
-4. **Reproducibilidad de dependencias (§7.3):** ¿generamos un lockfile y fijamos al menos
-   numpy/pandas/scikit-learn/lightgbm (críticas para recargar `model.pkl`), y alineamos el CI a
-   esos pins? ¿O prefieres mantener los `>=`?
+4. **Reproducibilidad de dependencias (§7.3): RESUELTO 2026-08-11.** Existen manifests
+   directos y locks completos con hashes para modelo, scraper y TENNIS; CI y los launchers
+   instalan esos locks con CPython 3.13 y fallan cerrado ante binarios no cargables.
 5. **Cifras inconsistentes entre documentos:** PROJECT/README hablan de 9.492 series (7.056 test)
    mientras REPORT.md ya va por 9.703 (7.267 test). ¿Quieres que en la siguiente iteración fijemos
    una única fuente de verdad numérica (regenerada por el pipeline) y marquemos el resto como

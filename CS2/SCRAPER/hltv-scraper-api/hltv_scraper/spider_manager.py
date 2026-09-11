@@ -1,11 +1,11 @@
 from abc import ABC, abstractmethod
-from typing import List
+from typing import Any
 
-from .cleaner import OldDataCleaner, JsonOldDataCleaner
-from .data import JsonDataLoader, DataLoader
-from .path_generator import JsonFilePathGenerator, FilePathGenerator
+from .cleaner import JsonOldDataCleaner, OldDataCleaner
 from .conditions_checker import AnyConditionsChecker as ConditionsChecker
 from .conditions_factory import ConditionFactory as CF
+from .data import DataLoader, JsonDataLoader
+from .path_generator import FilePathGenerator, JsonFilePathGenerator
 from .process import SpiderProcess
 
 
@@ -15,31 +15,31 @@ class Manager(ABC):
         pass
 
     @abstractmethod
-    def __get_conditions__(self, path: str, hours: int = 1) -> List:
+    def __get_conditions__(self, path: str, hours: int = 1) -> list[Any]:
         pass
 
     @abstractmethod
-    def __should_run__(self, path: str) -> bool:
+    def __should_run__(self, path: str, hours: int = 1) -> bool:
         pass
 
     @abstractmethod
-    def execute(self) -> None:
+    def execute(self, name: str, path: str, args: str, hours: int = 1) -> None:
         pass
 
     @abstractmethod
-    def get_result(self) -> dict:
+    def get_result(self, path: str) -> dict[Any, Any]:
         pass
-    
+
     @abstractmethod
-    def get_profile(self) -> dict:
+    def get_profile(self, filename: str, profile: str) -> dict[Any, Any]:
         pass
-    
+
     @abstractmethod
-    def is_profile(self) -> bool:
+    def is_profile(self, filename: str, profile: str) -> bool:
         pass
-    
+
     @abstractmethod
-    def run_spider(self) -> None:
+    def run_spider(self, name: str, path: str, args: str) -> None:
         pass
 
 
@@ -50,7 +50,7 @@ class SpiderManager(Manager):
         self.cleaner: OldDataCleaner = JsonOldDataCleaner()
         self.dir: str = dir
 
-    def __get_conditions__(self, path: str, hours: int = 1) -> List:
+    def __get_conditions__(self, path: str, hours: int = 1) -> list[Any]:
         return [
             CF.get("file_time", file_path=path, hours=hours),
             CF.get("json_file_empty", file_path=path),
@@ -74,11 +74,11 @@ class SpiderManager(Manager):
                 self.cleaner.clean(path)
             SpiderProcess().execute(name, self.dir, args)
 
-    def get_result(self, path: str) -> dict:
+    def get_result(self, path: str) -> dict[Any, Any]:
         print(self.path.generate(path))
         return self.loader.load(self.path.generate(path))
 
-    def get_profile(self, filename: str, profile: str) -> dict:
+    def get_profile(self, filename: str, profile: str) -> dict[Any, Any]:
         path = self.path.generate(filename)
         profiles = self.loader.load(path)
         return profiles[profile]

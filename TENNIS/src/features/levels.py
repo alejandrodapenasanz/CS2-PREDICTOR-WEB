@@ -5,9 +5,9 @@ módulo lo acompaña con una categoría amplia útil para modelado, sin perder
 nunca el código original. La clasificación histórica está cerrada sobre las
 combinaciones ``(source_family, tourney_level)`` observadas en el manifiesto
 activo de la fase 2 (commit
-``83733587353df8a41f2fd4f516147d5aa83f5a8d``). La familia diaria
-``tennis_explorer`` conserva por separado las cuatro etiquetas literales
-observadas en el scraper; nunca las presenta como códigos Sackmann.
+``83733587353df8a41f2fd4f516147d5aa83f5a8d``). Las familias diarias
+``tennis_explorer`` y ``tennisratio`` conservan por separado sus cuatro
+etiquetas literales; nunca las presentan como códigos Sackmann.
 
 No se emplea una regla comodín: si una futura actualización incorpora una
 combinación distinta, :func:`normalize_tour_level` lanza un error para que se
@@ -67,7 +67,7 @@ _TEAM: Final[CanonicalTourLevel] = "Team"
 _OTHER: Final[CanonicalTourLevel] = "Other"
 
 
-# Inventario cerrado: 54 combinaciones históricas y 4 etiquetas web diarias.
+# Inventario cerrado: 54 combinaciones históricas y 8 etiquetas web diarias.
 _CANONICAL_BY_SOURCE_AND_RAW: Final[
     dict[tuple[str, str], CanonicalTourLevel]
 ] = {
@@ -135,6 +135,11 @@ _CANONICAL_BY_SOURCE_AND_RAW: Final[
     ("tennis_explorer", "WTA"): _WTA_TOUR,
     ("tennis_explorer", "Challenger"): _CHALLENGER,
     ("tennis_explorer", "ITF"): _ITF,
+    # TennisRatio diario: vocabulario visible igual, procedencia independiente.
+    ("tennisratio", "ATP"): _ATP_TOUR,
+    ("tennisratio", "WTA"): _WTA_TOUR,
+    ("tennisratio", "Challenger"): _CHALLENGER,
+    ("tennisratio", "ITF"): _ITF,
 }
 
 

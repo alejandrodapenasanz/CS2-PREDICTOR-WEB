@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "tennisratio": {
+      "label": "TennisRatio",
+      "cadence": "daily",
+      "threshold_hours": 24.0
+    },
+    "tennis_explorer": {
+      "label": "Tennis Explorer",
+      "cadence": "daily",
+      "threshold_hours": 24.0
+    },
+    "sackmann": {
+      "label": "Sackmann",
+      "cadence": "delayed",
+      "threshold_hours": 1080.0
+    }
+  }
+}

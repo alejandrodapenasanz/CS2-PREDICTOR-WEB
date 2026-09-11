@@ -149,6 +149,39 @@ CREATE TABLE maps (
     UNIQUE (match_id, map_number)
 );
 
+-- BEGIN ROUND HISTORY V1
+-- Immutable capture evidence; no changes to prediction_ledger. Repeated HTML
+-- captures remain auditable; feature readers choose the first available one.
+CREATE TABLE IF NOT EXISTS map_round_sources (
+    round_source_id INTEGER PRIMARY KEY,
+    map_id INTEGER NOT NULL REFERENCES maps(map_id),
+    source_file TEXT NOT NULL,
+    source_url TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    captured_at_utc TEXT NOT NULL,
+    played_at_utc TEXT NOT NULL,
+    round_format TEXT NOT NULL CHECK(round_format IN ('mr12','mr15')),
+    map_name TEXT NOT NULL,
+    team_left_hltv_id TEXT NOT NULL,
+    team_right_hltv_id TEXT NOT NULL,
+    parser_version INTEGER NOT NULL,
+    UNIQUE(source_file,sha256,captured_at_utc,parser_version)
+);
+CREATE TABLE IF NOT EXISTS map_rounds (
+    round_source_id INTEGER NOT NULL REFERENCES map_round_sources(round_source_id),
+    round_number INTEGER NOT NULL CHECK(round_number > 0),
+    half INTEGER NOT NULL CHECK(half > 0),
+    round_in_half INTEGER NOT NULL CHECK(round_in_half > 0),
+    overtime INTEGER NOT NULL CHECK(overtime IN (0,1)),
+    is_pistol INTEGER NOT NULL CHECK(is_pistol IN (0,1) AND NOT (overtime=1 AND is_pistol=1)),
+    winner_hltv_id TEXT NOT NULL,
+    team_left_side TEXT NOT NULL CHECK(team_left_side IN ('ct','t')),
+    outcome TEXT NOT NULL,
+    PRIMARY KEY(round_source_id,round_number)
+);
+CREATE INDEX IF NOT EXISTS idx_round_sources_map_capture ON map_round_sources(map_id,captured_at_utc);
+-- END ROUND HISTORY V1
+
 CREATE TABLE veto (
     veto_id         INTEGER PRIMARY KEY,
     match_id        INTEGER NOT NULL REFERENCES matches(match_id),
@@ -475,6 +508,25 @@ CREATE TABLE predictions (
     decision_market_weight_reasons TEXT,
     decision_policy_json TEXT,
     reliability_score REAL,
+    prediction_regime TEXT CHECK (prediction_regime IN ('odds','no_odds')),
+    prediction_architecture TEXT,
+    opening_odds_recovered INTEGER CHECK (opening_odds_recovered IN (0,1)),
+    opening_odds_captured_at_utc TEXT,
+    ensemble_disagreement REAL CHECK (
+        ensemble_disagreement IS NULL OR
+        (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5)
+    ),
+    estimate_band_half_width REAL CHECK (
+        estimate_band_half_width IS NULL OR
+        (estimate_band_half_width >= 0 AND estimate_band_half_width <= 0.5)
+    ),
+    estimate_confidence_level TEXT CHECK (
+        estimate_confidence_level IN ('low','medium','high')
+    ),
+    estimate_history_coverage REAL CHECK (
+        estimate_history_coverage IS NULL OR
+        (estimate_history_coverage >= 0 AND estimate_history_coverage <= 1)
+    ),
     opportunity_score REAL,
     opportunity_eligible INTEGER CHECK (opportunity_eligible IN (0,1)),
     opportunity_rank INTEGER,
@@ -532,6 +584,25 @@ CREATE TABLE prediction_ledger (
         (decision_prob_team1 > 0 AND decision_prob_team1 < 1)
     ),
     reliability_score REAL,
+    prediction_regime TEXT CHECK (prediction_regime IN ('odds','no_odds')),
+    prediction_architecture TEXT,
+    opening_odds_recovered INTEGER CHECK (opening_odds_recovered IN (0,1)),
+    opening_odds_captured_at_utc TEXT,
+    ensemble_disagreement REAL CHECK (
+        ensemble_disagreement IS NULL OR
+        (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5)
+    ),
+    estimate_band_half_width REAL CHECK (
+        estimate_band_half_width IS NULL OR
+        (estimate_band_half_width >= 0 AND estimate_band_half_width <= 0.5)
+    ),
+    estimate_confidence_level TEXT CHECK (
+        estimate_confidence_level IN ('low','medium','high')
+    ),
+    estimate_history_coverage REAL CHECK (
+        estimate_history_coverage IS NULL OR
+        (estimate_history_coverage >= 0 AND estimate_history_coverage <= 1)
+    ),
     prediction_json TEXT NOT NULL,
     features_json   TEXT,
     data_quality_json TEXT,

@@ -2,14 +2,17 @@
 
 ## Objetivo y alcance
 
-Esta fase construye ratings propios a partir del histórico canónico de partidos
-de singles ingerido en la fase 2. Match Charting Project y el Elo publicado por
-Tennis Abstract continúan siendo fuentes auxiliares: no intervienen en este
-cálculo ni se aplican retroactivamente.
+Esta fase construye ratings propios desde dos épocas no solapadas: una base
+Sackmann congelada y resultados operativos posteriores al corte fijo. Match
+Charting Project y el Elo publicado por Tennis Abstract continúan siendo
+fuentes auxiliares: no intervienen en este cálculo ni se aplican
+retroactivamente.
 
-El contrato activo es `sackmann-elo-v5`. Esta versión separa la fecha fuente
-aproximada de Sackmann de la fecha en que un resultado puede entrar en el
-estado deportivo.
+El contrato activo es `multisource-general-elo-v6`. Mantiene el contrato
+temporal de `sackmann-elo-v5` para la base y añade un handoff operativo
+versionado. El commit base es
+`83733587353df8a41f2fd4f516147d5aa83f5a8d` y el corte fijo es
+`2026-06-02`; ambos viven en `config/elo_handoff.json`.
 
 Existen dos universos completamente independientes:
 
@@ -113,7 +116,7 @@ resultado_utilizable(as_of_date) ⇔ result_available_date < as_of_date
 ```
 
 La desigualdad es estricta. Un resultado con `tourney_date=D` sigue excluido en
-`D+21` y puede influir por primera vez en una predicción de `D+22`. El Elo v5
+`D+21` y puede influir por primera vez en una predicción de `D+22`. El Elo v6
 persiste el estado con la fecha efectiva de disponibilidad y conserva
 `source_date` como procedencia; `get_elo(..., as_of_date=D)` solo recupera un
 estado efectivo que cumpla `state_date < D`.
@@ -137,6 +140,60 @@ excepcionalmente largo o reprogramado podría superar la ventana; sin fechas
 reales por partido, esa incertidumbre residual no se puede eliminar y debe
 figurar como limitación del backtest.
 
+## Handoff fijo y resultados operativos
+
+La base Sackmann se verifica contra el manifiesto inmutable
+`data/raw/sackmann_manifests/83733587353df8a41f2fd4f516147d5aa83f5a8d.json`.
+Ningún arranque normal actualiza esa base. Solo entran al overlay partidos con
+fecha deportiva estrictamente posterior a `2026-06-02`; por diseño no se
+intenta deduplicar entre las dos épocas.
+
+TennisRatio es la fuente operativa principal y Tennis Explorer el respaldo.
+Ambas exigen resultado terminal válido y los dos IDs Sackmann resueltos. La
+clave común entre fuentes es `(gender, effective_date, min(player_id),
+max(player_id))`: ante solapamiento gana TennisRatio y Explorer se suprime. Los
+casos sin mapping completo o con resultado contradictorio se omiten sin
+adivinar y se publican en
+`data/processed/elo/operational_omissions.json`.
+
+Para un resultado operativo se conserva la fecha deportiva y el instante real
+de primera observación. El evento se procesa por su `available_date` y solo si
+ambas fechas son `< D`; un resultado terminado u observado en `D` puede influir
+por primera vez en `D+1`. Si el resultado publica literalmente `Hard`, `Clay`,
+`Grass` o `Carpet`, el evento actualiza también el Elo de esa superficie. Si la
+superficie directa falta, solo se admite la del mismo torneo y edición exactos
+capturada como máximo en el instante en que el resultado estuvo disponible.
+`Indoors`, agregados como `Futures`, conflictos y nombres parecidos permanecen
+nulos y actualizan solo el Elo general.
+
+El catálogo derivado se publica en `data/processed/surface_catalog.json`. Cada
+evidencia conserva fuente, partido, edición, captura UTC, URL y SHA-256. El
+fingerprint del run incluye el fingerprint completo del catálogo, además del
+commit base, corte, precedencia y hashes exactos de los eventos seleccionados.
+Las SQLite fuente se abren en modo de solo lectura; sus snapshots proceden del
+cliente HTTP consolidado y el catálogo no realiza peticiones adicionales.
+
+Si una SQLite operativa no puede leerse o validarse, el constructor publica un
+aviso y ejecuta el camino Sackmann-only en vez de dejar una base parcial. La
+base se sigue reemplazando atómicamente. En serving, el overlay en memoria solo
+continúa Elo con observaciones posteriores al `max_event_date` persistido; no
+reaplica eventos ya incorporados. Forma/H2H se reconstruyen por separado y sí
+reciben una vez todos los resultados post-handoff que sean causales.
+
+### Re-baseline manual
+
+El corte nunca se mueve de forma automática. Para crear una base nueva hay que:
+
+1. actualizar Sackmann manualmente y auditar el nuevo snapshot;
+2. conservar su manifiesto versionado por commit;
+3. elegir un corte que cubra toda la base y comprobar el posible hueco;
+4. cambiar juntos `base.source_commit`, `base.manifest_path`, `cutoff_date` en
+   `config/elo_handoff.json` y `SACKMANN_BASE_COMMIT` en `src/config.py`;
+5. reconstruir Elo, features y challenger, dejando que la puerta de promoción
+   decida el modelo activo.
+
+No se mezclan dos commits Sackmann ni se mueve solo el corte.
+
 ## Partidos elegibles y auditoría
 
 No actualizan ratings ni contadores:
@@ -151,7 +208,7 @@ No actualizan ratings ni contadores:
 Elo. Excluirlos usando una señal conocida únicamente después de comenzar el
 partido produciría un universo retrospectivo más limpio que el disponible al
 predecir. La auditoría de fase 9 corrigió la exclusión histórica de estos
-resultados; los recuentos definitivos pertenecen al run Elo v5 regenerado, no a
+resultados; los recuentos definitivos pertenecen al run Elo v6 regenerado, no a
 los informes de fases anteriores.
 
 Los CSV crudos nunca se modifican. Cada exclusión se contabiliza por motivo.
@@ -182,8 +239,9 @@ de ratings bajo un ID reutilizado; esa limitación permanece explícita.
 
 Las colisiones entre posibles claves deportivas se conservan cuando las filas
 no son idénticas: `match_num` y combinaciones de torneo/ronda/jugadores no son
-claves fiables. En `sackmann-elo-v5`, la igualdad exacta se decide mediante un
-SHA-256 de las 49 cadenas fuente leídas del CSV antes de tipar o normalizar
+claves fiables. En la época Sackmann de `multisource-general-elo-v6`, la
+igualdad exacta se decide mediante un SHA-256 de las 49 cadenas fuente leídas
+del CSV antes de tipar o normalizar
 fechas, IDs y textos. Por ejemplo, los IDs crudos `1` y `01` no se consideran
 la misma fila aunque ambos sean convertibles al entero `1`. La procedencia
 reproducible de cada fila es:

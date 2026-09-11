@@ -1,10 +1,11 @@
 from typing import Any, Generator
-import scrapy
+
 import cloudscraper
+import scrapy
 from scrapy.http.response.html import HtmlResponse
 
-from .parsers.date import RankingDateFormatter
 from .parsers import ParsersFactory as PF
+from .parsers.date import RankingDateFormatter
 
 
 class HltvTop30Spider(scrapy.Spider):
@@ -49,8 +50,12 @@ class HltvTop30Spider(scrapy.Spider):
 
     def parse(self, response) -> Generator[dict[str, Any], Any, None]:
         ranked_teams = response.css("div.ranked-team.standard-box")
-        prev_ranking = response.css("div.ranking-prev-next a.pagination-prev::attr(href)").re_first(r"/ranking/teams/(\d{4}/\w+/\d+)")
-        next_ranking = response.css("div.ranking-prev-next a.pagination-next::attr(href)").re_first(r"/ranking/teams/(\d{4}/\w+/\d+)")
+        prev_ranking = response.css("div.ranking-prev-next a.pagination-prev::attr(href)").re_first(
+            r"/ranking/teams/(\d{4}/\w+/\d+)"
+        )
+        next_ranking = response.css("div.ranking-prev-next a.pagination-next::attr(href)").re_first(
+            r"/ranking/teams/(\d{4}/\w+/\d+)"
+        )
         date_text = response.css("div.regional-ranking-header-text::text").get()
         parsed_date = RankingDateFormatter.format(date_text)
 

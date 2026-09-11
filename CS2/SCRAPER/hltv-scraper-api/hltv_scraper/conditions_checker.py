@@ -1,15 +1,17 @@
-from .conditions import Condition
 from abc import ABC, abstractmethod
+
+from .conditions import Condition
 
 
 class Checker(ABC):
     @abstractmethod
     def __init__(self, *args, **kwargs) -> None:
         pass
-    
+
     @abstractmethod
     def check(self) -> bool:
         pass
+
 
 # Check if any of the conditions are met
 class AnyConditionsChecker(Checker):

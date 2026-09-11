@@ -1,7 +1,9 @@
 from typing import Any
+
 from .date import ResultDateFormatter
-from .parser import Parser
 from .match import MatchParser as MP
+from .parser import Parser
+
 
 class ResultsParser(Parser):
     @staticmethod
@@ -12,7 +14,7 @@ class ResultsParser(Parser):
             standard_date = ""
             if date:
                 standard_date = ResultDateFormatter.format(date)
-            
+
             matches = [MP.parse(result, standard_date) for result in sublist.css("a.a-reset")]
             all_results.extend(matches)
         return all_results

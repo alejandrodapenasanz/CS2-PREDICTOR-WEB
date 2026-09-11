@@ -7,7 +7,7 @@ on:
     branches: [main, dev, pre-dev]
 
 jobs:
-  tests:
+  model-tests:
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -16,20 +16,107 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: pip
-          cache-dependency-path: CS2/requirements.lock.txt
+          cache-dependency-path: |
+            CS2/requirements.txt
+            CS2/requirements.lock.txt
+      - name: Validate direct CS2 requirements and real startup
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python ../scripts/check_import_coverage.py \
+            --requirements requirements.txt \
+            --source MODEL \
+            --source BBDD \
+            --source PIPELINE \
+            --source TESTS \
+            --exclude PIPELINE/start.py \
+            --allow-import BBDD \
+            --allow-import MODEL \
+            --allow-import PIPELINE
+          python MODEL/train.py --help
+          python BBDD/build_db.py --help
+          python PIPELINE/enrich_predictions.py --help
       - name: Install locked project dependencies
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install -r requirements.lock.txt
+          python -m pip install --no-deps --only-binary=:all: --require-hashes -r requirements.lock.txt
           python -m pip check
-      - name: Ruff
+      - name: Run CS2 quality gates
+        run: python scripts/quality_gate.py
+
+  scraper-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: CS2/SCRAPER/hltv-scraper-api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            CS2/SCRAPER/hltv-scraper-api/requirements.txt
+            CS2/SCRAPER/hltv-scraper-api/requirements.lock.txt
+      - name: Validate direct scraper requirements and real startup
         run: |
-          ruff check MODEL BBDD PIPELINE TESTS
-      - name: Mypy infrastructure
-        run: python -m mypy
-      - name: Run test suite
-        run: python -m pytest TESTS/ -q
-      - name: Deterministic pipeline smoke
-        run: python MODEL/smoke_pipeline.py
+          python -m pip install --find-links wheels -r requirements.txt
+          python -m pip check
+          python scripts/check_import_coverage.py
+          python scripts/smoke_boot.py
+      - name: Install locked scraper dependencies
+        run: |
+          python -m pip install --no-deps --only-binary=:all: --require-hashes \
+            --find-links wheels -r requirements.lock.txt
+          python -m pip check
+      - name: Run scraper quality gates
+        run: make PYTHON=python gates
+      - name: Check pipeline imports owned by the scraper environment
+        working-directory: .
+        run: >-
+          python scripts/check_import_coverage.py
+          --requirements CS2/SCRAPER/hltv-scraper-api/requirements.txt
+          --source CS2/SCRAPER/hltv-scraper-api
+          --source CS2/PIPELINE/start.py
+          --allow-import hltv_scraper
+          --allow-import match_context
+          --allow-import PIPELINE
+          --allow-import routes
+          --allow-import scripts
+          --allow-import tests
+      - name: Run scraper cross-component tests
+        working-directory: CS2
+        run: >-
+          python -m pytest -q
+          TESTS/test_hltv_parsers.py
+          TESTS/test_bbdd_live_pipeline.py
+          TESTS/test_hltv_cf_refresh.py
+
+  tennis-tests:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: TENNIS
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            TENNIS/requirements.txt
+            TENNIS/requirements.lock.txt
+      - name: Validate direct TENNIS requirements and real startup
+        run: |
+          python -m pip install -r requirements.txt
+          python -m pip check
+          python scripts/check_import_coverage.py
+          python scripts/smoke_project.py
+      - name: Install locked TENNIS dependencies
+        run: |
+          python -m pip install --no-deps --only-binary=:all: --require-hashes \
+            -r requirements.lock.txt
+          python -m pip check
+      - name: Run TENNIS quality gates
+        run: python scripts/run_quality_gates.py

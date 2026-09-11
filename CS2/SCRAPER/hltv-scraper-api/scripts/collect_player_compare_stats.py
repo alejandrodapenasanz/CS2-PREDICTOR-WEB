@@ -17,7 +17,6 @@ from urllib.parse import urlencode
 import requests
 from parsel import Selector
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_SESSION_FILE = PROJECT_ROOT / "hltv_scraper" / "cf_session.json"
 BLOCK_HTTP_CODES = {403, 429, 500, 502, 503, 504, 522, 524}
@@ -147,8 +146,7 @@ def load_players(team_profiles_file: Path) -> list[PlayerRef]:
 def load_session(session_file: Path) -> dict[str, str]:
     if not session_file.exists():
         raise FileNotFoundError(
-            f"No existe {session_file}. Ejecuta primero: "
-            "python hltv_scraper/hltv_scraper/grab_cf.py"
+            f"No existe {session_file}. Ejecuta primero: python hltv_scraper/hltv_scraper/grab_cf.py"
         )
     session = read_json(session_file)
     if "cf_clearance" not in session or "user_agent" not in session:
@@ -336,10 +334,7 @@ def parse_compare_page(html: str, p1: PlayerRef, p2: PlayerRef, url: str, time_f
         }
 
     # Compatibility fallback for older HLTV markup.
-    maps = [
-        int(match)
-        for match in re.findall(r"Based on\s+(\d+)\s+maps", " ".join(clean_texts(selector)))
-    ]
+    maps = [int(match) for match in re.findall(r"Based on\s+(\d+)\s+maps", " ".join(clean_texts(selector)))]
     rows = parse_stats_rows(selector)
     text_rows = parse_stats_from_text(selector)
     if rows:
@@ -351,8 +346,16 @@ def parse_compare_page(html: str, p1: PlayerRef, p2: PlayerRef, url: str, time_f
     else:
         rows = text_rows
 
-    p1_stats = {row["stat"]: row.get("player1") for row in rows if row.get("player1") is not None}
-    p2_stats = {row["stat"]: row.get("player2") for row in rows if row.get("player2") is not None}
+    p1_stats = {
+        str(row["stat"]): str(row["player1"])
+        for row in rows
+        if row.get("stat") is not None and row.get("player1") is not None
+    }
+    p2_stats = {
+        str(row["stat"]): str(row["player2"])
+        for row in rows
+        if row.get("stat") is not None and row.get("player2") is not None
+    }
 
     return {
         "url": url,
@@ -489,7 +492,7 @@ def backoff_delay(attempt: int, retry_after: str | None, base_delay: float, max_
     hinted = retry_after_seconds(retry_after)
     if hinted is not None:
         return min(max_delay, hinted) + random.uniform(0.25, 1.75)
-    return min(max_delay, base_delay * (2 ** attempt)) + random.uniform(0.5, 2.5)
+    return min(max_delay, base_delay * (2**attempt)) + random.uniform(0.5, 2.5)
 
 
 def wait_compare_cooldown(verbose: bool) -> None:
@@ -837,13 +840,20 @@ def main() -> int:
     parser.add_argument("--match-filter", default="allMatches")
     parser.add_argument("--map-filter", default="allMaps")
     parser.add_argument("--verbose", action="store_true", help="Muestra cada intento HTTP y esperas de backoff.")
-    parser.add_argument("--max-requests", type=int, default=1000, help="Presupuesto maximo de paginas compare nuevas por run; 0 = sin limite.")
+    parser.add_argument(
+        "--max-requests",
+        type=int,
+        default=1000,
+        help="Presupuesto maximo de paginas compare nuevas por run; 0 = sin limite.",
+    )
     parser.add_argument(
         "--adaptive-time-filter",
         action="store_true",
         help="Elige la ventana mas reciente con muestra suficiente: 3m -> 6m -> 12m.",
     )
-    parser.add_argument("--min-maps", type=int, default=10, help="Mapas minimos por jugador para aceptar una ventana reciente.")
+    parser.add_argument(
+        "--min-maps", type=int, default=10, help="Mapas minimos por jugador para aceptar una ventana reciente."
+    )
     parser.add_argument(
         "--max-cloudflare-streak",
         type=int,
@@ -968,7 +978,9 @@ def main() -> int:
                     parsed_players = parsed.get("players") or []
                     p1_maps = player_maps(parsed_players[0] if len(parsed_players) > 0 else None)
                     p2_maps = player_maps(parsed_players[1] if len(parsed_players) > 1 else None)
-                    safe_print(f"[{pair_index}/{total_pairs}] OK {p1.name} vs {p2.name} [{time_filter}] maps={p1_maps}/{p2_maps}")
+                    safe_print(
+                        f"[{pair_index}/{total_pairs}] OK {p1.name} vs {p2.name} [{time_filter}] maps={p1_maps}/{p2_maps}"
+                    )
                     if adaptive_pair_satisfied(attempts_for_pair, args.min_maps):
                         break
                 except CloudflareChallengeStop as exc:
@@ -1007,7 +1019,10 @@ def main() -> int:
                             "error": str(exc),
                         }
                     )
-                    safe_print(f"[{pair_index}/{total_pairs}] FAIL {p1.name} vs {p2.name} [{time_filter}]: {exc}", file=sys.stderr)
+                    safe_print(
+                        f"[{pair_index}/{total_pairs}] FAIL {p1.name} vs {p2.name} [{time_filter}]: {exc}",
+                        file=sys.stderr,
+                    )
                     break
                 finally:
                     if args.delay:
@@ -1175,7 +1190,9 @@ def main() -> int:
                         "error": str(exc),
                     }
                 )
-                safe_print(f"[{current}/{total_requests}] FAIL {p1.name} vs {p2.name} [{time_filter}]: {exc}", file=sys.stderr)
+                safe_print(
+                    f"[{current}/{total_requests}] FAIL {p1.name} vs {p2.name} [{time_filter}]: {exc}", file=sys.stderr
+                )
             write_json(
                 output_file,
                 output_payload(

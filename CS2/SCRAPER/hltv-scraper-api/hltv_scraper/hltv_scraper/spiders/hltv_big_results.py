@@ -1,5 +1,7 @@
 from typing import Any, Generator
+
 import scrapy
+
 from .parsers import ParsersFactory as PF
 
 
@@ -10,6 +12,6 @@ class HltvBigResultsSpider(scrapy.Spider):
 
     def parse(self, response) -> Generator[Any, Any, None]:
         sublists = response.css("div.big-results")
-        
+
         results = PF.get_parser("results").parse(sublists) or []
         yield from results

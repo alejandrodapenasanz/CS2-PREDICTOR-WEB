@@ -420,19 +420,39 @@ class CausalHistoryState:
         wins: int,
         matches: int,
     ) -> None:
-        """Añade el agregado diario de un jugador y limita memoria retenida."""
+        """Inserta o fusiona un agregado por fecha y limita memoria retenida."""
 
         history = self._players.setdefault(key, _PlayerHistory())
-        history.blocks.append(
-            _FormDateBlock(
-                match_date=match_date,
-                wins=wins,
-                matches=matches,
-            )
+        blocks = list(history.blocks)
+        replacement = _FormDateBlock(
+            match_date=match_date,
+            wins=wins,
+            matches=matches,
         )
+        for index, block in enumerate(blocks):
+            if block.match_date == match_date:
+                replacement = _FormDateBlock(
+                    match_date=match_date,
+                    wins=block.wins + wins,
+                    matches=block.matches + matches,
+                )
+                blocks[index] = replacement
+                break
+            if block.match_date > match_date:
+                blocks.insert(index, replacement)
+                break
+        else:
+            blocks.append(replacement)
+        history.blocks = deque(blocks)
         history.retained_matches += matches
-        history.last_match_date = match_date
-        self._prune_player(history, reference_date=match_date)
+        history.last_match_date = max(
+            match_date,
+            history.last_match_date or match_date,
+        )
+        self._prune_player(
+            history,
+            reference_date=history.last_match_date,
+        )
 
     @staticmethod
     def _record_h2h_result(
@@ -477,12 +497,6 @@ class CausalHistoryState:
             raise HistoryDateOrderError(
                 "availability_date no puede ser anterior a match_date."
             )
-        if self._last_date is not None and effective_date <= self._last_date:
-            raise HistoryDateOrderError(
-                "Los bloques deben aplicarse en fechas estrictamente "
-                f"crecientes; última={self._last_date.isoformat()}, "
-                f"recibida={effective_date.isoformat()}."
-            )
         materialized = tuple(results)
         if not materialized:
             raise ValueError("results no puede ser vacío.")
@@ -497,27 +511,84 @@ class CausalHistoryState:
                     f"bloque {checked_date.isoformat()}."
                 )
 
+        self.apply_availability_batch(effective_date, materialized)
+
+    def apply_availability_batch(
+        self,
+        availability_date: date,
+        results: Iterable[HistoricalMatchResult],
+    ) -> None:
+        """Publica en bloque resultados conocidos el mismo día.
+
+        Los resultados pueden corresponder a varias ``match_date`` y llegar
+        tarde. Forma y descanso conservan esas fechas efectivas; la fecha de
+        disponibilidad solo controla la visibilidad. Todos los agregados de
+        una misma fecha se fusionan antes de publicar el lote, sin imponer un
+        orden intradía inexistente.
+        """
+
+        checked_availability = _validate_date(
+            availability_date,
+            field_name="availability_date",
+        )
+        if (
+            self._last_date is not None
+            and checked_availability <= self._last_date
+        ):
+            raise HistoryDateOrderError(
+                "Los lotes de disponibilidad deben aplicarse en fechas "
+                f"estrictamente crecientes; última={self._last_date.isoformat()}, "
+                f"recibida={checked_availability.isoformat()}."
+            )
+        materialized = tuple(results)
+        if not materialized:
+            raise ValueError("results no puede ser vacío.")
+        for result in materialized:
+            if not isinstance(result, HistoricalMatchResult):
+                raise TypeError(
+                    "Cada resultado debe ser HistoricalMatchResult."
+                )
+            if result.match_date > checked_availability:
+                raise HistoryDateOrderError(
+                    "Un resultado no puede estar disponible antes de su "
+                    "match_date."
+                )
+
         player_aggregates: dict[
-            tuple[Gender, int],
+            tuple[date, Gender, int],
             list[int],
         ] = defaultdict(lambda: [0, 0])
         for result in materialized:
-            winner = player_aggregates[(result.gender, result.winner_id)]
+            winner = player_aggregates[
+                (result.match_date, result.gender, result.winner_id)
+            ]
             winner[0] += 1
             winner[1] += 1
-            loser = player_aggregates[(result.gender, result.loser_id)]
+            loser = player_aggregates[
+                (result.match_date, result.gender, result.loser_id)
+            ]
             loser[1] += 1
 
-        for key in sorted(player_aggregates):
-            wins, matches = player_aggregates[key]
+        for aggregate_key in sorted(player_aggregates):
+            match_date, gender, player_id = aggregate_key
+            wins, matches = player_aggregates[aggregate_key]
             self._append_player_block(
-                key,
-                match_date=checked_date,
+                (gender, player_id),
+                match_date=match_date,
                 wins=wins,
                 matches=matches,
             )
 
-        for result in materialized:
+        for result in sorted(
+            materialized,
+            key=lambda item: (
+                item.match_date,
+                item.gender,
+                item.winner_id,
+                item.loser_id,
+                item.surface or "",
+            ),
+        ):
             pair_key = self._pair_key(
                 result.gender,
                 result.winner_id,
@@ -544,4 +615,4 @@ class CausalHistoryState:
                     lower_id=lower_id,
                 )
 
-        self._last_date = effective_date
+        self._last_date = checked_availability

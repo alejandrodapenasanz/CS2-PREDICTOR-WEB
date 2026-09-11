@@ -114,7 +114,7 @@ feature mira al futuro, difieren → `PointInTimeError`. Tests incluidos:
 - **Run manifest** por evaluación (commit git, SHA-256 del dataset, params, versiones,
   métricas) → línea en `experiments.jsonl`.
 - `requirements.txt` conserva rangos; `requirements.lock.txt` fija el grafo
-  completo resuelto con Python 3.12 y es el fichero instalado por CI.
+  completo resuelto con CPython 3.13 y es el fichero instalado por CI.
 
 ## 7. Números del baseline (estado)
 

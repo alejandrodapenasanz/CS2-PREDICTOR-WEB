@@ -19,6 +19,7 @@ from types import MappingProxyType
 from typing import Mapping, cast
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from ..config import (
     ELO_DATABASE_PATH,
@@ -54,7 +55,12 @@ from ..modeling.data import (
     verify_training_dataset,
 )
 from ..modeling.service import LoadedDeploymentModel
+from ..modeling.promotion import has_equivalent_feature_gate
 from ..temporal import SourceDatePolicy, SourceDatePolicyError
+from .tennisratio_overlay import (
+    TennisRatioOverlayError,
+    build_tennisratio_overlay,
+)
 
 
 _HISTORY_COLUMNS = (
@@ -83,8 +89,13 @@ class GenderFeatureContext:
     training_metadata: TrainingDatasetMetadata
     elo_run_id: str
     elo_max_date: date
+    overlay_fingerprint: str | None
+    history_effective_max_date: date
+    history_available_max_date: date
     ranking_max_date: date
     targeted_history_rows: int
+    supplemental_result_rows: int
+    supplemental_ranking_rows: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,7 +235,7 @@ def _required_parameter(
         raise DailyContextError(
             f"feature_parameters.{name} no tiene el tipo publicado esperado."
         )
-    return value
+    return cast(int | float, value)
 
 
 def _feature_parameters(
@@ -297,35 +308,97 @@ def _elo_contract(
     return contract
 
 
+def _operational_result_cutoff(
+    parameters: Mapping[str, object],
+    *,
+    base_effective_max_date: date,
+    source_commit: str,
+) -> date:
+    """Recover the fixed persisted handoff without reopening its epoch.
+
+    Legacy Sackmann-only runs have no operational contract and retain the
+    historical dataset maximum. Once the contract exists, its commit and
+    cutoff are validated before the in-memory sidecar can query newer rows.
+    """
+
+    raw = parameters.get("operational_overlay")
+    if raw is None:
+        return base_effective_max_date
+    if not isinstance(raw, Mapping):
+        raise DailyContextError(
+            "El run Elo contiene un contrato operational_overlay inválido."
+        )
+    if raw.get("schema") not in {
+        "tennis-operational-elo-v1",
+        "tennis-operational-elo-v2",
+    }:
+        raise DailyContextError(
+            "El run Elo usa una versión desconocida del handoff operativo."
+        )
+    if raw.get("base_source_commit") != source_commit:
+        raise DailyContextError(
+            "El handoff operativo no pertenece al commit Sackmann activo."
+        )
+    cutoff_text = raw.get("cutoff_date")
+    if not isinstance(cutoff_text, str):
+        raise DailyContextError(
+            "El handoff operativo no declara un cutoff_date válido."
+        )
+    try:
+        cutoff = date.fromisoformat(cutoff_text)
+    except ValueError as exc:
+        raise DailyContextError(
+            "El cutoff_date del handoff operativo no es ISO válido."
+        ) from exc
+    if cutoff < base_effective_max_date:
+        raise DailyContextError(
+            "El corte operativo precede datos incluidos en la base Sackmann."
+        )
+    return cutoff
+
+
 def _read_target_history(
     metadata: TrainingDatasetMetadata,
     *,
     as_of_date: date,
     player_ids: tuple[int, ...],
 ) -> pd.DataFrame:
-    """Lee resultados disponibles ``< D`` de los jugadores objetivo."""
+    """Lee resultados disponibles ``< D`` sin requerir ``pyarrow.dataset``.
 
-    filters = [
-        [
-            ("result_available_date", "<", as_of_date),
-            ("player_a_id", "in", list(player_ids)),
-        ],
-        [
-            ("result_available_date", "<", as_of_date),
-            ("player_b_id", "in", list(player_ids)),
-        ],
-    ]
+    Windows Application Control puede bloquear el binario opcional
+    ``pyarrow.dataset`` aunque el lector Parquet base sea válido. La lectura
+    por lotes conserva el mismo predicado causal y evita cargar el histórico
+    completo en memoria o duplicar partidos donde ambos jugadores son objetivo.
+    """
+
+    target_ids = frozenset(player_ids)
+    cutoff_utc = pd.Timestamp(as_of_date, tz="UTC")
+    selected_batches: list[pd.DataFrame] = []
     try:
-        frame = pd.read_parquet(
-            metadata.path,
+        parquet = pq.ParquetFile(metadata.path)
+        for batch in parquet.iter_batches(
+            batch_size=65_536,
             columns=list(_HISTORY_COLUMNS),
-            filters=filters,
-        )
+        ):
+            frame = batch.to_pandas()
+            available = pd.to_datetime(
+                frame["result_available_date"],
+                errors="raise",
+                utc=True,
+            )
+            involved = frame["player_a_id"].isin(target_ids) | frame[
+                "player_b_id"
+            ].isin(target_ids)
+            selected = frame.loc[available.lt(cutoff_utc) & involved]
+            if not selected.empty:
+                selected_batches.append(selected)
     except Exception as exc:
         raise DailyContextError(
             f"No se pudo leer el histórico dirigido de {metadata.gender}."
         ) from exc
-    return frame
+    if not selected_batches:
+        return pd.DataFrame(columns=list(_HISTORY_COLUMNS))
+    return pd.concat(selected_batches, ignore_index=True, sort=False)
 
 
 def rebuild_history_state(
@@ -495,10 +568,16 @@ def _validate_model_source(
 
     if model.gender != metadata.gender:
         raise DailyContextError("El modelo activo pertenece a otro género.")
-    if model.estimator.dataset_fingerprint != source_manifest.fingerprint:
+    if (
+        model.estimator.dataset_fingerprint != source_manifest.fingerprint
+        and not has_equivalent_feature_gate(
+            champion_fingerprint=model.run_fingerprint,
+            feature_fingerprint=source_manifest.fingerprint,
+        )
+    ):
         raise DailyContextError(
             f"El modelo {model.gender} no corresponde al dataset de features "
-            "activo; reentrene antes de predecir."
+            "activo ni existe una equivalencia exacta acreditada por la puerta."
         )
     if model.training_source_rows != metadata.rows:
         raise DailyContextError(
@@ -540,6 +619,7 @@ def build_daily_feature_context(
     identity_quarantine_manifest_path: Path = (
         IDENTITY_QUARANTINE_MANIFEST_PATH
     ),
+    tennisratio_database_path: Path | None = None,
 ) -> DailyFeatureContext:
     """Construye builders por género y bloquea cualquier fuente incompatible."""
 
@@ -627,18 +707,41 @@ def build_daily_feature_context(
             raise DailyContextError(
                 f"La versión Elo activa de {gender} no coincide con features."
             )
-        if elo_contract.get("input_fingerprint") != elo_run.input_fingerprint:
-            raise DailyContextError(
-                f"El fingerprint Elo activo de {gender} no coincide."
-            )
         if elo_contract.get("algorithm_version") != elo_run.algorithm_version:
             raise DailyContextError(
                 f"El contrato de algoritmo Elo {gender} no coincide."
             )
-        if elo_contract.get("parameters") != elo_run.parameters:
+        expected_parameters = elo_contract.get("parameters")
+        if not isinstance(expected_parameters, Mapping):
             raise DailyContextError(
-                f"Los parámetros/identidad Elo de {gender} no coinciden."
+                f"El contrato Elo de {gender} no declara parámetros."
             )
+        exact_elo_run = (
+            elo_contract.get("input_fingerprint") == elo_run.input_fingerprint
+        )
+        active_base_parameters = dict(elo_run.parameters)
+        active_operational_contract = active_base_parameters.pop(
+            "operational_overlay",
+            None,
+        )
+        if exact_elo_run:
+            if dict(elo_run.parameters) != dict(expected_parameters):
+                raise DailyContextError(
+                    f"Los parámetros/identidad Elo de {gender} no coinciden."
+                )
+        elif (
+            not isinstance(active_operational_contract, Mapping)
+            or active_base_parameters != dict(expected_parameters)
+        ):
+            raise DailyContextError(
+                f"El Elo activo de {gender} no es una extensión operativa "
+                "exacta de la base usada por las features."
+            )
+        operational_result_cutoff = _operational_result_cutoff(
+            elo_run.parameters,
+            base_effective_max_date=metadata.max_date,
+            source_commit=elo_run.source_commit,
+        )
         if elo_contract.get("source_date_policy") != date_policy.as_dict():
             raise DailyContextError(
                 f"La política temporal Elo de {gender} no coincide."
@@ -672,12 +775,64 @@ def build_daily_feature_context(
             feature_parameters=parameters,
             source_date_policy=date_policy,
         )
+        base_history_available_date = date_policy.availability_date(
+            metadata.max_date
+        )
+        elo_provider = None
+        ranking_provider = ranking_index
+        overlay_fingerprint = None
+        history_effective_max_date = metadata.max_date
+        history_available_max_date = base_history_available_date
+        ranking_max_date = ranking_index.max_ranking_date
+        supplemental_result_rows = 0
+        supplemental_ranking_rows = 0
+        if tennisratio_database_path is not None:
+            try:
+                overlay = build_tennisratio_overlay(
+                    gender=gender,
+                    as_of_date=cutoff,
+                    # Effective overlap and state availability are different
+                    # clocks: the sidecar may safely fill the embargo gap when
+                    # its own observation became available after the Elo base.
+                    base_result_effective_cutoff=operational_result_cutoff,
+                    base_history_effective_max_date=metadata.max_date,
+                    base_history_available_max_date=(
+                        base_history_available_date
+                    ),
+                    target_player_ids=player_ids,
+                    history_state=history_state,
+                    ranking_index=ranking_index,
+                    elo_store=elo_store,
+                    elo_run_id=elo_run.run_id,
+                    elo_base_date=cast(date, elo_run.max_event_date),
+                    elo_parameters=elo_run.parameters,
+                    source_commit=elo_run.source_commit,
+                    database_path=Path(tennisratio_database_path),
+                )
+            except TennisRatioOverlayError as exc:
+                raise DailyContextError(
+                    "El overlay causal TennisRatio no pudo verificarse."
+                ) from exc
+            elo_provider = overlay.elo_provider
+            ranking_provider = overlay.ranking_provider
+            overlay_fingerprint = overlay.overlay_fingerprint
+            history_effective_max_date = (
+                overlay.history_effective_max_date
+            )
+            history_available_max_date = (
+                overlay.history_available_max_date
+            )
+            ranking_max_date = overlay.ranking_max_date
+            supplemental_result_rows = overlay.supplemental_results
+            supplemental_ranking_rows = overlay.supplemental_rankings
         builder = MatchFeatureBuilder(
             history_state=history_state,
             ranking_index=ranking_index,
             age_index=age_index,
             elo_database_path=Path(elo_database_path),
             elo_run_id=elo_run.run_id,
+            elo_provider=elo_provider,
+            ranking_provider=ranking_provider,
         )
         contexts[gender] = GenderFeatureContext(
             gender=gender,
@@ -685,8 +840,13 @@ def build_daily_feature_context(
             training_metadata=metadata,
             elo_run_id=elo_run.run_id,
             elo_max_date=cast(date, elo_run.max_event_date),
-            ranking_max_date=ranking_index.max_ranking_date,
+            overlay_fingerprint=overlay_fingerprint,
+            history_effective_max_date=history_effective_max_date,
+            history_available_max_date=history_available_max_date,
+            ranking_max_date=ranking_max_date,
             targeted_history_rows=len(directed),
+            supplemental_result_rows=supplemental_result_rows,
+            supplemental_ranking_rows=supplemental_ranking_rows,
         )
     return DailyFeatureContext(
         feature_fingerprint=source_manifest.fingerprint,

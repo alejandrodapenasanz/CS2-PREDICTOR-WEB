@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+
 from .parser import Parser
 
 
@@ -17,7 +18,9 @@ class PlayerRoleStatsParser(Parser):
 
     @staticmethod
     def _parse_stat_section(section: Any) -> Optional[Dict[str, Any]]:
-        main_title_raw = section.xpath('normalize-space(.//div[@class="role-stats-section-title"]/text()[normalize-space()][1])').get()
+        main_title_raw = section.xpath(
+            'normalize-space(.//div[@class="role-stats-section-title"]/text()[normalize-space()][1])'
+        ).get()
         main_title = main_title_raw.strip() if main_title_raw else ""
 
         main_score_raw = section.xpath('string(.//div[@class="row-stats-section-score"])').get()
