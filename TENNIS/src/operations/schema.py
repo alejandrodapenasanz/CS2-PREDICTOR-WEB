@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Final
 
 
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 SCHEMA_SQL: Final[str] = """
 CREATE TABLE IF NOT EXISTS schema_versions (
@@ -114,6 +114,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     model_profile TEXT,
     model_fingerprint TEXT,
     model_training_max_date TEXT,
+    model_training_available_max_date TEXT,
     feature_fingerprint TEXT,
     is_valid INTEGER NOT NULL CHECK (is_valid IN (0, 1)),
     invalid_reason TEXT,
@@ -347,4 +348,3 @@ BEGIN
     SELECT RAISE(ABORT, 'conflicts son append-only');
 END;
 """
-

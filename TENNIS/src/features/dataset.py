@@ -3,28 +3,31 @@
 El proceso verifica el snapshot Sackmann, ordena las filas mediante un spool
 SQLite, congela cada fecha y genera las features antes de aplicar sus
 resultados. Elo y el estado de forma/H2H/descanso avanzan únicamente después de
-cerrar todas las filas de ``D``. Los artefactos Parquet se publican desde un
-directorio de staging y el manifiesto activo se reemplaza en último lugar.
+cerrar todas las filas de ``D``. Los artefactos Parquet se publican como un run
+inmutable desde staging y el puntero activo se reemplaza atómicamente al final.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 import csv
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, date, datetime
 import hashlib
 import json
 import logging
-import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
-import tempfile
 from typing import Final, Iterable, Literal, Mapping, Sequence, cast
+import uuid
 
 import pandas as pd
 
+from ..artifact_integrity import (
+    build_code_inventory,
+    canonicalise_code_inventory,
+)
 from ..config import (
     FEATURES_PROCESSED_DIR,
     PROJECT_ROOT,
@@ -39,13 +42,33 @@ from ..elo import (
     EloParameters,
     EventColumns,
     Gender,
+    MatchEvent,
     RatedMatch,
     events_from_dataframe,
     load_verified_manifest,
 )
-from ..elo.build import VerifiedManifest
-from ..elo.build import EXPECTED_SOURCE_REPOSITORY
+from ..elo.build import (
+    ELO_CODE_PATHS,
+    EXPECTED_SOURCE_REPOSITORY,
+    VerifiedManifest,
+    compute_input_fingerprint as compute_elo_input_fingerprint,
+)
+from ..elo.engine import (
+    IDENTITY_EXCLUSION_RULE,
+    normalise_identity_exclusion_after_dates,
+)
+from ..temporal import (
+    DEFAULT_SOURCE_DATE_POLICY,
+    SourceDatePolicy,
+)
 from .orientation import orient_match
+from .artifacts import (
+    FeatureArtifactError,
+    activate_feature_run,
+    find_verified_feature_run,
+    preflight_feature_publication,
+    publish_feature_run,
+)
 from .parameters import (
     DEFAULT_FEATURE_PARAMETERS,
     FEATURE_SCHEMA_VERSION,
@@ -103,6 +126,30 @@ _PLAYER_PATH_BY_GENDER: Final[Mapping[Gender, str]] = {
     "M": "atp/atp_players.csv",
     "F": "wta/wta_players.csv",
 }
+FEATURE_CODE_PATHS: Final[tuple[str, ...]] = (
+    "scripts/build_features.py",
+    "src/artifact_integrity.py",
+    "src/data_loaders.py",
+    "src/elo/build.py",
+    "src/elo/engine.py",
+    "src/elo/events.py",
+    "src/elo/parameters.py",
+    "src/elo/types.py",
+    "src/features/dataset.py",
+    "src/features/artifacts.py",
+    "src/features/levels.py",
+    "src/features/market.py",
+    "src/features/orientation.py",
+    "src/features/parameters.py",
+    "src/features/players.py",
+    "src/features/rankings.py",
+    "src/features/schema.py",
+    "src/features/source.py",
+    "src/features/state.py",
+    "src/features/vector.py",
+    "src/identity_integrity.py",
+    "src/temporal.py",
+)
 
 
 class FeatureDatasetError(RuntimeError):
@@ -583,10 +630,18 @@ def _input_fingerprint(
     inventory: Sequence[Mapping[str, object]],
     feature_parameters: FeatureParameters,
     elo_parameters: EloParameters,
-    excluded_player_keys: frozenset[tuple[Gender, int]],
+    identity_exclusion_after_dates: Mapping[tuple[Gender, int], date],
+    source_date_policy: SourceDatePolicy,
+    elo_contracts: Mapping[str, Mapping[str, object]],
+    code_inventory: Iterable[Mapping[str, object]] | None = None,
 ) -> str:
-    """Resume fuentes, fórmulas y esquema en una identidad reproducible."""
+    """Resume fuentes, fórmulas, código y esquema de forma reproducible."""
 
+    resolved_code_inventory = canonicalise_code_inventory(
+        build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
+        if code_inventory is None
+        else code_inventory
+    )
     payload = {
         "schema_version": FEATURE_SCHEMA_VERSION,
         "source_commit": source_commit,
@@ -597,10 +652,16 @@ def _input_fingerprint(
         "elo_parameters": elo_parameters.as_dict(),
         "training_columns": list(TRAINING_COLUMNS),
         "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
-        "excluded_player_keys": [
-            [gender, player_id]
-            for gender, player_id in sorted(excluded_player_keys)
+        "code_inventory": list(resolved_code_inventory),
+        "historical_identity_exclusion": "disabled_noncausal_dob_metadata",
+        "identity_diagnostic_first_match_dates": [
+            [gender, player_id, first_match_date.isoformat()]
+            for (gender, player_id), first_match_date in sorted(
+                identity_exclusion_after_dates.items()
+            )
         ],
+        "source_date_policy": source_date_policy.as_dict(),
+        "elo_contracts": dict(elo_contracts),
     }
     encoded = json.dumps(
         payload,
@@ -609,6 +670,43 @@ def _input_fingerprint(
         separators=(",", ":"),
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _expected_elo_contracts(
+    manifest: VerifiedManifest,
+    *,
+    genders: Sequence[Gender],
+    elo_parameters: EloParameters,
+    source_date_policy: SourceDatePolicy,
+) -> Mapping[str, Mapping[str, object]]:
+    """Reproduce exactamente el run Elo compatible con estas features."""
+
+    code_inventory = build_code_inventory(PROJECT_ROOT, ELO_CODE_PATHS)
+    persisted_parameters: Mapping[str, object] = {
+        **elo_parameters.as_dict(),
+        "artifact_code_inventory": list(code_inventory),
+        "source_date_policy": source_date_policy.as_dict(),
+        "identity_exclusion_rule": IDENTITY_EXCLUSION_RULE,
+        "identity_exclusion_after_dates": [],
+        "identity_exclusion_effective_after_dates": [],
+    }
+    return {
+        gender: {
+            "input_fingerprint": compute_elo_input_fingerprint(
+                manifest.select_gender(gender),
+                elo_parameters.as_dict(),
+                ALGORITHM_VERSION,
+                {},
+                code_inventory,
+                source_date_policy,
+            ),
+            "algorithm_version": ALGORITHM_VERSION,
+            "parameters": dict(persisted_parameters),
+            "source_date_policy": source_date_policy.as_dict(),
+            "historical_identity_exclusion": "disabled",
+        }
+        for gender in genders
+    }
 
 
 def _optional_text(value: object) -> str | None:
@@ -682,6 +780,7 @@ def _training_row(
     ranking_index: RankingIndex,
     age_index: PlayerAgeIndex,
     feature_parameters: FeatureParameters,
+    source_date_policy: SourceDatePolicy,
 ) -> dict[str, object]:
     """Construye una fila completa antes de incorporar el resultado de D."""
 
@@ -740,6 +839,9 @@ def _training_row(
         "tourney_id": event.tourney_id,
         "tourney_name": context.tourney_name,
         "match_num": event.match_num,
+        "result_available_date": source_date_policy.availability_date(
+            event.result_source_date
+        ),
     }
     if tuple(row) != AUDIT_COLUMNS:
         raise RuntimeError("La metadata diverge de AUDIT_COLUMNS.")
@@ -782,7 +884,8 @@ def _build_gender_parquet(
     chunksize: int,
     parquet_buffer_rows: int,
     fingerprint: str,
-    excluded_player_keys: frozenset[tuple[Gender, int]],
+    identity_exclusion_after_dates: Mapping[tuple[Gender, int], date],
+    source_date_policy: SourceDatePolicy,
 ) -> GenderDatasetAudit:
     """Procesa un universo cronológicamente y escribe su Parquet de staging."""
 
@@ -814,7 +917,7 @@ def _build_gender_parquet(
         elo_parameters,
         run_id=f"features-{gender}-{fingerprint[:16]}",
         source_commit=manifest.source_commit,
-        excluded_player_keys=excluded_player_keys,
+        identity_exclusion_after_dates={},
     )
     history = CausalHistoryState(
         recent_matches=feature_parameters.recent_matches,
@@ -843,6 +946,55 @@ def _build_gender_parquet(
     canonical_levels: Counter[str] = Counter()
     missing_rank_sides = 0
     missing_age_sides = 0
+    pending_by_availability: dict[date, list[MatchEvent]] = {}
+
+    def apply_results_available_before(cutoff: date) -> None:
+        """Aplica resultados con disponibilidad estrictamente anterior."""
+
+        available_dates = sorted(
+            available_date
+            for available_date in pending_by_availability
+            if available_date < cutoff
+        )
+        for available_date in available_dates:
+            pending_events = pending_by_availability.pop(available_date)
+            effective_events = tuple(
+                replace(
+                    event,
+                    date=available_date,
+                    source_date=event.result_source_date,
+                )
+                for event in pending_events
+            )
+            available_block = engine.process_date_block(
+                available_date,
+                effective_events,
+            )
+            if not available_block.rated_matches:
+                continue
+            source_dates = {
+                rated.event.result_source_date
+                for rated in available_block.rated_matches
+            }
+            if len(source_dates) != 1:
+                raise FeatureDatasetError(
+                    "Un bloque disponible mezcla tourney_date incompatibles."
+                )
+            source_match_date = next(iter(source_dates))
+            history.apply_date_block(
+                source_match_date,
+                (
+                    HistoricalMatchResult(
+                        match_date=rated.event.result_source_date,
+                        gender=rated.event.gender,
+                        winner_id=rated.event.winner_id,
+                        loser_id=rated.event.loser_id,
+                        surface=rated.event.surface,
+                    )
+                    for rated in available_block.rated_matches
+                ),
+                availability_date=available_date,
+            )
     try:
         for date_frame in iter_spooled_feature_date_frames(
             spool_path,
@@ -857,13 +1009,13 @@ def _build_gender_parquet(
             if not events:
                 continue
             match_date = events[0].date
+            apply_results_available_before(match_date)
             contexts = _source_context_by_provenance(date_frame)
-            block = engine.process_date_block(match_date, events)
+            block = engine.preview_date_block(match_date, events)
             date_blocks += 1
             exclusions.update(
                 dict(block.audit.excluded_by_reason)
             )
-            history_results: list[HistoricalMatchResult] = []
             for rated in block.rated_matches:
                 event = rated.event
                 if first_date is None:
@@ -887,6 +1039,7 @@ def _build_gender_parquet(
                     ranking_index=ranking_index,
                     age_index=age_index,
                     feature_parameters=feature_parameters,
+                    source_date_policy=source_date_policy,
                 )
                 buffer.append(row)
                 training_rows += 1
@@ -896,19 +1049,15 @@ def _build_gender_parquet(
                 missing_rank_sides += int(row["ranking_missing_b"])
                 missing_age_sides += int(row["age_missing_a"])
                 missing_age_sides += int(row["age_missing_b"])
-                history_results.append(
-                    HistoricalMatchResult(
-                        match_date=event.date,
-                        gender=event.gender,
-                        winner_id=event.winner_id,
-                        loser_id=event.loser_id,
-                        surface=event.surface,
-                    )
+                available_date = source_date_policy.availability_date(
+                    event.result_source_date
                 )
+                pending_by_availability.setdefault(
+                    available_date,
+                    [],
+                ).append(event)
                 if len(buffer) >= parquet_buffer_rows:
                     _write_rows(writer, buffer, schema)
-            if history_results:
-                history.apply_date_block(match_date, history_results)
             if date_blocks % 500 == 0:
                 LOGGER.info(
                     "Features %s: %d fechas, %d filas.",
@@ -1125,6 +1274,7 @@ def _parse_ranking_audit(
 def _load_current_report(
     manifest_path: Path,
     *,
+    artifact_dir: Path,
     output_dir: Path,
     fingerprint: str,
     genders: Sequence[Gender],
@@ -1154,7 +1304,7 @@ def _load_current_report(
         return None
     try:
         datasets = tuple(
-            _parse_dataset_audit(item, output_dir)
+            _parse_dataset_audit(item, artifact_dir)
             for item in raw_datasets
             if isinstance(item, Mapping)
         )
@@ -1180,7 +1330,7 @@ def _load_current_report(
     conflicts = payload.get("conflict_inventory")
     if not isinstance(conflicts, Mapping):
         return None
-    conflict_path = output_dir / str(conflicts.get("path", ""))
+    conflict_path = artifact_dir / str(conflicts.get("path", ""))
     expected_size = conflicts.get("size")
     expected_hash = conflicts.get("sha256")
     if (
@@ -1205,7 +1355,7 @@ def _load_current_report(
 
 
 def _safe_cleanup_staging(path: Path, output_dir: Path) -> None:
-    """Elimina solo un staging hijo con el prefijo creado por este módulo."""
+    """Elimina solo un workspace hijo creado por este módulo."""
 
     resolved = path.resolve()
     parent = output_dir.resolve()
@@ -1220,6 +1370,33 @@ def _safe_cleanup_staging(path: Path, output_dir: Path) -> None:
         shutil.rmtree(resolved)
 
 
+def _create_build_workspace(output_dir: Path) -> Path:
+    """Crea un workspace unico heredando la ACL del almacen.
+
+    En Windows con Python 3.13, ``tempfile.mkdtemp`` crea deliberadamente el
+    directorio con una DACL privada equivalente a ``0o700``. Al publicar el
+    hijo mediante ``os.replace`` esa DACL viaja al run inmutable y otro
+    proceso puede quedar sin lectura. ``Path.mkdir`` usa la herencia normal
+    del padre, que es el contrato necesario para los artefactos compartidos.
+    """
+
+    resolved_output = output_dir.resolve()
+    for _ in range(32):
+        candidate = resolved_output / f".feature-build-{uuid.uuid4().hex}"
+        try:
+            candidate.mkdir()
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            raise FeatureDatasetError(
+                "No se pudo crear el workspace heredable de features."
+            ) from exc
+        return candidate
+    raise FeatureDatasetError(
+        "No se pudo reservar un nombre unico para el workspace de features."
+    )
+
+
 def build_training_datasets(
     *,
     manifest_path: Path = SACKMANN_MANIFEST_PATH,
@@ -1231,7 +1408,10 @@ def build_training_datasets(
     force: bool = False,
     feature_parameters: FeatureParameters = DEFAULT_FEATURE_PARAMETERS,
     elo_parameters: EloParameters = DEFAULT_ELO_PARAMETERS,
-    excluded_player_keys: Iterable[tuple[Gender, int]] = (),
+    identity_exclusion_after_dates: (
+        Mapping[tuple[Gender, int], date] | None
+    ) = None,
+    source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
 ) -> FeatureDatasetBuildReport:
     """Construye y publica datasets separados por género sin información futura.
 
@@ -1245,7 +1425,10 @@ def build_training_datasets(
         force: Reconstruye aunque el fingerprint activo sea idéntico.
         feature_parameters: Ventanas, edad y semilla aprobadas.
         elo_parameters: Fórmula Elo de la fase 3.
-        excluded_player_keys: Claves ambiguas excluidas de todo el histórico.
+        identity_exclusion_after_dates: Primeras apariciones diagnósticas de
+            claves con DOB incompatible. Se incorporan al fingerprint y al
+            bloqueo operativo actual, pero nunca seleccionan filas históricas.
+        source_date_policy: Embargo causal entre fecha fuente y disponibilidad.
 
     Returns:
         Informe de publicación, balance, fuentes y cuarentenas.
@@ -1266,22 +1449,11 @@ def build_training_datasets(
         raise TypeError("feature_parameters debe ser FeatureParameters.")
     if not isinstance(elo_parameters, EloParameters):
         raise TypeError("elo_parameters debe ser EloParameters.")
-    checked_quarantine: set[tuple[Gender, int]] = set()
-    for key in excluded_player_keys:
-        if (
-            not isinstance(key, tuple)
-            or len(key) != 2
-            or key[0] not in {"M", "F"}
-            or isinstance(key[1], bool)
-            or not isinstance(key[1], int)
-            or key[1] < 0
-        ):
-            raise ValueError(
-                "excluded_player_keys debe contener (gender, player_id) "
-                "válidos."
-            )
-        checked_quarantine.add((cast(Gender, key[0]), key[1]))
-    quarantine = frozenset(checked_quarantine)
+    if not isinstance(source_date_policy, SourceDatePolicy):
+        raise TypeError("source_date_policy debe ser SourceDatePolicy.")
+    quarantine = normalise_identity_exclusion_after_dates(
+        identity_exclusion_after_dates
+    )
 
     resolved_manifest = _ensure_project_path(
         Path(manifest_path),
@@ -1299,6 +1471,12 @@ def build_training_datasets(
             "diagnóstico distinto dentro de TENNIS/."
         )
     resolved_output.mkdir(parents=True, exist_ok=True)
+    try:
+        preflight_feature_publication(output_dir=resolved_output)
+    except FeatureArtifactError as exc:
+        raise FeatureDatasetError(
+            "La publicación generacional de features falló en preflight."
+        ) from exc
     verified = load_verified_manifest(
         resolved_manifest,
         resolved_raw,
@@ -1309,31 +1487,52 @@ def build_training_datasets(
         genders=genders,
         verified_manifest=verified,
     )
+    code_inventory = build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
+    elo_contracts = _expected_elo_contracts(
+        verified,
+        genders=genders,
+        elo_parameters=elo_parameters,
+        source_date_policy=source_date_policy,
+    )
     fingerprint = _input_fingerprint(
         source_commit=verified.source_commit,
         genders=genders,
         inventory=inventory,
         feature_parameters=feature_parameters,
         elo_parameters=elo_parameters,
-        excluded_player_keys=quarantine,
+        identity_exclusion_after_dates=quarantine,
+        source_date_policy=source_date_policy,
+        elo_contracts=elo_contracts,
+        code_inventory=code_inventory,
     )
-    active_manifest_path = resolved_output / MANIFEST_FILENAME
+    existing = find_verified_feature_run(
+        fingerprint,
+        output_dir=resolved_output,
+    )
     if not force:
-        current = _load_current_report(
-            active_manifest_path,
-            output_dir=resolved_output,
-            fingerprint=fingerprint,
-            genders=genders,
-        )
-        if current is not None:
+        if existing is not None:
+            activated = activate_feature_run(
+                existing,
+                output_dir=resolved_output,
+            )
+            current = _load_current_report(
+                activated.manifest_path,
+                artifact_dir=activated.run_dir,
+                output_dir=resolved_output,
+                fingerprint=fingerprint,
+                genders=genders,
+            )
+            if current is None:
+                raise FeatureDatasetError(
+                    "El run verificado no pudo reconstruir su informe."
+                )
             return current
 
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=".feature-build-",
-            dir=resolved_output,
-        )
-    )
+    staging = _create_build_workspace(resolved_output)
+    work_dir = staging / "work"
+    publish_dir = staging / "publish"
+    work_dir.mkdir()
+    publish_dir.mkdir()
     dataset_audits: list[GenderDatasetAudit] = []
     ranking_audits: list[RankingBuildAudit] = []
     conflict_parts: list[Path] = []
@@ -1357,13 +1556,13 @@ def build_training_datasets(
                 raw_dir=resolved_raw,
             )
             ranking_audits.append(_ranking_audit(ranking_index))
-            conflict_part = staging / (
+            conflict_part = work_dir / (
                 f"ranking_conflicts_{selected_gender}.csv"
             )
             ranking_index.write_conflict_inventory(conflict_part)
             conflict_parts.append(conflict_part)
-            spool_path = staging / f"source_{selected_gender}.sqlite3"
-            parquet_path = staging / (
+            spool_path = work_dir / f"source_{selected_gender}.sqlite3"
+            parquet_path = publish_dir / (
                 f"training_{selected_gender}.parquet"
             )
             LOGGER.info(
@@ -1383,11 +1582,12 @@ def build_training_datasets(
                     chunksize=selected_chunksize,
                     parquet_buffer_rows=selected_buffer,
                     fingerprint=fingerprint,
-                    excluded_player_keys=quarantine,
+                    identity_exclusion_after_dates=quarantine,
+                    source_date_policy=source_date_policy,
                 )
             )
 
-        combined_conflicts = staging / CONFLICTS_FILENAME
+        combined_conflicts = publish_dir / CONFLICTS_FILENAME
         conflict_rows = _combine_conflict_inventories(
             conflict_parts,
             combined_conflicts,
@@ -1401,18 +1601,35 @@ def build_training_datasets(
             "source_repository": verified.source_repository,
             "source_commit": verified.source_commit,
             "fingerprint": fingerprint,
+            "code_inventory": list(code_inventory),
             "genders": list(genders),
             "feature_parameters": feature_parameters.as_dict(),
             "elo_algorithm_version": ALGORITHM_VERSION,
             "elo_parameters": elo_parameters.as_dict(),
+            "source_date_policy": source_date_policy.as_dict(),
+            "elo_contracts": dict(elo_contracts),
             "training_columns": list(TRAINING_COLUMNS),
             "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
             "historical_odds_available": False,
             "identity_quarantine": {
                 "keys": [
                     [gender_value, player_id]
-                    for gender_value, player_id in sorted(quarantine)
+                    for gender_value, player_id in sorted(quarantine.keys())
                 ],
+                "diagnostic_first_match_dates": [
+                    {
+                        "gender": gender_value,
+                        "player_id": player_id,
+                        "first_match_date": first_match_date.isoformat(),
+                        "causal_evidence_date": None,
+                    }
+                    for (
+                        gender_value,
+                        player_id,
+                    ), first_match_date in sorted(quarantine.items())
+                ],
+                "historical_exclusion_rule": "disabled_noncausal_dob_metadata",
+                "usage_contract": "current_inference_block_only",
                 "rows": len(quarantine),
             },
             "datasets": [
@@ -1428,7 +1645,7 @@ def build_training_datasets(
                 "sha256": conflict_hash,
             },
         }
-        staging_manifest = staging / MANIFEST_FILENAME
+        staging_manifest = publish_dir / MANIFEST_FILENAME
         staging_manifest.write_text(
             json.dumps(
                 manifest_payload,
@@ -1440,21 +1657,22 @@ def build_training_datasets(
             encoding="utf-8",
         )
 
-        published_audits: list[GenderDatasetAudit] = []
-        for audit in dataset_audits:
-            destination = resolved_output / audit.output_path.name
-            os.replace(audit.output_path, destination)
-            published_audits.append(
-                GenderDatasetAudit(
-                    **{
-                        **asdict(audit),
-                        "output_path": destination,
-                    }
-                )
+        published = publish_feature_run(
+            publish_dir,
+            fingerprint=fingerprint,
+            output_dir=resolved_output,
+        )
+        raw_published_datasets = published.manifest.get("datasets")
+        if not isinstance(raw_published_datasets, list):
+            raise FeatureDatasetError(
+                "El run publicado perdió su inventario de datasets."
             )
-        conflict_destination = resolved_output / CONFLICTS_FILENAME
-        os.replace(combined_conflicts, conflict_destination)
-        os.replace(staging_manifest, active_manifest_path)
+        published_audits = [
+            _parse_dataset_audit(item, published.run_dir)
+            for item in raw_published_datasets
+            if isinstance(item, Mapping)
+        ]
+        conflict_destination = published.run_dir / CONFLICTS_FILENAME
     except BaseException:
         _safe_cleanup_staging(staging, resolved_output)
         raise
@@ -1464,7 +1682,7 @@ def build_training_datasets(
         source_commit=verified.source_commit,
         fingerprint=fingerprint,
         schema_version=FEATURE_SCHEMA_VERSION,
-        skipped=False,
+        skipped=published.skipped,
         datasets=tuple(published_audits),
         rankings=tuple(ranking_audits),
         conflict_inventory_path=conflict_destination,

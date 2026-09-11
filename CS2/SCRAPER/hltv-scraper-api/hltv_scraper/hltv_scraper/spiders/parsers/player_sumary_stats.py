@@ -1,4 +1,5 @@
 from typing import Any, Dict, Optional
+
 from .parser import Parser
 
 
@@ -18,9 +19,11 @@ class PlayerSummaryStatParser(Parser):
 
     @staticmethod
     def _extract_side_ratings(summary_stat_box: Any) -> tuple[Optional[str], Optional[str]]:
-        rating_wrapper_text = summary_stat_box.css("div.player-summary-stat-box-side-rating-background-wrapper::text").getall()
+        rating_wrapper_text = summary_stat_box.css(
+            "div.player-summary-stat-box-side-rating-background-wrapper::text"
+        ).getall()
         cleaned_rating_text = [text.strip() for text in rating_wrapper_text if text.strip()]
-        
+
         t_rating_value = cleaned_rating_text[0] if cleaned_rating_text else None
         ct_rating_value = cleaned_rating_text[1] if len(cleaned_rating_text) > 1 else None
         return t_rating_value, ct_rating_value
@@ -28,11 +31,13 @@ class PlayerSummaryStatParser(Parser):
     @staticmethod
     def _extract_summary_stats(summary_stat_box: Any) -> Dict[str, Dict[str, Optional[str]]]:
         summary_stats = {}
-        data_wrappers = summary_stat_box.css("div.player-summary-stat-box-right-bottom div.player-summary-stat-box-data-wrapper")
+        data_wrappers = summary_stat_box.css(
+            "div.player-summary-stat-box-right-bottom div.player-summary-stat-box-data-wrapper"
+        )
         for wrapper in data_wrappers:
             stat = PlayerSummaryStatParser._parse_stat_wrapper(wrapper)
             if stat:
-                summary_stats[stat['name']] = {'value': stat['value'], 'description': stat['description']}
+                summary_stats[stat["name"]] = {"value": stat["value"], "description": stat["description"]}
         return summary_stats
 
     @staticmethod
@@ -41,27 +46,27 @@ class PlayerSummaryStatParser(Parser):
         Parse a single stat wrapper to extract name, value, and description.
         """
         name_elem = wrapper.css("div.player-summary-stat-box-data-text")
-        name = name_elem.xpath('text()').get()
+        name = name_elem.xpath("text()").get()
         if not name:
             return None
         name = name.strip()
 
         value_elem = wrapper.css("div.player-summary-stat-box-data")
-        value = value_elem.xpath('text()').get()
+        value = value_elem.xpath("text()").get()
         if value:
             value = value.strip()
-            if '%' in value:
-                value = value.replace('%', '')
-            if value == '-':
+            if "%" in value:
+                value = value.replace("%", "")
+            if value == "-":
                 value = None
         else:
             value = None
 
         desc_elem = wrapper.css("div.player-summary-stat-box-breakdown-description")
-        description = desc_elem.xpath('text()').get()
+        description = desc_elem.xpath("text()").get()
         if description:
             description = description.strip()
         else:
             description = None
 
-        return {'name': name, 'value': value, 'description': description}
+        return {"name": name, "value": value, "description": description}

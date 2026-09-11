@@ -149,6 +149,8 @@ def build_frame(rows: list[dict[str, Any]]) -> tuple[list[dict[str, float]], np.
             m.get("date_obj"),
             m.get("event") or "",
             m.get("format") or "bo3",
+            (m.get("prematch_lineups") or {}).get("team1"),
+            (m.get("prematch_lineups") or {}).get("team2"),
         )
         feats.update(analytics_match_features(m))
         feats.update(postveto_features(state, m))

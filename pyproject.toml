@@ -5,7 +5,7 @@ cache_dir = "CS2/TESTS/.cache/pytest"
 
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py313"
 cache-dir = "CS2/TESTS/.cache/ruff"
 exclude = ["CS2/SCRAPER/Scrapling", "**/.venv", "**/site-packages"]
 
@@ -17,7 +17,7 @@ ignore = ["F401"]
 "CS2/TESTS/*" = ["F811", "E402"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.13"
 files = [
     "CS2/MODEL/cs2model/config.py",
     "CS2/MODEL/cs2model/economic.py",

@@ -1,12 +1,25 @@
-pandas
-numpy
-requests
-beautifulsoup4
-lxml
-unidecode
-scikit-learn
-lightgbm
-pyarrow
-joblib
-matplotlib
+# Dependencias directas mantenibles de runtime y puertas locales. Produccion
+# instala exclusivamente requirements.lock.txt; este archivo define el rango
+# permitido al regenerarlo.
+beautifulsoup4>=4.15,<4.16
+curl-cffi>=0.15,<0.16
+joblib>=1.5,<1.6
+lightgbm>=4.6,<5
+lxml>=6.1,<7
+matplotlib>=3.11,<3.12
+# Las wheels mypyc para CPython 3.13 son rechazadas por Application Control
+# en el host de produccion.  1.10.1 usa la wheel universal Python pura.
+mypy>=1.10.1,<1.10.2
+numpy>=2.4,<2.5
+pandas>=3.0,<3.1
+# 25.0.x is blocked by Windows Application Control when loading parquet.dll
+# under CPython 3.13 on the production host.  23.0.1 passes the real
+# pyarrow.parquet import smoke under that same policy.
+pyarrow>=23.0.1,<23.0.2
+requests>=2.34,<3
+pytest>=9.1,<10
+ruff>=0.16,<0.17
+scikit-learn>=1.8,<1.9
 scrapling[fetchers]==0.4.12
+Unidecode>=1.4,<2
+urllib3>=2.7,<3

@@ -24,6 +24,7 @@ from src.elo.build import (  # noqa: E402
     load_verified_manifest,
 )
 from src.elo.service import get_elo  # noqa: E402
+from src.elo.store import EloStore  # noqa: E402
 
 
 def _git_blob_sha(payload: bytes) -> str:
@@ -176,11 +177,22 @@ class EloManifestPipelineTest(unittest.TestCase):
                 gender="M",
                 chunksize=1,
             )
+            persisted_run = EloStore(first_database).resolve_complete_run(
+                gender="M",
+            )
+            code_inventory = persisted_run.parameters.get(
+                "artifact_code_inventory"
+            )
+            self.assertIsInstance(code_inventory, list)
+            self.assertIn(
+                "scripts/build_elo.py",
+                {entry["path"] for entry in code_inventory},
+            )
             before_append = get_elo(
                 gender="M",
                 player_id=1,
                 surface="Hard",
-                as_of_date=date(2024, 1, 3),
+                as_of_date=date(2024, 1, 24),
                 db_path=first_database,
             )
             repeated = build_elo_database(
@@ -218,14 +230,14 @@ class EloManifestPipelineTest(unittest.TestCase):
                 gender="M",
                 player_id=1,
                 surface="hard",
-                as_of_date=date(2024, 1, 3),
+                as_of_date=date(2024, 1, 24),
                 db_path=extended_database,
             )
             after_future_match = get_elo(
                 gender="M",
                 player_id=1,
                 surface="Hard",
-                as_of_date=date(2024, 1, 4),
+                as_of_date=date(2024, 1, 25),
                 db_path=extended_database,
             )
 
@@ -283,11 +295,85 @@ class EloManifestPipelineTest(unittest.TestCase):
                 gender="M",
                 player_id=1,
                 surface="Hard",
-                as_of_date=date(2024, 1, 2),
+                as_of_date=date(2024, 1, 23),
                 db_path=database,
             )
             self.assertEqual(snapshot.general_matches, 2)
             self.assertEqual(snapshot.surface_matches, 2)
+
+    def test_default_build_does_not_select_history_by_dob_metadata(
+        self,
+    ) -> None:
+        """El contrato productivo vacío conserva todo el histórico deportivo."""
+
+        rows = [
+            _match_row(
+                match_date="20240101",
+                match_num="1",
+                winner_id="1",
+                loser_id="2",
+            ),
+            _match_row(
+                match_date="20240102",
+                match_num="2",
+                winner_id="1",
+                loser_id="3",
+            ),
+            _match_row(
+                match_date="20240103",
+                match_num="3",
+                winner_id="1",
+                loser_id="4",
+            ),
+        ]
+        with self._temporary_project() as temporary_directory:
+            root = Path(temporary_directory)
+            raw_dir, manifest_path = _write_snapshot(
+                root,
+                rows=rows,
+                commit="e" * 40,
+            )
+            default_database = root / "default.sqlite3"
+            default = build_elo_database(
+                manifest_path=manifest_path,
+                raw_dir=raw_dir,
+                database_path=default_database,
+                gender="M",
+                chunksize=1,
+            )
+            explicit_empty = build_elo_database(
+                manifest_path=manifest_path,
+                raw_dir=raw_dir,
+                database_path=root / "explicit-empty.sqlite3",
+                gender="M",
+                chunksize=2,
+                identity_exclusion_after_dates={},
+            )
+            snapshot = get_elo(
+                gender="M",
+                player_id=1,
+                surface="Hard",
+                as_of_date=date(2024, 1, 25),
+                db_path=default_database,
+            )
+            persisted = EloStore(default_database).resolve_complete_run(
+                gender="M"
+            )
+
+        audit = default.audits[0]
+        self.assertEqual(audit.source_rows, 3)
+        self.assertEqual(audit.included_events, 3)
+        self.assertEqual(audit.excluded_events, 0)
+        self.assertNotIn("excluded_identity", audit.exclusions_by_reason)
+        self.assertEqual(snapshot.general_matches, 3)
+        self.assertEqual(
+            persisted.parameters["identity_exclusion_after_dates"],
+            [],
+        )
+        self.assertEqual(
+            default.input_fingerprints["M"],
+            explicit_empty.input_fingerprints["M"],
+        )
 
 
 if __name__ == "__main__":

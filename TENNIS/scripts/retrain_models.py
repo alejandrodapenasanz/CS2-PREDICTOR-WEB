@@ -3,7 +3,8 @@
 Qué hace:
     Verifica los Parquet causales de fase 6, ejecuta folds expansivos por
     temporada, calibra con Platt usando únicamente el bloque anterior, calcula
-    métricas globales/segmentadas y publica modelos versionados por género.
+    métricas globales/segmentadas, registra challengers versionados y aplica
+    la puerta champion/challenger antes de cualquier activación.
 
 Qué recibe:
     Rutas dentro de ``TENNIS/``, perfil de features, temporadas de evaluación
@@ -14,13 +15,15 @@ Cómo se ejecuta, desde ``TENNIS/``:
     ``python scripts/retrain_models.py``
     ``python scripts/retrain_models.py --first-test-season 2016
     --last-test-season 2025 --n-jobs 4``
+    ``python scripts/retrain_models.py --rollback``
+    ``python scripts/retrain_models.py --retention-preview``
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime, timedelta
 import json
 from pathlib import Path
 import sys
@@ -39,9 +42,19 @@ from src.modeling.parameters import (  # noqa: E402
     DEFAULT_LIGHTGBM_PARAMETERS,
     TemporalEvaluationParameters,
 )
+from src.modeling.data import (  # noqa: E402
+    ModelDataError,
+    load_feature_source_manifest,
+)
 from src.modeling.training import (  # noqa: E402
     ModelTrainingRun,
     retrain_models,
+    sync_active_documentation,
+)
+from src.modeling.promotion import rollback_last_good  # noqa: E402
+from src.modeling.retention import (  # noqa: E402
+    confirm_first_retention,
+    plan_model_retention,
 )
 
 
@@ -52,6 +65,22 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Entrena, calibra y valida temporalmente un modelo por género."
         )
+    )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--rollback",
+        action="store_true",
+        help="Restaura el run señalado por last_good y termina.",
+    )
+    mode.add_argument(
+        "--retention-preview",
+        action="store_true",
+        help="Muestra la keep-list y su token sin borrar nada.",
+    )
+    mode.add_argument(
+        "--confirm-prune",
+        metavar="TOKEN",
+        help="Confirma exactamente la preview actual y habilita la poda automática.",
     )
     parser.add_argument(
         "--manifest",
@@ -95,15 +124,29 @@ def build_parser() -> argparse.ArgumentParser:
         default=-1,
         help="Hilos de LightGBM; -1 usa los disponibles.",
     )
+    parser.add_argument(
+        "--training-as-of-date",
+        type=date.fromisoformat,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Corte causal del reentreno; por defecto hoy UTC. Solo usa "
+            "resultados con result_available_date estrictamente anterior."
+        ),
+    )
     return parser
 
 
-def infer_last_complete_season(manifest_path: Path) -> int:
+def infer_last_complete_season(
+    manifest_path: Path,
+    training_as_of_date: date,
+) -> int:
     """Obtiene la última temporada cerrada común sin usar filas futuras."""
 
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        source = load_feature_source_manifest(manifest_path)
+        payload = source.raw_payload
+    except ModelDataError as exc:
         raise ValueError(
             f"No se pudo leer el manifiesto {manifest_path}."
         ) from exc
@@ -126,17 +169,59 @@ def infer_last_complete_season(manifest_path: Path) -> int:
             max_years.append(date.fromisoformat(value).year)
         except ValueError as exc:
             raise ValueError(f"max_date inválida para {gender}.") from exc
-    return min(min(max_years), date.today().year - 1)
+    latest_admissible_source_date = training_as_of_date - timedelta(
+        days=source.source_date_policy.result_embargo_days + 1
+    )
+    last_fully_available_year = (
+        latest_admissible_source_date.year
+        if (
+            latest_admissible_source_date.month,
+            latest_admissible_source_date.day,
+        )
+        == (12, 31)
+        else latest_admissible_source_date.year - 1
+    )
+    return min(min(max_years), last_fully_available_year)
 
 
 def _print_report(run: ModelTrainingRun) -> None:
     """Muestra identidad, tamaños y métricas principales."""
 
-    action = "reutilizado" if run.skipped else "entrenado"
+    action = "reutilizado" if run.skipped else "entrenado y registrado"
     print(
         f"Run {action}: fingerprint={run.published.fingerprint}"
     )
     print(f"Ruta: {run.published.run_dir}")
+    print(run.promotion.message)
+    print(
+        "Champion activo: "
+        f"{run.promotion.active.fingerprint}; last_good: "
+        f"{run.promotion.last_good.fingerprint}"
+    )
+    print(run.retention.message)
+    decision = run.promotion.decision
+    if decision is not None:
+        print(
+            "Hold-out puerta: "
+            f"N={decision.n} periodo={decision.period_start}..{decision.period_end} "
+            f"temporadas={','.join(str(value) for value in decision.holdout_seasons)} "
+            f"calibracion={json.dumps(decision.calibration, sort_keys=True)}"
+        )
+        print("segmento\tN\taccuracy\tlog_loss\tbrier")
+        for row in decision.by_gender:
+            challenger = row["challenger"]
+            assert isinstance(challenger, Mapping)
+            print(
+                f"{row['gender']}\t{challenger['n']}\t"
+                f"{float(challenger['accuracy']):.6f}\t"
+                f"{float(challenger['log_loss']):.6f}\t"
+                f"{float(challenger['brier']):.6f}"
+            )
+    if not run.retention.applied:
+        print(
+            "Keep-list pendiente de confirmación: "
+            + json.dumps(run.retention.plan.as_dict(), ensure_ascii=False, sort_keys=True)
+        )
     print("gender\ttraining_rows\tevaluation_rows\tfolds\tmarket_status")
     for summary in run.summaries:
         print(
@@ -166,10 +251,40 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Ejecuta el reentreno completo y devuelve cero tras verificarlo."""
 
     args = build_parser().parse_args(argv)
+    if args.rollback:
+        rollback = rollback_last_good(args.output_dir)
+        sync_active_documentation(rollback.active)
+        print(rollback.message)
+        print(f"Champion activo: {rollback.active.fingerprint}")
+        print(f"last_good: {rollback.last_good.fingerprint}")
+        return 0
+    if args.retention_preview:
+        print(
+            json.dumps(
+                plan_model_retention(args.output_dir).as_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+        )
+        return 0
+    if args.confirm_prune is not None:
+        retention = confirm_first_retention(
+            args.confirm_prune,
+            output_dir=args.output_dir,
+        )
+        print(retention.message)
+        print(json.dumps(retention.plan.as_dict(), ensure_ascii=False, sort_keys=True))
+        return 0
+    training_cutoff = (
+        datetime.now(UTC).date()
+        if args.training_as_of_date is None
+        else args.training_as_of_date
+    )
     last_season = (
         args.last_test_season
         if args.last_test_season is not None
-        else infer_last_complete_season(args.manifest)
+        else infer_last_complete_season(args.manifest, training_cutoff)
     )
     evaluation = TemporalEvaluationParameters(
         first_test_season=args.first_test_season,
@@ -186,6 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         evaluation_parameters=evaluation,
         script_path=Path(__file__).resolve(),
         progress=lambda message: print(message, flush=True),
+        training_as_of_date=training_cutoff,
     )
     _print_report(run)
     return 0

@@ -74,9 +74,7 @@ def load_closed_predictions(db_path: Path) -> list[dict]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Monitor causal de drift del modelo en produccion")
     parser.add_argument("--db", default=str(DEFAULT_DB))
-    parser.add_argument(
-        "--config", default=os.environ.get("CS2_CONFIG_PATH", str(DEFAULT_CONFIG_PATH))
-    )
+    parser.add_argument("--config", default=os.environ.get("CS2_CONFIG_PATH", str(DEFAULT_CONFIG_PATH)))
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT))
     args = parser.parse_args()
 

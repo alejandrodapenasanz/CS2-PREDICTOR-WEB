@@ -21,6 +21,7 @@ AUDIT_COLUMNS: Final[tuple[str, ...]] = (
     "tourney_id",
     "tourney_name",
     "match_num",
+    "result_available_date",
 )
 TARGET_COLUMN: Final[str] = "y"
 TRAINING_COLUMNS: Final[tuple[str, ...]] = (
@@ -48,6 +49,7 @@ _STRING_COLUMNS: Final[frozenset[str]] = frozenset(
 _DATE_COLUMNS: Final[frozenset[str]] = frozenset(
     {
         "match_date",
+        "result_available_date",
         "ranking_date_a",
         "ranking_date_b",
         "birth_date_a",

@@ -1,4 +1,4 @@
-version: 3
+version: 6
 random_seed: 42
 
 training:
@@ -28,6 +28,43 @@ health_gates:
   min_recent_coverage_ratio: 0.5
   min_coverage_sample: 20
 
+# Un challenger solo puede sustituir al vivo sobre un holdout común que el
+# incumbent no haya visto. La banda epsilon evita promociones por ruido.
+promotion:
+  min_common_holdout_rows: 100
+  log_loss_epsilon: 0.001
+  brier_epsilon: 0.0005
+  auto_retrain_new_labeled: 100
+
+# La poda productiva permanece bloqueada hasta confirmar una primera keep-list.
+retention:
+  # 0 conserva exclusivamente los punteros latest + last_good.
+  registry_keep: 0
+  # Los runs citados por la BBDD/master son evidencia y permanecen protegidos.
+  # Entre los no referenciados solo se conservan el actual y el anterior.
+  pipeline_runs_keep: 2
+
+# Diagnostico descriptivo; nunca promueve ni activa features por si solo.
+segment_calibration:
+  min_backtest_segment_rows: 100
+  min_live_segment_rows: 100
+  min_live_total_rows_for_decisions: 1000
+  reliability_bins: 10
+  min_absolute_gap: 0.03
+  min_ece: 0.04
+
+# Challenger causal de rating sensible al roster. Ante >=2 sustituciones en el
+# quinteto anunciado, conserva una fraccion del credito sobre 1500:
+# f = floor + (1-floor) * jugadores_mantenidos/5. La nueva varianza de RD es
+# f*RD^2 + (1-f)*RD_max^2. No se activa si falta un 5v5 point-in-time completo.
+roster_rating:
+  lineup_size: 5
+  lookback_days: 90
+  core_change_min_replacements: 2
+  minimum_credit_fraction: 0.20
+  neutral_rating: 1500.0
+  maximum_rd: 350.0
+
 # Harness de evaluacion honesto (MODEL/evaluate.py + cs2model/evaluation.py).
 # El bucle externo estima rendimiento; el interno decide (hiperparam/familias/
 # calibracion) solo con datos pasados. Gap = embargo temporal.
@@ -44,6 +81,7 @@ evaluation:
   recency_half_life: 0.0   # 0 = sin ponderado por recencia
 
 feature_thresholds:
+  opening_odds: 120
   map_box_scores: 200
   event_history: 200
   analytics: 120
@@ -63,6 +101,7 @@ feature_thresholds:
   regime: 200
   context_total: 200
   context_per_environment: 50
+  segment_interactions: 800
   rich_target_total: 2000
   rich_target_per_class: 300
 

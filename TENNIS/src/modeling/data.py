@@ -18,8 +18,15 @@ from typing import Final, Literal, Mapping, Sequence, cast
 
 import pandas as pd
 
+from ..artifact_integrity import CodeInventoryError, verify_code_inventory
 from ..config import FEATURE_DATASET_MANIFEST_PATH, PROJECT_ROOT
 from ..features import MODEL_FEATURE_COLUMNS
+from ..features.dataset import FEATURE_CODE_PATHS
+from ..features.artifacts import (
+    FeatureArtifactError,
+    resolve_feature_manifest_path,
+)
+from ..temporal import SourceDatePolicy, SourceDatePolicyError
 
 
 Gender = Literal["M", "F"]
@@ -28,6 +35,7 @@ REFERENCE_COLUMNS: Final[tuple[str, ...]] = (
     "record_id",
     "gender",
     "match_date",
+    "result_available_date",
     "tour_level",
     "surface",
     "rank_a",
@@ -52,6 +60,7 @@ class FeatureSourceManifest:
     source_commit: str
     historical_odds_available: bool
     model_feature_columns: tuple[str, ...]
+    source_date_policy: SourceDatePolicy
     raw_payload: Mapping[str, object]
 
 
@@ -145,7 +154,13 @@ def load_feature_source_manifest(
         ModelDataError: Si el JSON, el esquema o la allowlist divergen.
     """
 
-    resolved = _ensure_project_path(manifest_path, "manifest_path")
+    requested = _ensure_project_path(manifest_path, "manifest_path")
+    try:
+        resolved = resolve_feature_manifest_path(requested)
+    except FeatureArtifactError as exc:
+        raise ModelDataError(
+            f"No se pudo resolver el manifiesto activo {requested}."
+        ) from exc
     try:
         payload = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -154,6 +169,17 @@ def load_feature_source_manifest(
         ) from exc
     if not isinstance(payload, Mapping):
         raise ModelDataError("El manifiesto de features debe ser un objeto JSON.")
+    try:
+        verify_code_inventory(
+            PROJECT_ROOT,
+            FEATURE_CODE_PATHS,
+            payload.get("code_inventory"),
+        )
+    except CodeInventoryError as exc:
+        raise ModelDataError(
+            "El dataset de features fue generado por código distinto del "
+            "runtime actual; se exige reconstruirlo."
+        ) from exc
 
     columns = payload.get("model_feature_columns")
     if (
@@ -175,6 +201,17 @@ def load_feature_source_manifest(
         raise ModelDataError(
             "historical_odds_available debe ser booleano en el manifiesto."
         )
+    raw_date_policy = payload.get("source_date_policy")
+    if not isinstance(raw_date_policy, Mapping):
+        raise ModelDataError(
+            "El manifiesto no declara source_date_policy; reconstruya features."
+        )
+    try:
+        source_date_policy = SourceDatePolicy.from_mapping(raw_date_policy)
+    except SourceDatePolicyError as exc:
+        raise ModelDataError(
+            "source_date_policy del manifiesto no es compatible."
+        ) from exc
 
     return FeatureSourceManifest(
         path=resolved,
@@ -189,6 +226,7 @@ def load_feature_source_manifest(
         ),
         historical_odds_available=historical_odds,
         model_feature_columns=typed_columns,
+        source_date_policy=source_date_policy,
         raw_payload=cast(Mapping[str, object], payload),
     )
 
@@ -340,6 +378,20 @@ def load_training_dataset(
     ).dt.normalize()
     if frame["match_date"].isna().any():
         raise ModelDataError("match_date contiene valores nulos.")
+    frame["result_available_date"] = pd.to_datetime(
+        frame["result_available_date"], errors="raise"
+    ).dt.normalize()
+    if frame["result_available_date"].isna().any():
+        raise ModelDataError("result_available_date contiene valores nulos.")
+    expected_available = frame["match_date"].map(
+        lambda value: pd.Timestamp(
+            source_manifest.source_date_policy.availability_date(value.date())
+        )
+    )
+    if not frame["result_available_date"].equals(expected_available):
+        raise ModelDataError(
+            "result_available_date no coincide con source_date_policy."
+        )
     observed_genders = set(frame["gender"].dropna().unique())
     if observed_genders != {gender}:
         raise ModelDataError(

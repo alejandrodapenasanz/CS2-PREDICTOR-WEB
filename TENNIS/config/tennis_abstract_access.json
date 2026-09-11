@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "operator_authorization_confirmed": true,
+  "confirmed_on": "2026-09-05",
+  "authorization_basis": "Operator explicitly confirmed Tennis Abstract permission for automated player/history data, including jsfrags, jsmatches and jsplayers. This records the operator's declaration, not independent verification.",
+  "scope": "daily_player_history_shadow_acquisition",
+  "migration_confirmed_on": "2026-09-06",
+  "browser_recovery_enabled": true,
+  "browser_authorized_on": "2026-09-06",
+  "browser_headless": false,
+  "browser_timeout_seconds": 90,
+  "migration_policy": "Keep the frozen Sackmann training archive. Acquire Tennis Abstract histories daily in a separate source store; do not feed ambiguous dates/identities to Elo or models. Validate coverage and causal contracts before retiring operational sources."
+}

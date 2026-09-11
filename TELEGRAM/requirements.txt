@@ -1,0 +1,6 @@
+# Python 3.13. Runtime imports use stdlib; Windows needs IANA timezone data.
+tzdata>=2025.1
+# Local gates; tests never contact Telegram.
+pytest>=8,<9
+ruff>=0.9,<1
+mypy>=1.14,<2

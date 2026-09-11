@@ -120,18 +120,22 @@ class TourLevelNormalizationTest(unittest.TestCase):
             "Challenger": "Challenger",
             "ITF": "ITF",
         }
-        for raw_level, canonical in expected.items():
-            with self.subTest(raw_level=raw_level):
-                context = normalize_tour_level(
-                    raw_level,
-                    "tennis_explorer",
-                )
-                self.assertEqual(context.raw_level, raw_level)
-                self.assertEqual(context.canonical_level, canonical)
-                self.assertEqual(
-                    context.source_family,
-                    "tennis_explorer",
-                )
+        for source_family in ("tennis_explorer", "tennisratio"):
+            for raw_level, canonical in expected.items():
+                with self.subTest(
+                    source_family=source_family,
+                    raw_level=raw_level,
+                ):
+                    context = normalize_tour_level(
+                        raw_level,
+                        source_family,
+                    )
+                    self.assertEqual(context.raw_level, raw_level)
+                    self.assertEqual(context.canonical_level, canonical)
+                    self.assertEqual(
+                        context.source_family,
+                        source_family,
+                    )
 
     def test_context_is_immutable(self) -> None:
         """Impide modificar la categoría después de validarla."""

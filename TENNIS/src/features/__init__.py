@@ -53,14 +53,21 @@ from .state import (
     HistoricalMatchResult,
     HistorySnapshot,
 )
+from .tennisratio_stats import (
+    TennisRatioStatsFeatureError,
+    TennisRatioStatsSnapshot,
+    build_tennisratio_stats_snapshot,
+)
 from .vector import (
     MODEL_FEATURE_COLUMNS,
     VECTOR_COLUMNS,
+    EloFeatureProvider,
     EloFeatureSnapshot,
     FeatureVectorError,
     MatchFeatureBuilder,
     MatchFeatureRequest,
     MatchFeatureVector,
+    RankingFeatureProvider,
     assemble_match_feature_vector,
 )
 
@@ -70,6 +77,7 @@ __all__ = [
     "CausalHistoryState",
     "DEFAULT_FEATURE_PARAMETERS",
     "DEFAULT_ORIENTATION_SEED",
+    "EloFeatureProvider",
     "EloFeatureSnapshot",
     "FEATURE_SCHEMA_VERSION",
     "FeatureDatasetBuildReport",
@@ -93,9 +101,12 @@ __all__ = [
     "PlayerAgeSnapshot",
     "RankingBuildAudit",
     "RankingDataError",
+    "RankingFeatureProvider",
     "RankingIndex",
     "RankingSnapshot",
     "TARGET_COLUMN",
+    "TennisRatioStatsFeatureError",
+    "TennisRatioStatsSnapshot",
     "TRAINING_COLUMNS",
     "TourLevelContext",
     "UnknownTourLevelError",
@@ -103,6 +114,7 @@ __all__ = [
     "VerifiedAuxiliaryInventory",
     "assemble_match_feature_vector",
     "build_training_datasets",
+    "build_tennisratio_stats_snapshot",
     "calculate_two_way_market_probabilities",
     "normalize_tour_level",
     "orient_match",

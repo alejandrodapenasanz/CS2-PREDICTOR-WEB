@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "base": {
+    "source_repository": "Aneeshers/tennis-sackmann-archive",
+    "source_commit": "83733587353df8a41f2fd4f516147d5aa83f5a8d",
+    "manifest_path": "data/raw/sackmann_manifests/83733587353df8a41f2fd4f516147d5aa83f5a8d.json",
+    "cutoff_date": "2026-06-02"
+  },
+  "operational": {
+    "tennisratio_database_path": "data/processed/tennisratio.sqlite3",
+    "operations_database_path": "BBDD/tennis.sqlite3",
+    "player_mapping_database_path": "data/processed/player_mapping.sqlite3",
+    "source_precedence": [
+      "tennisratio",
+      "tennis_explorer"
+    ]
+  }
+}

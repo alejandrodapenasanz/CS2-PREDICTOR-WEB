@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "hltv": {
+      "label": "HLTV",
+      "cadence": "daily",
+      "threshold_hours": 24.0
+    }
+  }
+}

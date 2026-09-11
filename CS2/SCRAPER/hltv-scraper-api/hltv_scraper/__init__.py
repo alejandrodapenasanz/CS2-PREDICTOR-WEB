@@ -1,19 +1,19 @@
-from typing import Dict, Any
 from datetime import datetime
+from typing import Any, Dict
 
-from .spider_manager import SpiderManager
 from .cache_config import (
-    CACHE_HOURS_NEWS,
+    CACHE_HOURS_BIG_RESULTS,
     CACHE_HOURS_MATCHES,
-    CACHE_HOURS_RESULTS,
-    CACHE_HOURS_TEAMS,
+    CACHE_HOURS_NEWS,
+    CACHE_HOURS_PLAYER_STATS,
     CACHE_HOURS_PLAYERS,
     CACHE_HOURS_RANKINGS,
-    CACHE_HOURS_UPCOMING_MATCHES,
+    CACHE_HOURS_RESULTS,
     CACHE_HOURS_TEAM_MATCHES,
-    CACHE_HOURS_BIG_RESULTS,
-    CACHE_HOURS_PLAYER_STATS
+    CACHE_HOURS_TEAMS,
+    CACHE_HOURS_UPCOMING_MATCHES,
 )
+from .spider_manager import SpiderManager
 
 
 class HLTVScraper:
@@ -23,6 +23,7 @@ class HLTVScraper:
     def _get_manager(cls):
         if cls._manager is None:
             from config import BASE_DIR
+
             cls._manager = SpiderManager(BASE_DIR)
         return cls._manager
 
@@ -49,7 +50,9 @@ class HLTVScraper:
     def get_team_rankings(type: str = "hltv", year: str = "", month: str = "", day: int = 0) -> Dict[str, Any]:
         manager = HLTVScraper._get_manager()
         name = "hltv_valve_ranking" if type == "valve" else "hltv_top30"
-        path = f"rankings/{type}" if year == "" and month == "" and day == 0 else f"rankings/{type}_{year}_{month}_{day}"
+        path = (
+            f"rankings/{type}" if year == "" and month == "" and day == 0 else f"rankings/{type}_{year}_{month}_{day}"
+        )
         args = f"-a year={year} -a month={month} -a day={day} -o data/{path}.json"
         manager.execute(name, path, args, CACHE_HOURS_RANKINGS)
         return manager.get_result(path)

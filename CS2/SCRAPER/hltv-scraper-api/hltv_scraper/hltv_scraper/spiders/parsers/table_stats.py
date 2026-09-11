@@ -1,6 +1,8 @@
 from typing import Any
+
 from .parser import Parser
 from .player_stats import PlayerStatsParser
+
 
 class TableStatsParser(Parser):
     @staticmethod

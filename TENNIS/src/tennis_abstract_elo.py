@@ -28,9 +28,9 @@ from urllib.parse import urljoin, urlparse
 
 import pandas as pd
 import requests
-from requests.adapters import HTTPAdapter
 
 from src.config import TENNIS_ABSTRACT_ELO_RAW_DIR
+from src.responsible_http import ResponsibleHttpClient, build_http_client
 
 
 LOGGER = logging.getLogger(__name__)
@@ -53,9 +53,7 @@ BLOCKED_PATH_PREFIXES: Final[tuple[str, ...]] = (
     "/jsplayers/",
 )
 
-USER_AGENT: Final[str] = (
-    "CS2-Predictor-TENNIS-TennisAbstract-Elo-Ingestion/1.0"
-)
+USER_AGENT: Final[str] = "CS2-Predictor-TENNIS-TennisAbstract-Elo-Ingestion/1.0"
 REQUEST_TIMEOUT: Final[tuple[float, float]] = (10.0, 30.0)
 FAILURE_BACKOFF: Final[timedelta] = timedelta(hours=24)
 MANIFEST_SCHEMA_VERSION: Final[int] = 1
@@ -201,7 +199,7 @@ class EloFetchResult:
 
 @dataclass(frozen=True)
 class EloFetchReport:
-    """Resume una ejecución completa, incluida su cuota HTTP y validación local."""
+    """Resume una ejecución, sus GET secuenciales y la validación local."""
 
     results: tuple[EloFetchResult, ...]
     manifest_path: Path
@@ -261,11 +259,7 @@ class _EloTableExtractor(HTMLParser):
         """Registra aperturas relevantes dentro de ``table#reportable``."""
 
         normalized_tag = tag.casefold()
-        attributes = {
-            key.casefold(): value
-            for key, value in attrs
-            if value is not None
-        }
+        attributes = {key.casefold(): value for key, value in attrs if value is not None}
         if normalized_tag == "table":
             if self._table_depth > 0:
                 self._table_depth += 1
@@ -278,16 +272,12 @@ class _EloTableExtractor(HTMLParser):
             return
         if normalized_tag == "tr":
             if self._row is not None:
-                raise EloSchemaError(
-                    "La tabla Elo contiene filas HTML anidadas o sin cerrar."
-                )
+                raise EloSchemaError("La tabla Elo contiene filas HTML anidadas o sin cerrar.")
             self._row = []
             return
         if normalized_tag in {"th", "td"} and self._row is not None:
             if self._cell_tag is not None:
-                raise EloSchemaError(
-                    "La tabla Elo contiene celdas HTML anidadas o sin cerrar."
-                )
+                raise EloSchemaError("La tabla Elo contiene celdas HTML anidadas o sin cerrar.")
             self._cell_tag = normalized_tag
             self._cell_text = []
             self._cell_hrefs = []
@@ -306,13 +296,9 @@ class _EloTableExtractor(HTMLParser):
         if normalized_tag == "table" and self._table_depth > 0:
             if self._table_depth == 1:
                 if self._cell_tag is not None or self._row is not None:
-                    raise EloSchemaError(
-                        "La tabla Elo termina con una celda o fila sin cerrar."
-                    )
+                    raise EloSchemaError("La tabla Elo termina con una celda o fila sin cerrar.")
                 if self._rows is None:
-                    raise EloSchemaError(
-                        "El extractor perdió el contenido de la tabla Elo."
-                    )
+                    raise EloSchemaError("El extractor perdió el contenido de la tabla Elo.")
                 self.tables.append(tuple(self._rows))
                 self._rows = None
             self._table_depth -= 1
@@ -322,9 +308,7 @@ class _EloTableExtractor(HTMLParser):
             return
         if normalized_tag in {"th", "td"} and self._cell_tag is not None:
             if normalized_tag != self._cell_tag:
-                raise EloSchemaError(
-                    "La tabla Elo cierra una celda con una etiqueta distinta."
-                )
+                raise EloSchemaError("La tabla Elo cierra una celda con una etiqueta distinta.")
             if self._row is None:
                 raise EloSchemaError("Se encontró una celda Elo fuera de una fila.")
             self._row.append(
@@ -362,9 +346,7 @@ class _EloTableExtractor(HTMLParser):
             or self._row is not None
             or self._cell_tag is not None
         ):
-            raise EloSchemaError(
-                "El HTML termina antes de cerrar completamente table#reportable."
-            )
+            raise EloSchemaError("El HTML termina antes de cerrar completamente table#reportable.")
 
 
 def _utc_now() -> datetime:
@@ -390,9 +372,7 @@ def _parse_utc_iso(value: Any, *, field_name: str) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return _as_utc(parsed, field_name=field_name)
     except ValueError as exc:
-        raise EloManifestError(
-            f"{field_name} no contiene un timestamp ISO UTC válido."
-        ) from exc
+        raise EloManifestError(f"{field_name} no contiene un timestamp ISO UTC válido.") from exc
 
 
 def _iso_utc(value: datetime) -> str:
@@ -432,14 +412,18 @@ def _validate_public_url(gender: Gender, url: str) -> None:
         )
 
 
-def build_http_session() -> requests.Session:
+def build_http_session() -> ResponsibleHttpClient:
     """Crea una sesión identificada y desactiva reintentos HTTP automáticos."""
 
-    no_retry_adapter = HTTPAdapter(max_retries=0)
-    session = requests.Session()
-    session.mount("https://", no_retry_adapter)
-    session.mount("http://", no_retry_adapter)
-    return session
+    return build_http_client(
+        transport_kind="scrapling",
+        browser_impersonation=True,
+        stealthy_headers=True,
+        detect_waf=True,
+        default_headers={"User-Agent": USER_AGENT},
+        robots_user_agent=USER_AGENT,
+        request_retry_attempts=1,
+    )
 
 
 def _new_manifest(created_at: datetime) -> dict[str, Any]:
@@ -466,15 +450,11 @@ def _load_manifest(manifest_path: Path, now: datetime) -> dict[str, Any]:
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise EloManifestError(
-            f"No se puede leer el manifiesto Elo: {manifest_path}."
-        ) from exc
+        raise EloManifestError(f"No se puede leer el manifiesto Elo: {manifest_path}.") from exc
     if not isinstance(payload, dict):
         raise EloManifestError("El manifiesto Elo no es un objeto JSON.")
     if payload.get("schema_version") != MANIFEST_SCHEMA_VERSION:
-        raise EloManifestError(
-            "La versión del manifiesto Elo no coincide con la implementada."
-        )
+        raise EloManifestError("La versión del manifiesto Elo no coincide con la implementada.")
     if not isinstance(payload.get("sources"), dict):
         raise EloManifestError("El manifiesto Elo no contiene un objeto sources.")
     if not isinstance(payload.get("history"), list):
@@ -486,9 +466,7 @@ def _load_manifest(manifest_path: Path, now: datetime) -> dict[str, Any]:
                 f"El manifiesto contiene una fuente Elo desconocida: {gender!r}."
             )
         if record.get("url") != ELO_URLS[gender]:
-            raise EloManifestError(
-                f"La URL registrada para {gender} no es la URL auditada."
-            )
+            raise EloManifestError(f"La URL registrada para {gender} no es la URL auditada.")
     return payload
 
 
@@ -582,9 +560,7 @@ def _source_record(
     if record is None:
         return None
     if not isinstance(record, Mapping):
-        raise EloManifestError(
-            f"El registro del manifiesto para {gender} no es un objeto."
-        )
+        raise EloManifestError(f"El registro del manifiesto para {gender} no es un objeto.")
     return record
 
 
@@ -651,9 +627,7 @@ def _record_attempt(
     sources = manifest["sources"]
     previous = sources.get(gender, {})
     if not isinstance(previous, Mapping):
-        raise EloManifestError(
-            f"El registro previo para {gender} no es un objeto JSON."
-        )
+        raise EloManifestError(f"El registro previo para {gender} no es un objeto JSON.")
     record = dict(previous)
     record.update(
         {
@@ -673,31 +647,17 @@ def _record_attempt(
             if last_modified:
                 record["last_modified"] = last_modified
     if snapshot_path is not None:
-        destination = (
-            "latest_snapshot"
-            if activate_latest
-            else "last_rejected_snapshot"
-        )
+        destination = "latest_snapshot" if activate_latest else "last_rejected_snapshot"
         record[destination] = snapshot_path
     if metadata_path is not None:
-        destination = (
-            "latest_metadata"
-            if activate_latest
-            else "last_rejected_metadata"
-        )
+        destination = "latest_metadata" if activate_latest else "last_rejected_metadata"
         record[destination] = metadata_path
     if content_sha256 is not None:
-        destination = (
-            "latest_sha256"
-            if activate_latest
-            else "last_rejected_sha256"
-        )
+        destination = "latest_sha256" if activate_latest else "last_rejected_sha256"
         record[destination] = content_sha256
     if retrieved_at is not None:
         destination = (
-            "last_retrieved_at_utc"
-            if activate_latest
-            else "last_rejected_retrieved_at_utc"
+            "last_retrieved_at_utc" if activate_latest else "last_rejected_retrieved_at_utc"
         )
         record[destination] = _iso_utc(retrieved_at)
     if detail is None:
@@ -1077,9 +1037,7 @@ def download_tennis_abstract_elo(
                         outcome="downloaded",
                         status_code=status_code,
                         attempted_at_utc=execution_time,
-                        retry_after_utc=(
-                            execution_time + FAILURE_BACKOFF
-                        ),
+                        retry_after_utc=(execution_time + FAILURE_BACKOFF),
                         snapshot_path=snapshot_path,
                         metadata_path=metadata_path,
                     )
@@ -1088,9 +1046,7 @@ def download_tennis_abstract_elo(
 
             if status_code == 304:
                 latest_paths = _latest_paths(manifest, raw_root, gender)
-                if latest_paths is None or not all(
-                    path.exists() for path in latest_paths
-                ):
+                if latest_paths is None or not all(path.exists() for path in latest_paths):
                     detail = (
                         "El servidor respondió 304, pero no existe un snapshot "
                         "local completo al que aplicar la respuesta."
@@ -1202,9 +1158,7 @@ def _decode_html(html: str | bytes) -> str:
         try:
             return html.decode("utf-8-sig")
         except UnicodeDecodeError as exc:
-            raise EloSchemaError(
-                "El snapshot Elo ya no se puede decodificar como UTF-8."
-            ) from exc
+            raise EloSchemaError("El snapshot Elo ya no se puede decodificar como UTF-8.") from exc
     raise TypeError("html debe ser str o bytes.")
 
 
@@ -1252,15 +1206,11 @@ def _rating_date_from_text(document_text: str) -> datetime:
 
     matches = _RATING_DATE_PATTERN.findall(document_text)
     if len(matches) != 1:
-        raise EloSchemaError(
-            "La página Elo no contiene exactamente una fecha 'Last update'."
-        )
+        raise EloSchemaError("La página Elo no contiene exactamente una fecha 'Last update'.")
     try:
         return datetime.strptime(matches[0], "%Y-%m-%d")
     except ValueError as exc:
-        raise EloSchemaError(
-            f"La fecha Last update no es válida: {matches[0]!r}."
-        ) from exc
+        raise EloSchemaError(f"La fecha Last update no es válida: {matches[0]!r}.") from exc
 
 
 def _player_url(
@@ -1272,9 +1222,7 @@ def _player_url(
     """Valida y normaliza el único enlace público de una fila de jugador."""
 
     if len(cell.hrefs) != 1:
-        raise EloSchemaError(
-            "Cada jugador Elo debe tener exactamente un enlace en su celda."
-        )
+        raise EloSchemaError("Cada jugador Elo debe tener exactamente un enlace en su celda.")
     resolved = urljoin(source_url, cell.hrefs[0])
     parsed = urlparse(resolved)
     if (
@@ -1284,8 +1232,7 @@ def _player_url(
         or not parsed.query
     ):
         raise EloSchemaError(
-            f"El enlace de jugador no coincide con el formato inspeccionado: "
-            f"{resolved!r}."
+            f"El enlace de jugador no coincide con el formato inspeccionado: {resolved!r}."
         )
     return resolved
 
@@ -1307,13 +1254,9 @@ def _raw_rows(
                 f"se esperaban {expected_width}."
             )
         if any(cell.tag != "td" for cell in cells):
-            raise EloSchemaError(
-                f"La fila Elo {row_number} no está formada solo por td."
-            )
+            raise EloSchemaError(f"La fila Elo {row_number} no está formada solo por td.")
         if any(cells[index].text for index in (4, 11, 14)):
-            raise EloSchemaError(
-                f"La fila Elo {row_number} ya no conserva los separadores vacíos."
-            )
+            raise EloSchemaError(f"La fila Elo {row_number} ya no conserva los separadores vacíos.")
         rows.append(
             {
                 "elo_rank": cells[0].text,
@@ -1355,15 +1298,11 @@ def _numeric_series(
     invalid = normalized.notna() & converted.isna()
     if invalid.any():
         examples = normalized.loc[invalid].astype(str).head(3).tolist()
-        raise EloSchemaError(
-            f"La columna {column!r} contiene valores no numéricos: {examples}."
-        )
+        raise EloSchemaError(f"La columna {column!r} contiene valores no numéricos: {examples}.")
     if integer:
         non_null = converted.dropna()
         if not non_null.empty and (non_null % 1 != 0).any():
-            raise EloSchemaError(
-                f"La columna entera {column!r} contiene valores fraccionarios."
-            )
+            raise EloSchemaError(f"La columna entera {column!r} contiene valores fraccionarios.")
         return converted.astype("Int64")
     return converted.astype("Float64")
 
@@ -1376,9 +1315,7 @@ def _peak_month_series(values: pd.Series) -> pd.Series:
     invalid = normalized.notna() & parsed.isna()
     if invalid.any():
         examples = normalized.loc[invalid].astype(str).head(3).tolist()
-        raise EloSchemaError(
-            f"Peak Month contiene valores fuera de YYYY-MM: {examples}."
-        )
+        raise EloSchemaError(f"Peak Month contiene valores fuera de YYYY-MM: {examples}.")
     return parsed
 
 
@@ -1436,9 +1373,7 @@ def parse_elo_html(
         if frame[column].isna().any() or (
             frame[column].dtype == "string" and frame[column].eq("").any()
         ):
-            raise EloSchemaError(
-                f"La columna Elo obligatoria {column!r} contiene ausencias."
-            )
+            raise EloSchemaError(f"La columna Elo obligatoria {column!r} contiene ausencias.")
 
     row_count = len(frame)
     frame.insert(
@@ -1479,15 +1414,11 @@ def _read_snapshot_metadata(metadata_path: Path) -> Mapping[str, Any]:
     try:
         payload = json.loads(metadata_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise EloManifestError(
-            f"No se puede leer la metadata Elo: {metadata_path}."
-        ) from exc
+        raise EloManifestError(f"No se puede leer la metadata Elo: {metadata_path}.") from exc
     if not isinstance(payload, Mapping):
         raise EloManifestError("La metadata del snapshot no es un objeto JSON.")
     if payload.get("schema_version") != SNAPSHOT_METADATA_SCHEMA_VERSION:
-        raise EloManifestError(
-            "La versión de metadata del snapshot Elo no es compatible."
-        )
+        raise EloManifestError("La versión de metadata del snapshot Elo no es compatible.")
     required_fields = {
         "gender",
         "retrieved_at_utc",
@@ -1498,9 +1429,7 @@ def _read_snapshot_metadata(metadata_path: Path) -> Mapping[str, Any]:
     }
     missing = sorted(required_fields.difference(payload))
     if missing:
-        raise EloManifestError(
-            f"La metadata Elo carece de campos obligatorios: {missing}."
-        )
+        raise EloManifestError(f"La metadata Elo carece de campos obligatorios: {missing}.")
     if not isinstance(payload.get("response_headers"), Mapping):
         raise EloManifestError("response_headers no es un objeto en la metadata.")
     return payload
@@ -1534,9 +1463,7 @@ def load_elo_snapshot(
     )
     metadata = _read_snapshot_metadata(resolved_metadata)
     if metadata.get("snapshot_file") != resolved_snapshot.name:
-        raise EloSnapshotIntegrityError(
-            "La metadata Elo apunta a un nombre de snapshot distinto."
-        )
+        raise EloSnapshotIntegrityError("La metadata Elo apunta a un nombre de snapshot distinto.")
     try:
         content = resolved_snapshot.read_bytes()
     except OSError as exc:
@@ -1545,17 +1472,11 @@ def load_elo_snapshot(
         ) from exc
     observed_sha256 = hashlib.sha256(content).hexdigest()
     expected_sha256 = metadata.get("sha256")
-    if not isinstance(expected_sha256, str) or (
-        observed_sha256 != expected_sha256
-    ):
-        raise EloSnapshotIntegrityError(
-            f"El SHA-256 no coincide para {resolved_snapshot}."
-        )
+    if not isinstance(expected_sha256, str) or (observed_sha256 != expected_sha256):
+        raise EloSnapshotIntegrityError(f"El SHA-256 no coincide para {resolved_snapshot}.")
     content_length = metadata.get("content_length")
     if not isinstance(content_length, int) or content_length != len(content):
-        raise EloSnapshotIntegrityError(
-            f"El tamaño no coincide para {resolved_snapshot}."
-        )
+        raise EloSnapshotIntegrityError(f"El tamaño no coincide para {resolved_snapshot}.")
 
     raw_gender = metadata.get("gender")
     if not isinstance(raw_gender, str):
@@ -1602,9 +1523,7 @@ def load_latest_elo(
     manifest = _load_manifest(manifest_path, _utc_now())
     latest_paths = _latest_paths(manifest, raw_root, validated_gender)
     if latest_paths is None:
-        raise EloManifestError(
-            f"No existe un snapshot Elo registrado para {validated_gender}."
-        )
+        raise EloManifestError(f"No existe un snapshot Elo registrado para {validated_gender}.")
     snapshot_path, metadata_path = latest_paths
     return load_elo_snapshot(
         snapshot_path,

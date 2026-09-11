@@ -1,40 +1,74 @@
-.PHONY: test test-working test-cov test-unit test-integration test-slow clean install
+PYTHON ?= python3.13
+LOCKFILE ?= requirements.lock.txt
+WHEEL_DIR ?= wheels
+PYTEST = $(PYTHON) -m pytest
+RUFF = $(PYTHON) -m ruff
+MYPY = $(PYTHON) -m mypy
+LOCK_INSTALL = $(PYTHON) -m pip install --no-deps --only-binary=:all: --require-hashes --find-links "$(WHEEL_DIR)" -r "$(LOCKFILE)"
 
-# Install dependencies
-install:
-	./env/bin/pip install pytest pytest-flask pytest-cov requests
+.PHONY: install verify-wheel lint format-check typecheck imports test smoke gates test-working test-cov test-unit test-integration test-fast test-offline test-slow clean test-one
 
-# Run all tests (unit + integration)
+# Install only the fully pinned, hashed lock under CPython 3.13.
+install: verify-wheel
+	$(LOCK_INSTALL)
+	$(PYTHON) -m pip check
+
+# Verify the one allowlisted local wheel without contacting a package index.
+verify-wheel:
+	$(PYTHON) scripts/verify_flasgger_wheel.py
+
+# Fast, deterministic local/CI quality gates.
+lint:
+	$(RUFF) check .
+
+format-check:
+	$(RUFF) format --check .
+
+typecheck:
+	$(MYPY)
+
+imports:
+	$(PYTHON) scripts/check_import_coverage.py
+
+smoke:
+	$(PYTHON) scripts/smoke_boot.py
+
+gates: lint format-check typecheck imports test-offline smoke
+
+# Run all tests (unit + integration).
 test:
-	./env/bin/python -m pytest tests/ -v
+	$(PYTEST) tests/ -v
 
-# Run only unit tests (fast, with mocks)
+# Run only unit tests (fast, with mocks).
 test-unit:
-	./env/bin/python -m pytest tests/test_routes.py -v
+	$(PYTEST) tests/test_routes.py -v
 
-# Run only integration tests (slow, real HLTV connections)
+# Run only integration tests (slow, real HLTV connections).
 test-integration:
-	./env/bin/python -m pytest tests/test_integration_real.py -v
+	$(PYTEST) tests/test_integration_real.py -v
 
-# Run only fast tests (exclude slow integration tests)
+# Run only fast tests (exclude slow integration tests).
 test-fast:
-	./env/bin/python -m pytest -m "not slow" tests/ -v
+	$(PYTEST) -m "not slow and not integration" tests/ -v
 
-# Run only slow tests (integration tests)
+# Deterministic alias used by the quality gate (never contacts HLTV).
+test-offline: test-fast
+
+# Run only slow tests (integration tests).
 test-slow:
-	./env/bin/python -m pytest -m "slow" tests/ -v
+	$(PYTEST) -m "slow" tests/ -v
 
-# Run tests with coverage report
+# Run tests with coverage report.
 test-cov:
-	./env/bin/python -m pytest --cov=routes --cov-report=html --cov-report=term tests/
+	$(PYTEST) --cov=routes --cov-report=html --cov-report=term tests/
 
-# Clean cache and temp files
+# Clean cache and temporary test files.
 clean:
 	find . -type d -name "__pycache__" -exec rm -r {} +
 	find . -type d -name ".pytest_cache" -exec rm -r {} +
 	find . -name "*.pyc" -delete
 	rm -rf htmlcov/
 
-# Run specific test
+# Run one named endpoint test.
 test-one:
-	./env/bin/python -m pytest tests/test_routes.py::TestRoutesEndpoints::$(TEST) -v
+	$(PYTEST) tests/test_routes.py::TestRoutesEndpoints::$(TEST) -v

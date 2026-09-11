@@ -1,7 +1,8 @@
 from typing import Any
+
 from .parser import Parser
-from .player_profile_trophies import PlayerProfileTrophiesParser as PPTP
 from .player_profile_stats import PlayerProfileStatsParser as PPSP
+from .player_profile_trophies import PlayerProfileTrophiesParser as PPTP
 
 
 class PlayerProfileParser(Parser):

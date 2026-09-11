@@ -1,11 +1,13 @@
-from flask import Request
-import scrapy
-from typing import Any, Generator
-import cloudscraper
 import json
-import requests
 from pathlib import Path
+from typing import Any, Generator
+
+import cloudscraper
+import requests
+import scrapy
+from flask import Request
 from scrapy.http.response.html import HtmlResponse
+
 from .parsers import ParsersFactory as PF
 
 
@@ -49,11 +51,7 @@ class HltvMatchSpider(scrapy.Spider):
                 if body is None:
                     response_data = scraper.get(url)
                     body = response_data.content
-                response = HtmlResponse(
-                    url=url,
-                    body=body,
-                    encoding='utf-8'
-                )
+                response = HtmlResponse(url=url, body=body, encoding="utf-8")
                 yield from self.parse(response)
             except Exception as e:
                 self.logger.error(f"Error fetching {url}: {e}")

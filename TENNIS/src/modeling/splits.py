@@ -2,8 +2,8 @@
 
 Para una temporada de test ``Y``, el contrato es fijo:
 
-* entrenamiento: temporadas ``<= Y - 2``;
-* calibración: temporada ``Y - 1``;
+* entrenamiento: temporadas ``<= Y - 2`` disponibles antes de calibración;
+* calibración: temporada ``Y - 1`` disponible antes del primer test;
 * test: temporada ``Y``.
 
 Las posiciones almacenadas son enteros de posición, no etiquetas del índice de
@@ -122,6 +122,7 @@ def build_expanding_season_folds(
     date_column: str = "match_date",
     test_seasons: Iterable[int] | None = None,
     record_id_column: str | None = None,
+    availability_column: str = "result_available_date",
 ) -> tuple[TemporalFold, ...]:
     """Construye folds expansivos con calibración en la temporada previa.
 
@@ -141,8 +142,21 @@ def build_expanding_season_folds(
         TemporalSplitError: Si faltan bloques requeridos, fechas o identidades.
     """
 
+    if not isinstance(data, pd.DataFrame):
+        raise TemporalSplitError(
+            "Los folds causales requieren un DataFrame con disponibilidad."
+        )
+    if availability_column not in data.columns:
+        raise TemporalSplitError(
+            f"No existe la columna causal {availability_column!r}."
+        )
     _validate_record_ids(data, record_id_column)
     dates = _coerce_dates(data, date_column)
+    availability_dates = _coerce_dates(data, availability_column)
+    if not (availability_dates > dates).all():
+        raise TemporalSplitError(
+            "Cada result_available_date debe ser posterior a match_date."
+        )
     seasons = dates.dt.year.to_numpy(dtype=np.int64)
     observed = frozenset(int(value) for value in np.unique(seasons))
 
@@ -166,25 +180,41 @@ def build_expanding_season_folds(
 
     folds: list[TemporalFold] = []
     for test_season in requested:
-        train = tuple(
-            int(value)
-            for value in np.flatnonzero(seasons <= test_season - 2)
-        )
-        calibration = tuple(
-            int(value)
-            for value in np.flatnonzero(seasons == test_season - 1)
-        )
         test = tuple(
             int(value)
             for value in np.flatnonzero(seasons == test_season)
+        )
+        if not test:
+            raise TemporalSplitError(
+                f"Fold {test_season} incompleto: falta test = {test_season}."
+            )
+        test_min = dates.iloc[list(test)].min()
+        calibration = tuple(
+            int(value)
+            for value in np.flatnonzero(
+                (seasons == test_season - 1)
+                & (availability_dates < test_min).to_numpy(dtype=bool)
+            )
+        )
+        calibration_min = (
+            dates.iloc[list(calibration)].min() if calibration else None
+        )
+        train = tuple(
+            int(value)
+            for value in np.flatnonzero(
+                (seasons <= test_season - 2)
+                & (
+                    (availability_dates < calibration_min).to_numpy(dtype=bool)
+                    if calibration_min is not None
+                    else np.zeros(len(dates), dtype=bool)
+                )
+            )
         )
         missing: list[str] = []
         if not train:
             missing.append(f"train <= {test_season - 2}")
         if not calibration:
             missing.append(f"calibración = {test_season - 1}")
-        if not test:
-            missing.append(f"test = {test_season}")
         if missing:
             raise TemporalSplitError(
                 f"Fold {test_season} incompleto: falta "
@@ -197,7 +227,11 @@ def build_expanding_season_folds(
             calibration_positions=calibration,
             test_positions=test,
         )
-        validate_temporal_fold(dates, fold)
+        validate_temporal_fold(
+            dates,
+            fold,
+            availability_dates=availability_dates,
+        )
         folds.append(fold)
     return tuple(folds)
 
@@ -205,6 +239,8 @@ def build_expanding_season_folds(
 def validate_temporal_fold(
     dates: pd.Series | Sequence[object],
     fold: TemporalFold,
+    *,
+    availability_dates: pd.Series | Sequence[object] | None = None,
 ) -> None:
     """Audita separación, temporadas exactas y precedencia de un fold.
 
@@ -218,6 +254,18 @@ def validate_temporal_fold(
     """
 
     parsed_dates = _coerce_dates(dates, "match_date")
+    if availability_dates is None:
+        raise TemporalSplitError(
+            "La auditoría del fold requiere result_available_date."
+        )
+    parsed_available = _coerce_dates(
+        availability_dates,
+        "result_available_date",
+    )
+    if len(parsed_available) != len(parsed_dates):
+        raise TemporalSplitError(
+            "match_date y result_available_date tienen distinta longitud."
+        )
     partitions = {
         "train": fold.train_positions,
         "calibration": fold.calibration_positions,
@@ -251,6 +299,10 @@ def validate_temporal_fold(
     train_dates = parsed_dates.iloc[list(fold.train_positions)]
     calibration_dates = parsed_dates.iloc[list(fold.calibration_positions)]
     test_dates = parsed_dates.iloc[list(fold.test_positions)]
+    train_available = parsed_available.iloc[list(fold.train_positions)]
+    calibration_available = parsed_available.iloc[
+        list(fold.calibration_positions)
+    ]
     if not (train_dates.dt.year <= fold.train_end_season).all():
         raise TemporalSplitError(
             "Entrenamiento contiene fechas posteriores a Y-2."
@@ -266,9 +318,10 @@ def validate_temporal_fold(
             "Test debe contener exclusivamente la temporada Y."
         )
     if not (
-        train_dates.max() < calibration_dates.min()
-        and calibration_dates.max() < test_dates.min()
+        train_available.max() < calibration_dates.min()
+        and calibration_available.max() < test_dates.min()
     ):
         raise TemporalSplitError(
-            "La precedencia estricta train < calibración < test no se cumple."
+            "La disponibilidad estricta train < calibración < test no se "
+            "cumple."
         )

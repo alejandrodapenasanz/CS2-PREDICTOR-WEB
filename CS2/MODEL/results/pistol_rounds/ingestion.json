@@ -1,0 +1,61 @@
+{
+  "counts": {
+    "files": 3191,
+    "valid_captures": 3163,
+    "rounds": 67634,
+    "unmapped_or_ambiguous_map": 17,
+    "quarantined": 11
+  },
+  "quarantine_reasons": {
+    "database_identity_mismatch": 11
+  },
+  "examples": [
+    {
+      "source_file": "PIPELINE\\runs\\2026-07-04_064205Z\\raw_html\\mapstats\\231337.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-07-28_041204Z\\raw_html\\mapstats\\233753.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-07-28_041204Z\\raw_html\\mapstats\\233764.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-07-28_041204Z\\raw_html\\mapstats\\233785.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-08-24_151249Z\\raw_html\\mapstats\\166436.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-08-28_045704Z\\raw_html\\mapstats\\114799.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-08-28_045704Z\\raw_html\\mapstats\\79486.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-08-31_135530Z\\raw_html\\mapstats\\233436.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-09-02_135453Z\\raw_html\\mapstats\\218557.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-09-07_050741Z\\raw_html\\mapstats\\236842.html.gz",
+      "reason": "database_identity_mismatch"
+    },
+    {
+      "source_file": "PIPELINE\\runs\\2026-09-09_051643Z\\raw_html\\mapstats\\232009.html.gz",
+      "reason": "database_identity_mismatch"
+    }
+  ],
+  "applied": true,
+  "parser_version": 1,
+  "network_requests": 0
+}

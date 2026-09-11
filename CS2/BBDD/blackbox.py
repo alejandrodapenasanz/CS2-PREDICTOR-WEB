@@ -38,8 +38,8 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent            # .../CS2/BBDD
-CS2_ROOT = ROOT.parent                             # .../CS2
+ROOT = Path(__file__).resolve().parent  # .../CS2/BBDD
+CS2_ROOT = ROOT.parent  # .../CS2
 DEFAULT_DB = ROOT / "cs2.db"
 DEFAULT_BLACKBOX = ROOT / "BLACKBOX"
 DEFAULT_BACKUP_DIR = ROOT / "backups"
@@ -63,6 +63,8 @@ SOURCE_OF_TRUTH_TABLES: tuple[str, ...] = (
     # Hechos inmutables
     "matches",
     "maps",
+    "map_round_sources",
+    "map_rounds",
     "veto",
     "match_lineups",
     "prematch_lineup_snapshots",
@@ -81,14 +83,15 @@ SOURCE_OF_TRUTH_TABLES: tuple[str, ...] = (
     "match_analytics_map_handicap",
     # Auditoria del modelo (congelada, no recomputable)
     "predictions",
+    "prediction_ledger",
 )
 
 # Excluidas: se REGENERAN. No entran en BLACKBOX.
 DERIVED_EXCLUDED_TABLES: tuple[str, ...] = (
-    "ratings_history",   # recomputable: Glicko-2 cronologico desde los hechos
-    "match_features",    # recomputable: features point-in-time
-    "fetch_state",       # cache operativa del scraper (se rehace sola)
-    "ingest_runs",       # log de auditoria de ingest (empieza limpio)
+    "ratings_history",  # recomputable: Glicko-2 cronologico desde los hechos
+    "match_features",  # recomputable: features point-in-time
+    "fetch_state",  # cache operativa del scraper (se rehace sola)
+    "ingest_runs",  # log de auditoria de ingest (empieza limpio)
 )
 
 DATA_SUBDIR = "data"
@@ -124,10 +127,7 @@ def log(msg: str, *, level: str = "INFO") -> None:
 
 
 def _table_names(conn: sqlite3.Connection) -> set[str]:
-    return {
-        row[0]
-        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-    }
+    return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
 
 
 def _column_names(conn: sqlite3.Connection, table: str) -> list[str]:
@@ -173,7 +173,7 @@ def _snapshot_db(src_db: Path, dest_file: Path) -> None:
     dst = sqlite3.connect(dest_file)
     try:
         src.backup(dst)
-        dst.execute("PRAGMA journal_mode=DELETE")   # un solo fichero, sin -wal/-shm
+        dst.execute("PRAGMA journal_mode=DELETE")  # un solo fichero, sin -wal/-shm
         dst.commit()
     finally:
         dst.close()
@@ -205,15 +205,12 @@ def _build_blackbox_sqlite(snapshot_db: Path, dest_sqlite: Path) -> dict[str, di
 
     dest = sqlite3.connect(dest_sqlite)
     try:
-        dest.execute("PRAGMA foreign_keys = OFF;")   # copia masiva sin importar el orden
-        dest.executescript(schema_text)              # crea TODAS las tablas del esquema canonico
+        dest.execute("PRAGMA foreign_keys = OFF;")  # copia masiva sin importar el orden
+        dest.executescript(schema_text)  # crea TODAS las tablas del esquema canonico
         dest.commit()
         dest.execute("ATTACH DATABASE ? AS src", (str(snapshot_db),))
 
-        src_tables = {
-            row[0]
-            for row in dest.execute("SELECT name FROM src.sqlite_master WHERE type='table'")
-        }
+        src_tables = {row[0] for row in dest.execute("SELECT name FROM src.sqlite_master WHERE type='table'")}
         dest_tables = _table_names(dest)
         stats: dict[str, dict] = {}
         for table in SOURCE_OF_TRUTH_TABLES:
@@ -228,9 +225,7 @@ def _build_blackbox_sqlite(snapshot_db: Path, dest_sqlite: Path) -> dict[str, di
             src_cols = {row[1] for row in dest.execute(f'PRAGMA src.table_info("{table}")')}
             cols = [c for c in dest_cols if c in src_cols]  # interseccion, tolera drift de esquema
             col_list = ", ".join(f'"{c}"' for c in cols)
-            dest.execute(
-                f'INSERT INTO "{table}" ({col_list}) SELECT {col_list} FROM src."{table}"'
-            )
+            dest.execute(f'INSERT INTO "{table}" ({col_list}) SELECT {col_list} FROM src."{table}"')
             stats[table] = {
                 "rows": _table_row_count(dest, table),
                 "content_sha256": table_content_hash(dest, table),
@@ -329,9 +324,7 @@ def export(db_path: Path, blackbox_dir: Path) -> int:
         "canonical_file": f"{DATA_SUBDIR}/{SQLITE_GZ}",
         "text_dump_file": f"{DATA_SUBDIR}/{SQLDUMP_GZ}",
     }
-    (staging / MANIFEST_NAME).write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    (staging / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
 
     # Auto-verificacion del staging ANTES de publicar.
     rc = _verify_dir(staging, deep=True)
@@ -406,8 +399,7 @@ def _verify_dir(blackbox_dir: Path, *, deep: bool) -> int:
         if rc != 0:
             return rc
 
-    log(f"verify OK: {len(manifest.get('files', {}))} ficheros, "
-        f"{manifest.get('total_source_rows', '?')} filas fuente")
+    log(f"verify OK: {len(manifest.get('files', {}))} ficheros, {manifest.get('total_source_rows', '?')} filas fuente")
     return 0
 
 
@@ -517,7 +509,7 @@ def restore(
     canonical = blackbox_dir / manifest["canonical_file"]
     db_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_target = db_path.with_suffix(db_path.suffix + ".restoring")
-    for suffix in ("-wal", "-shm"):    # limpia WAL/SHM colgantes de una BBDD anterior
+    for suffix in ("-wal", "-shm"):  # limpia WAL/SHM colgantes de una BBDD anterior
         stale = Path(str(db_path) + suffix)
         if stale.exists():
             stale.unlink()
@@ -630,7 +622,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp_restore = sub.add_parser("restore", help="Reconstruye cs2.db desde BLACKBOX.")
     add_common(sp_restore)
-    sp_restore.add_argument("--force", action="store_true", help="Sobrescribe aunque la BBDD este sana (se respalda antes).")
+    sp_restore.add_argument(
+        "--force", action="store_true", help="Sobrescribe aunque la BBDD este sana (se respalda antes)."
+    )
     sp_restore.add_argument("--no-build-db", action="store_true", help="No ejecutar build_db.py tras restaurar.")
     sp_restore.add_argument("--backup-dir", type=Path, default=DEFAULT_BACKUP_DIR)
 

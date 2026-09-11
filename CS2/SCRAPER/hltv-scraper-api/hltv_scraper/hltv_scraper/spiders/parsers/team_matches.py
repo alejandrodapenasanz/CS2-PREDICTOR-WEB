@@ -1,4 +1,5 @@
 from typing import Any
+
 from .parser import Parser
 from .single_team import SingleTeamParser as STP
 

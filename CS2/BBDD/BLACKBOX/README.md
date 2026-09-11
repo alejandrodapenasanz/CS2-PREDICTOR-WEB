@@ -11,7 +11,9 @@ pierdas el resto del proyecto. No necesitas internet ni volver a scrapear HLTV.
 ## 1. Qué contiene (y qué NO)
 
 Aquí se guarda **solo lo que NO se puede recomputar**: los hechos crudos y
-canónicos (partidos, mapas, box scores, odds, rankings, snapshots raw, etc.).
+canónicos (partidos, mapas, box scores, odds, rankings, snapshots raw, etc.) y
+el `prediction_ledger` prospectivo completo. El ledger se copia y restaura sin
+reescribir sus filas.
 
 **NO** se guarda lo *derivado*, porque se regenera solo a partir de los hechos:
 - `ratings_history` y `match_features` → los recalcula el modelo (Glicko-2 y

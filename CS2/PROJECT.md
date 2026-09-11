@@ -240,7 +240,7 @@ Tablas clave y qué preservan:
 - `match_analytics_snapshots`, `match_analytics_map_stats`, and `match_analytics_map_handicap`: point-in-time Analytics Center data: map first pick/ban, win rate and sample; BO3 distribution, overtime, round margins, core/stand-in signals, and event metadata. Raw HTML and `payload_json` remain available for audit.
 - `events`: stores HLTV event ID, prize pool, teams competing, and source provenance. A scheduled match can update corrected participants, time, or stage without rewriting any historical snapshot.
 - `odds`: cuotas por bookmaker y timestamp, separando `opening`, `live` y `closing`. La apertura sirve para benchmark y EV; el cierre se guarda para auditoría, no como feature pre-partido.
-- `predictions`: congela la probabilidad pura (`prob_team1`), la probabilidad operativa (`decision_prob_team1`), fiabilidad, peso de mercado, política, favorito, cuota mínima de value (`decision_min_value_odds`, `team1_min_value_odds`, `team2_min_value_odds`), Best Opportunity point-in-time (`opportunity_score`, elegibilidad, ranking global/diario, `is_best_opportunity` y versión de política), contexto normalizado (`context_environment`, `context_stage`, `context_stage_detail`, `context_incentive_label`, `context_high_stakes`, `context_winner_advances`, `context_loser_eliminated`, `context_opening_match`, `context_bracket`, `context_json`) y los JSON completos de `prediction`, `features`, `odds`, `staking`, `controls`, `flags`, `data_quality` y `rosters`.
+- `predictions`: congela la probabilidad del artefacto (`prob_team1`), la probabilidad operativa (`decision_prob_team1`), régimen/arquitectura (`prediction_regime`, `prediction_architecture`), trazabilidad de apertura recuperada (`opening_odds_recovered`, `opening_odds_captured_at_utc`), fiabilidad, peso de mercado, política, favorito, cuota mínima de value (`decision_min_value_odds`, `team1_min_value_odds`, `team2_min_value_odds`), incertidumbre del estimado (`ensemble_disagreement`, `estimate_band_half_width`, `estimate_confidence_level`, `estimate_history_coverage`), Best Opportunity point-in-time (`opportunity_score`, elegibilidad, ranking global/diario, `is_best_opportunity` y versión de política), contexto normalizado (`context_environment`, `context_stage`, `context_stage_detail`, `context_incentive_label`, `context_high_stakes`, `context_winner_advances`, `context_loser_eliminated`, `context_opening_match`, `context_bracket`, `context_json`) y los JSON completos de `prediction`, `features`, `odds`, `staking`, `controls`, `flags`, `data_quality` y `rosters`.
 
 Best Opportunity usa la política `best_opportunity_v2_confirmed_lineups`: además
 de los umbrales de confianza y fiabilidad, ambos lados deben tener una alineación
@@ -332,7 +332,7 @@ Implementación actual: `PIPELINE/start.py` usa sesión HTTP persistente, `cf_se
 - **Calcula el presupuesto de requests antes de lanzar un backfill.** Métodos como `getResults` o `getMatchesStats` paginan y pueden disparar cientos de peticiones; las librerías documentan el coste por método justo para que puedas throttlear.
 - **Cachea todo lo descargado en la capa raw** (§4.4) y no re-scrapees nunca lo ya obtenido. El histórico es inmutable: una vez bajado un partido terminado, no cambia.
 - **Cachea también dentro del run.** Si odds, detalle, contexto y assets necesitan la misma URL en pocos minutos, el scraper reutiliza el HTML ya descargado en memoria (`HLTV_FETCH_CACHE_TTL`) para reducir peticiones repetidas.
-- **Circuit breaker ante WAF/Cloudflare.** Si aparecen `403`, `429`, challenge HTML o errores equivalentes de forma consecutiva, el scraper aplica cooldown global (`HLTV_BLOCK_COOLDOWN_*`, `HLTV_CIRCUIT_BREAKER_SLEEP`) antes de seguir. Es preferible tardar más que escalar el bloqueo.
+- **Circuit breaker ante WAF/Cloudflare.** Si aparecen `403`, `429`, challenge HTML o errores equivalentes de forma consecutiva, el scraper aplica cooldown global (`HLTV_BLOCK_COOLDOWN_*`, `HLTV_CIRCUIT_BREAKER_SLEEP`) antes de seguir. En rutas `/stats/`, un `403` o challenge (excepto `429`) pasa inmediatamente al navegador stealth, visible por defecto, y, si sigue el bloqueo, permite una renovación interactiva de `cf_session`; si esta falla, la URL queda en cuarentena y el run continúa parcial, sin repetir diez esperas de veinte minutos. Los `429` y errores de servidor sin challenge mantienen el backoff y `Retry-After`.
 - **Cuarentena por URL y presupuesto de requests.** Si una URL falla tras sus reintentos, se marca en cuarentena (`HLTV_URL_QUARANTINE_SECONDS`) para que otras fases no vuelvan a insistir dentro del mismo run. Además hay un techo de peticiones (`HLTV_MAX_HTTP_REQUESTS_PER_RUN`) y el scraper de `/stats/players/compare` corta en parcial si alcanza su presupuesto.
 - **Warm-up y diagnóstico.** El run hace una petición inicial suave a HLTV para validar sesión y escribe diagnósticos de red en `fetch_diagnostics.json`. Si tarda mucho, la consola verbose muestra exactamente URL, intento, bloqueo y espera.
 - **Backfill una vez, incremental después.** Una pasada inicial para el histórico de la era CS2; luego solo partidos nuevos (incremental) y refresco del ranking semanal.
@@ -389,7 +389,31 @@ Dado que se cubren todos los tiers (muchos equipos con pocos partidos y rosters 
 - Como features entran tanto el **rating** como su **RD** (incertidumbre) y la **diferencia A−B** de ratings.
 - Se mantiene además como features los **puntos del ranking oficial de HLTV** (basados en resultados, fuerza del rival, tier del evento y decaimiento; actualizados semanalmente con ventana de 3 meses y más peso a lo reciente; LAN pesa más que online; los cambios de roster resetean parte de los puntos).
 
-`[ABIERTO: decidir si el rating se computa a nivel equipo, a nivel jugador (agregando a los 5 actuales), o ambos. Recomendación: ambos — el de jugador es más robusto a las rotaciones de roster.]`
+### 5.3. Challenger sensible al roster
+
+El rating de organización anterior se conserva como campeón. En paralelo se
+reconstruye un Glicko/Elo causal sensible al quinteto y se evalúa como challenger:
+
+- Antes de cada partido compara el 5v5 anunciado (capturado estrictamente antes
+  del inicio) con el último 5v5 real ya observado del equipo, dentro de 90 días.
+- Un cambio de núcleo es, por defecto, sustituir al menos 2 de 5 jugadores. Con
+  `k` jugadores mantenidos, conserva la fracción
+  `f = 0,20 + 0,80 × k/5` del crédito respecto a 1500:
+  `rating' = 1500 + f × (rating - 1500)`.
+- La incertidumbre aumenta sin un reset brusco:
+  `RD'² = f × RD² + (1-f) × 350²`. El suelo de crédito del 20 % conserva parte
+  del historial de la organización incluso con una reconstrucción total.
+- Si falta cualquiera de los dos quintetos completos, no hay descuento. La
+  predicción siempre existe y el challenger coincide con el rating causal normal.
+- Los parámetros están versionados en `MODEL/config.yaml`. El estado se emite
+  antes de observar el resultado; la alineación real actual solo se incorpora en
+  `observe()` para partidos posteriores.
+
+`roster_glicko_cal` se calibra y mide en el mismo walk-forward temporal que los
+demás candidatos. Solo puede llegar a producción si gana la selección causal y,
+después, la puerta champion/challenger por log loss (Brier como desempate). El
+beneficio esperado son menos palos gordos y mejor calibración tras reconstrucciones,
+no un salto grande de accuracy media.
 
 ---
 
@@ -500,15 +524,19 @@ Uso actual:
 
 En la BBDD se guardan todas con `captured_at_utc`, `bookmaker`, `market_type`, odds decimales, probabilidad implícita normalizada y overround. Para entrenamiento/evaluación pre-partido, la apertura es el benchmark legítimo; para staking se usa la cuota disponible capturada en el snapshot operativo, siempre con timestamp.
 
-Se tratan como **dato a estudiar y benchmark de decisión**, no como motor del modelo estadístico principal. Razones:
+Se tratan como **dato predictivo y benchmark de decisión**, manteniendo una rama
+estadística dedicada que no depende de ellas. Razones:
 
 - Es probablemente la feature individual más predictiva, pero **canibaliza** el resto (el modelo se convierte en una copia con ruido de la casa) y vacía el interés académico ("¿qué stats importan?").
 - Hay riesgo de fuga encubierta: la cuota de **cierre** incorpora información de último minuto (alineaciones, bajas) y refleja el consenso final del mercado. **Usar solo cuotas de apertura**, con timestamp estricto.
 - Las casas no son verdad absoluta: incorporan margen (*overround*), sesgos de mercado, límites de liquidez y comportamiento de apostadores. La literatura de betting market efficiency recomienda usar probabilidades implícitas **normalizadas** como benchmark, no copiar odds sin crítica.
 
-**Decisión de diseño:** construir el modelo **dos veces** —
-- **Modelo A (solo stats):** la contribución central, interpretable.
-- **Modelo B (stats + cuota de apertura):** mide cuánto aportan las cuotas y si las stats conservan poder predictivo por encima del mercado. No se activa en producción hasta tener validación walk-forward fiable con suficiente muestra de odds point-in-time. Umbral actual: **mínimo 120 partidos cerrados con odds**.
+**Decisión de diseño:** mantener Model A (solo stats) y el benchmark Model B,
+pero dejar que la puerta compare dos sistemas productivos: (A) router con
+primario stats+opening odds y reserva dedicada sin odds; (B) LightGBM único con
+odds `NaN` nativo e indicador `odds_available`. Umbral actual configurable:
+**mínimo 120 partidos cerrados con odds causales**. Véase
+`DOCS/ODDS_ARCHITECTURES.md`.
 
 El peso de cada feature (incluida la cuota) no se decide a mano: se cuantifica con **SHAP** (cubre la prioridad de interpretabilidad).
 
@@ -518,16 +546,19 @@ El proyecto separa tres conceptos que no deben mezclarse:
 
 | Capa | Campo | Usa odds | Propósito |
 |---|---|---:|---|
-| Modelo estadístico puro | `model_prob_team1` / `prob_team1` | No | Medir lo que predicen las stats de HLTV y mantener interpretabilidad |
+| Modelo de producción | `model_prob_team1` / `prob_team1` | Según `prediction_regime` | Mejor arquitectura validada; siempre predice |
 | Mercado normalizado | `odds_prob_team1` | Sí | Benchmark, cálculo de EV y referencia externa |
 | Decisión operativa | `decision_prob_team1` | A veces | Ranking, stake y gestión de riesgo |
 
 Reglas:
 
-- La probabilidad pura del modelo **no se modifica** con odds. Es la métrica que se evalúa para saber si el sistema estadístico aprende algo real.
+- El artefacto productivo puede incorporar opening odds si la puerta lo aprueba;
+  `prediction_regime` declara la ruta real. Model A sigue midiéndose por separado
+  para saber qué aprende la rama puramente estadística.
 - Para apostar o simular staking, las odds son obligatorias: sin cuota no existe EV ni Kelly bien definido.
 - En todos los backtests de cartera, el lado queda fijado por el favorito puro del modelo (`p_team1 >= 0,5` elige team1; en caso contrario team2). Las odds pueden descartar ese favorito si no tiene EV positivo y dimensionar el stake, pero nunca invertir la selección para apostar al equipo al que el modelo asigna menos del 50%.
-- La decisión operativa puede usar mercado, pero solo como **prior prudente**, no como oráculo.
+- La decisión operativa no vuelve a mezclar el mercado si ya está embebido en el
+  modelo; evita contar la misma señal dos veces.
 - Mientras haya poca muestra con odds, el peso del mercado es dinámico y conservador: mayor si la fiabilidad interna es baja; menor si hay buena historia, baja RD y datos completos.
 - Cuando haya suficiente histórico de predicciones cerradas con odds, el peso modelo/mercado se aprende con validación **walk-forward expansiva**, eligiendo por log loss/Brier, no por una regla fija.
 
@@ -535,8 +566,12 @@ Estado implementado (julio 2026):
 
 - Si no hay odds: `decision_prob_team1` = probabilidad del modelo encogida hacia 50/50 según `reliability_score`.
 - Si hay odds y aún no hay muestra suficiente: `decision_prob_team1` mezcla modelo y mercado con un prior dinámico conservador. Rango actual de peso mercado: **5 %–30 %**, penalizado si hay pocas casas, bajo consenso o drift fuerte.
-- Si hay al menos **120 partidos cerrados con odds point-in-time**: se habilita una política aprendida por walk-forward sobre pesos candidatos `[0.00, 0.05, ..., 0.50]`.
-- Se persisten `decision_market_weight`, `decision_market_weight_reasons`, `decision_policy_json`, `staking_json`, `controls_json`, `flags_json`, `features_json`, `odds_json`, `rosters_json` y `data_quality_json` en SQLite para auditoría.
+- Si hay al menos **120 partidos cerrados con odds point-in-time**: se comparan
+  router y modelo mixto por log loss/Brier sobre el mismo soporte temporal; el
+  blend histórico se conserva como benchmark.
+- Se persisten aditivamente `prediction_regime`, `prediction_architecture`,
+  `opening_odds_recovered` y `opening_odds_captured_at_utc`, además de los JSON y
+  controles existentes, tanto en `predictions` como en el ledger sancionado.
 - La cuota mínima de value se guarda como `team1_min_value_odds`, `team2_min_value_odds` y `decision_min_value_odds`. Fórmula: si la probabilidad operativa de un lado es `p`, la cuota decimal mínima para EV positivo empieza por encima de `1 / p`. Por eso un equipo puede tener 80 % de probabilidad de ganar y aun así no ser apuesta si la cuota actual está por debajo de ese umbral.
 
 ### 6.5.2. Activacion automatica de extended features
@@ -685,8 +720,12 @@ Reglas de evaluación:
 
 - El mercado se evalúa como benchmark separado: `model` vs `market` vs `decision`.
 - La métrica principal para comparar probabilidades es **log loss/Brier**, no accuracy. La literatura de modelos para betting muestra que la calibración es más importante que la exactitud bruta cuando las probabilidades alimentan EV/Kelly.
-- Las odds de apertura pueden usarse como feature de Model B solo con validación walk-forward y muestra suficiente. El umbral operativo actual es **120 partidos cerrados con odds**.
-- La capa `decision_prob_team1` se evalúa aparte porque mezcla objetivos: calibración, fiabilidad de datos, mercado y gestión de riesgo. No debe confundirse con el rendimiento del Modelo A.
+- Las odds de apertura pueden entrar en producción solo con validación
+  walk-forward, muestra suficiente y aprobación de la puerta. El umbral
+  operativo actual es **120 partidos cerrados con odds**.
+- La capa `decision_prob_team1` se evalúa aparte porque mezcla calibración,
+  fiabilidad y gestión de riesgo. No debe confundirse con el desglose causal de
+  cada arquitectura ni con el benchmark Model A/Model B.
 
 ### 8.4. Análisis de fallos
 
@@ -748,32 +787,56 @@ Actualización recursiva del estado por periodo de rating semanal. Barato y cons
 ### 10.2. Features de un partido nuevo → en el momento de predecir
 Se calculan point-in-time desde el estado actual de la base. No es reentrenar.
 
-### 10.3. Modelo GBM/CatBoost → cadencia semanal de lunes
-- **Reajuste programado: cada lunes.** Primero se ejecuta `.\start.ps1` completo para actualizar snapshots, odds, Analytics, contexto, rosters y stats de jugador. Despues se ejecuta `python MODEL\run_professional_training.py --install-deps`.
+### 10.3. Modelo GBM/CatBoost → por nueva evidencia o bajo demanda
+- **Reajuste automático:** `live_cutoff` es el `date_max` del vivo, pero el
+  disparador usa `attempt_cutoff`, el máximo entre `live_cutoff` y el último
+  intento terminal válido registrado. Al reunir **100** partidos etiquetados con
+  fecha estrictamente posterior a `attempt_cutoff` crea un challenger. Esto impide
+  repetir determinísticamente el mismo intento tras rechazo o aplazamiento.
+  `-Retrain` fuerza el intento manualmente; ambos pasan por la misma puerta y
+  pueden terminar en promoción, rechazo o aplazamiento.
+- **Sweep profundo opcional:** tras actualizar snapshots, odds, Analytics,
+  contexto, rosters y stats, `python MODEL\run_professional_training.py
+  --install-deps` reevalúa algoritmos/half-life/gap; tampoco autoriza saltarse la
+  puerta de producción.
 - **Extended features sin switches:** una familia debe superar cobertura y ganar
   el holdout temporal fold-local por log loss. Cruzar el umbral ya no basta.
   Player snapshots, rankings y Analytics quedan automaticamente `OFF` cuando
   no demuestran mejora, aunque ya tengan la muestra minima.
-- **Accuracy por franjas automatica:** cada entreno calcula sobre las predicciones walk-forward del modelo promovido las bandas 50-60/60-70/70-80/80-90/90-100, guarda aciertos, muestra, accuracy, probabilidad media y gap en `MODEL/results/favorite_accuracy_bands.json` y en el artefacto. `../WEB/build_web.py` lo publica en la pestaña BBDD; `start.ps1 -Retrain` ejecuta ambas fases en orden.
+- **Accuracy por franjas automatica:** cada entreno calcula sobre las predicciones
+  walk-forward del challenger las bandas 50-60/60-70/70-80/80-90/90-100 y guarda
+  aciertos, muestra, accuracy, probabilidad media y gap. La web solo presenta ese
+  artefacto como vivo si supera la puerta; un rechazo no cambia el hash productivo.
 - **Que prueba el entrenamiento profesional:** Logistica calibrada, LightGBM, CatBoost, ensembles, calibracion Platt/isotonica/beta, `form_half_life` en `45,60,90,120,180` y `wf_gap` en `0,1`.
 - **Criterio de seleccion:** menor **log loss walk-forward**. La accuracy se reporta, pero no decide produccion si empeora la calidad probabilistica.
 - **Seleccion sin sesgo L1 (desde 2026-07-27):** la metrica primaria es
   `nested_model_policy`. Antes de cada semana elige candidato usando solo el OOS
-  acumulado de semanas anteriores. Una vez cerrado todo el historico,
-  `production_model` indica el candidato ajustado para el siguiente periodo; su
-  score retrospectivo individual queda como diagnostico, no como estimacion
-  insesgada de la politica completa.
+  acumulado de semanas anteriores. Con incumbente, `production_model` y el resto
+  de la receta se congelan con `recipe_mask <= live_cutoff`; el bloque posterior
+  no puede cambiarlos ni reajustar el shadow. Su score retrospectivo sobre todo el
+  histórico queda como diagnóstico, no como estimación insesgada de la política
+  completa.
 - **Artefacto final actual (2026-07-27):** refit `super_learner_cal` sobre 9.726
   series. La estimación primaria `nested_model_policy` usa `n_eval=7.290`:
   accuracy `64,31%`, log loss `0,6308`, Brier `0,2203`, ROC-AUC `0,6886` y
   ECE `0,0127`. Frente al artefacto anterior mejora `+0,20` puntos de accuracy y
   `-0,00105` de log loss. Las familias finales aprobadas son
   `team_trueskill` y `event_history`.
-- **Reajuste por evento (inmediato):** cambio de pool de mapas de Valve, parche gordo de jugabilidad, cambio de formula de rating de HLTV. Son cambios de distribucion.
-- **Reajuste por deriva (bajo demanda):** `MODEL/monitor_drift.py` se ejecuta automaticamente al final de `start.ps1`. Si Page-Hinkley o las ventanas de log loss/CLV superan los umbrales de `MODEL/config.yaml`, se revisa y reentrena aunque no sea lunes.
+- **Reajuste por evento (bajo demanda):** un cambio del pool de mapas de Valve,
+  un parche grande de jugabilidad o un cambio de fórmula de rating de HLTV son
+  motivos para lanzar `-Retrain` sin esperar al umbral automático. El challenger
+  resultante no evita la puerta de promoción.
+- **Reajuste por deriva (bajo demanda):** `MODEL/monitor_drift.py` se ejecuta
+  automáticamente al final de `start.ps1` y alerta si Page-Hinkley o las ventanas
+  de log loss/CLV superan `MODEL/config.yaml`; no publica ni reentrena por sí solo.
+  El operador puede lanzar `-Retrain`, mientras el único disparador automático
+  sigue siendo acumular al menos 100 etiquetas posteriores a `attempt_cutoff`.
 
-### 10.4. Recalibración → incluida en el sweep semanal
-La calibración se desajusta antes que la capacidad de ranking. El sweep profesional semanal compara Platt, isotónica y beta dentro de la validacion walk-forward; si en el futuro se separa una capa de recalibracion ligera, debe validarse con el mismo criterio de log loss/Brier.
+### 10.4. Recalibración → incluida en cada reentreno/sweep
+La calibración se desajusta antes que la capacidad de ranking. Cada reentreno y
+el sweep profesional comparan Platt, isotónica y beta dentro de la validacion
+walk-forward; si en el futuro se separa una capa de recalibracion ligera, debe
+validarse con el mismo criterio de log loss/Brier y la misma puerta de promoción.
 
 ### 10.5. Busqueda de hiperparametros
 Optuna purgado ajusta la regularizacion logistica de forma causal durante el walk-forward (8 trials, retune cada 26 semanas). El sweep amplio de algoritmos/half-life/gap sigue siendo trimestral o ante drift grande.
@@ -781,29 +844,95 @@ Optuna purgado ajusta la regularizacion logistica de forma causal durante el wal
 ### 10.6. Monitorizacion
 Cada entrenamiento guarda `experiment_manifest.json` con SHA-256 del dataset y
 configuracion, semilla, commit/dirty state, argumentos y versiones. La promocion
-es atomica: primero se escribe `candidate_model.pkl`, se recalculan desde CSV las
-metricas publicadas y se comprueban placeholders, FK, duplicados, cobertura,
-log loss frente a Glicko y politica fold-local. El mismo archivo final vuelve a
-pasar el gate despues de anadir metadatos de registry; solo entonces reemplaza
-`MODEL/artifacts/model.pkl`.
+separa selección, evaluación y despliegue. Con incumbente fija
+`live_cutoff = incumbent.metadata.date_max`; `recipe_mask` restringe al prefijo
+`<= live_cutoff` la selección de features, la familia `best_name`, Optuna purgado
+y los pesos. Con esa receta se ajusta una única instancia shadow. El mismo objeto
+predice todo el sufijo `> live_cutoff` de una vez, sin refits intermedios ni
+etiquetas del sufijo; estas solo se revelan después para compararlo con el
+incumbente sobre los mismos IDs y filas point-in-time. Las predicciones
+walk-forward post-corte del diagnóstico no deciden la promoción.
+
+Se exigen al menos 100 filas comunes. Log loss es primaria (`epsilon=0,001`);
+dentro de esa banda solo promociona una mejora Brier de al menos `0,0005`.
+Rechazo o muestra insuficiente conservan producción intacta. La receta congelada
+puede refitearse sobre todo el histórico antes de materializar la decisión, ya que
+ese cálculo no alimenta al shadow; el pickle resultante solo se publica si este
+gana. Sus métricas validan el shadow as-of, no esos parámetros refiteados.
+`promotion_decision.json` conserva `holdout_sha256` para IDs/fechas/etiquetas y
+`prediction_sha256` para esa identidad más probabilidades de incumbente/shadow.
+El health gate final carga directamente `registry/<version>/model.pkl`; su
+`candidate_reference` verifica el SHA-256 que se pasa obligatoriamente al CAS.
+
+El bundle núcleo (`model.pkl`, metadata, SHAP, manifest y config) se prepara en un
+directorio staging oculto y se mueve una vez a una versión nueva. Esos archivos
+son inmutables. `promotion_decision.json` y `deployment.json` son sidecars
+auditables aditivos sancionados y no alteran el bundle ni el SHA del modelo. Por
+eso `metadata.json` representa el estado pre-commit: puede contener
+`promotion_approved=true` y `deployment_state=pending_pointer_commit` incluso
+después de publicar. Solo `latest.json`, el hash runtime y `deployment.json`
+confirman el publish.
+
+`MODEL/artifacts/registry/latest.json` es el puntero lógico al vivo;
+`last_good.json` conserva el incumbente saliente. Solo una promoción validada
+reemplaza atómicamente la copia runtime `MODEL/artifacts/model.pkl`. La promoción
+toma `registry/.deployment.lock` y ejecuta CAS de versión+SHA del incumbente y
+SHA del challenger; `expected_incumbent` y `expected_candidate_sha256` son
+obligatorios, y bootstrap exige el SHA esperado. Si difieren de las referencias
+evaluadas, aborta sin mutar. Tras el commit, `deployment.json` registra
+referencias, hashes, resultado, `decision_holdout_sha256` y
+`decision_prediction_sha256`; un error al emitir el recibo se
+advierte sin revertir el cambio. Los punteros y el hash runtime son la autoridad
+operativa. El rollback (`start.ps1 -RollbackModel` o
+`MODEL/manage_models.py rollback`)
+restaura `last_good` y rota el vivo anterior a ese puntero bajo el mismo lock.
+
+`MODEL/manage_models.py set-last-good --version <ID> --expected-sha256 <SHA>` es
+la vía administrativa para corregir un `last_good` legado: valida carga, semilla,
+predicción y hash del artefacto y hace CAS bajo el mismo lock, sin tocar
+`latest.json` ni el runtime.
+
+La retención conserva 0 versiones adicionales: exactamente
+`latest`/`last_good`, y los 2 runs no referenciados más recientes, además del
+publicado por master, los referenciados y los de nombre desconocido. Estos runs
+referenciados son evidencia de procedencia, no generaciones de modelo. La primera
+poda exige enseñar keep/delete-list, confirmar su token exacto y registrar la
+política; un cambio de estado invalida el token antes de borrar.
+La aplicación renombra atómicamente todos los candidatos a
+`.retention-quarantine/<TOKEN>/` antes del primer borrado. Un fallo de staging
+revierte todos los renames; un fallo de `rmtree` queda descrito por un manifest
+estructurado y se reanuda mediante
+`manage_models.py prune --scope <tipo> --resume <TOKEN>`, sin devolver bundles
+parciales al namespace canónico.
 
 `prediction_ledger` conserva una unica prediccion operativa por partido con
 participantes, kickoff, timestamp, SHA-256 del artefacto/config/politica y
-probabilidad. Se puede actualizar solo antes del inicio; despues queda
+probabilidad. Sus cuatro campos escalares de incertidumbre son nullable y se
+añaden sin backfill: una fila histórica conserva `NULL`. Se puede actualizar
+solo antes del inicio con otra predicción válida; una observación inválida más
+reciente no reemplaza evidencia abierta válida. Después queda
 `frozen` y al llegar el resultado se calculan accuracy, log loss y Brier sobre
 esa misma fila. `MODEL/evaluate_live_ledger.py` agrupa los resultados por hash
-exacto. Las odds de cierre solo son `closing_observed` si fueron capturadas
+exacto. La reparación de integridad nunca borra el ledger: si un partido que
+sería purgable contiene evidencia, conserva el partido completo y reporta su ID
+como protegido. Las odds de cierre solo son `closing_observed` si fueron capturadas
 antes del kickoff y como maximo seis horas antes; el resto es `legacy_proxy` y
 no entra en CLV.
 
 ### 10.7. Política de mercado / odds
 
-La política que decide cuánto pesa el mercado en `decision_prob_team1` se gestiona aparte del modelo principal:
+La ruta con odds forma parte de la arquitectura si gana la comparación temporal:
 
-- **Antes de 120 partidos cerrados con odds:** no se aprende ningún peso global; se usa prior dinámico conservador por fiabilidad de datos.
-- **A partir de 120 partidos:** se evalúan pesos candidatos con walk-forward expansivo. El peso de producción se elige por log loss/Brier y queda guardado en `decision_policy_json`.
-- **Nunca** se ajusta el peso mirando resultados del mismo día sin validación temporal.
-- Si el mercado gana claramente al modelo durante muchas ventanas, eso no significa copiarlo: significa revisar features, calibración y cobertura de datos. El mercado sigue siendo benchmark, no sustituto del modelo académico.
+- **Antes de 120 partidos cerrados con odds:** no se ajusta ni promociona una
+  ruta aprendida con mercado; producción conserva la rama validada sin odds.
+- **A partir de 120 partidos:** router y modelo mixto se comparan en el mismo
+  hold-out por log loss y Brier, con calibración y accuracy separadas para
+  `odds`/`no_odds`. La arquitectura solo llega al vivo si gana además la puerta
+  champion/challenger completa.
+- **Nunca** se ajusta arquitectura, peso ni calibrador mirando resultados del
+  mismo día o posteriores al cutoff congelado.
+- Opening odds embebidas no se mezclan de nuevo en `decision_prob_team1`. Model B
+  y mercado normalizado siguen publicados como referencias independientes.
 
 ---
 
@@ -899,14 +1028,23 @@ entra al modelo solo. **Nada se activa a mano.** Estado: ✅ hecho · 🟡 parci
 ### A. Estadística / metodología
 - ✅ **A1. Ponderación por recencia en el learner** (`sample_weight` con decaimiento
   exponencial por fecha, Dixon-Coles). `--recency-half-life` (default 365d, activo).
-- ✅ **A2. Incertidumbre epistémica** — `artifact.predict_proba_team1_with_uncertainty`
-  (std ponderada entre miembros del ensemble); `enrich` la expone (`model_epistemic_std`)
-  y **reduce el stake** vía `uncertainty_factor` cuando el ensemble discrepa.
+- ✅ **A2. Incertidumbre del estimado** — `artifact.predict_symmetric_proba_team1_with_uncertainty`
+  calcula la desviación ponderada entre miembros calibrados. `enrich` la combina
+  con cobertura de historia estrictamente previa y publica una semibanda numérica,
+  extremos y nivel alto/medio/bajo (`ensemble_dispersion_history_v1`). No es un
+  intervalo riguroso: para un partido, la varianza Bernoulli `p(1-p)` ya está en
+  el porcentaje; esta banda describe incertidumbre sobre el propio `p`. Se muestra
+  en Partidos y Best Opportunity sin cambiar el ranking ni alimentar bankroll;
+  el staking heredado conserva por separado su señal histórica. Véase
+  `DOCS/ESTIMATE_UNCERTAINTY.md`.
 - ✅ **A3. Calibración/auditoría por segmento** — `segment_calibration_suite` calcula
-  accuracy, ECE, log loss y Brier por **formato, LAN/online, fase y tier de evento**.
-  Los segmentos desconocidos se excluyen de conclusiones y los grupos con menos de
-  30 casos quedan marcados como no concluyentes. Resultado en
-  `MODEL/results/segment_calibration.json`, `REPORT.md` y metadatos del artefacto.
+  curva de fiabilidad, gap, ECE, accuracy, log loss y Brier por **tramo absoluto de
+  Elo as-of, LAN/online y fase**; conserva además formato y tier. Los desconocidos
+  se excluyen y `N<100` no se interpreta. El mismo contrato monitoriza las filas
+  congeladas del `prediction_ledger`, pero el live no decide hasta 1.000 resultados.
+  Las interacciones Elo×segmento están apagadas por defecto y solo se prueban con
+  `--segment-interactions`, primero en gate temporal fold-local y después contra el
+  champion. Véase `DOCS/SEGMENT_CALIBRATION.md`.
 - ✅ **A4. Purga/embargo (`--wf-gap`) + tests de significancia** (bootstrap+Wilcoxon
   pareado sobre log loss por-partido, CI95 + MDE) vs Glicko y vs 2º mejor →
   `significance.json` y metadatos del artefacto.
@@ -981,7 +1119,9 @@ completamente elegibles; queda preparado para activarse sin intervención manual
   drift y backtest en unos segundos sin tocar produccion.
 - ✅ **C15. Reproducibilidad determinista** — semillas centralizadas para Python,
   NumPy y estimadores; cada experimento registra hashes de datos/config, Git, CLI y
-  dependencias y archiva el YAML efectivo junto al modelo.
+  dependencias y archiva el YAML efectivo junto al modelo. La carga para inferencia
+  fuerza un solo hilo en los estimadores y el test de contrato repite la misma fila
+  en el mismo proceso y en procesos separados con tolerancia absoluta `1e-12`.
 - ✅ **C16. Auditoría de fuga exhaustiva** — `TESTS/test_leakage_audit.py`: verifica que
   las features rolling de cada partido son idénticas al reconstruir el estado solo con
   partidos anteriores (garantía point-in-time).

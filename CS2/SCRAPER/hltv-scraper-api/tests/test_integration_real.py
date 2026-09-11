@@ -4,15 +4,14 @@ import requests
 
 class TestEnvironmentSetup:
     """Test that the environment is properly set up for integration testing"""
-    
+
+    @pytest.mark.integration
     def test_hltv_website_accessibility(self):
         """Test that HLTV.org is accessible"""
         try:
             # Use headers to avoid 403 blocking
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-            }
-            response = requests.get('https://www.hltv.org', timeout=10, headers=headers)
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            response = requests.get("https://www.hltv.org", timeout=10, headers=headers)
             # Accept both 200 and 403 as "accessible" - 403 means site is up but blocking bots
             assert response.status_code in [200, 403], f"HLTV.org returned {response.status_code}"
             print(f"HLTV.org is accessible (status: {response.status_code})")
@@ -22,21 +21,21 @@ class TestEnvironmentSetup:
 
 class TestAPIEndpointsBasic:
     """Basic integration tests that test endpoint availability without deep scraping"""
-    
+
     @pytest.mark.integration
     def test_player_search_endpoint_basic(self, client):
         """Test player search endpoint responds (may return 'not found')"""
-        response = client.get('/api/v1/players/search/s1mple')
-        
+        response = client.get("/api/v1/players/search/s1mple")
+
         # Accept any response that's not a server error
         assert response.status_code in [200, 404], f"Unexpected status: {response.status_code}"
         print(f"Player search endpoint responded with status: {response.status_code}")
 
-    @pytest.mark.integration  
+    @pytest.mark.integration
     def test_team_search_endpoint_basic(self, client):
         """Test team search endpoint responds (may return 'not found')"""
-        response = client.get('/api/v1/teams/search/navi')
-        
+        response = client.get("/api/v1/teams/search/navi")
+
         # Accept any response that's not a server error
         assert response.status_code in [200, 404], f"Unexpected status: {response.status_code}"
         print(f"Team search endpoint responded with status: {response.status_code}")
@@ -44,8 +43,8 @@ class TestAPIEndpointsBasic:
     @pytest.mark.integration
     def test_results_endpoint_basic(self, client):
         """Test results endpoint responds (may return 'not found')"""
-        response = client.get('/api/v1/results/')
-        
+        response = client.get("/api/v1/results/")
+
         # Accept any response that's not a server error
         assert response.status_code in [200, 404, 500], f"Unexpected status: {response.status_code}"
         print(f"Results endpoint responded with status: {response.status_code}")
@@ -53,8 +52,8 @@ class TestAPIEndpointsBasic:
     @pytest.mark.integration
     def test_featured_results_endpoint_basic(self, client):
         """Test featured results endpoint responds (may return 'not found')"""
-        response = client.get('/api/v1/results/featured')
-        
+        response = client.get("/api/v1/results/featured")
+
         # Accept any response that's not a server error
         assert response.status_code in [200, 404, 500], f"Unexpected status: {response.status_code}"
         print(f"Featured results endpoint responded with status: {response.status_code}")
@@ -62,14 +61,14 @@ class TestAPIEndpointsBasic:
 
 class TestScrapyIntegration:
     """Integration tests that require Scrapy to be properly configured"""
-    
+
     @pytest.mark.slow
     @pytest.mark.integration
     def test_teams_ranking_endpoint_with_scrapy_fallback(self, client):
         """Test teams ranking endpoint - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/teams/rankings')
-            
+            response = client.get("/api/v1/teams/rankings")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -85,19 +84,19 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             # If there's an exception, it's likely due to missing scrapy or HLTV blocking
             print(f"Teams ranking test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")
 
-    @pytest.mark.slow  
+    @pytest.mark.slow
     @pytest.mark.integration
     def test_upcoming_matches_endpoint_with_scrapy_fallback(self, client):
         """Test upcoming matches endpoint - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/matches/upcoming')
-            
+            response = client.get("/api/v1/matches/upcoming")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -112,18 +111,18 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             print(f"Upcoming matches test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")
 
     @pytest.mark.slow
-    @pytest.mark.integration 
+    @pytest.mark.integration
     def test_news_endpoint_with_scrapy_fallback(self, client):
         """Test news endpoint - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/news')
-            
+            response = client.get("/api/v1/news")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -138,7 +137,7 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             print(f"News test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")
@@ -148,8 +147,8 @@ class TestScrapyIntegration:
     def test_results_endpoint_with_scrapy_fallback(self, client):
         """Test results endpoint - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/results/')
-            
+            response = client.get("/api/v1/results/")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -164,7 +163,7 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             print(f"Results test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")
@@ -174,8 +173,8 @@ class TestScrapyIntegration:
     def test_results_with_offset_endpoint_with_scrapy_fallback(self, client):
         """Test results endpoint with offset - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/results/100')
-            
+            response = client.get("/api/v1/results/100")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -190,7 +189,7 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             print(f"Results with offset test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")
@@ -200,8 +199,8 @@ class TestScrapyIntegration:
     def test_featured_results_endpoint_with_scrapy_fallback(self, client):
         """Test featured results (big_results) endpoint - expect either success or controlled failure"""
         try:
-            response = client.get('/api/v1/results/featured')
-            
+            response = client.get("/api/v1/results/featured")
+
             if response.status_code == 200:
                 data = response.get_json()
                 # Accept both dict and list format from HLTV data
@@ -216,7 +215,7 @@ class TestScrapyIntegration:
                 pytest.skip("Scrapy not properly configured for integration testing")
             else:
                 pytest.fail(f"Unexpected response status: {response.status_code}")
-                
+
         except Exception as e:
             print(f"Featured results test failed with exception: {e}")
             pytest.skip("Integration test failed due to environment issues")

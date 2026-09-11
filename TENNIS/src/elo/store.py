@@ -22,6 +22,8 @@ import re
 import sqlite3
 from typing import Any, Final, Iterable, Iterator, Mapping, Sequence, cast
 
+from ..artifact_integrity import CodeInventoryError, verify_code_inventory
+from ..config import PROJECT_ROOT
 from .types import Gender, PlayerEloState
 
 
@@ -358,6 +360,24 @@ def _row_to_run_record(row: sqlite3.Row) -> RunRecord:
         max_event_date=_optional_iso_date(row["max_event_date"]),
         failure_reason=row["failure_reason"],
     )
+
+
+def _verify_run_code_inventory(run: RunRecord) -> None:
+    """Rechaza un run Elo producido por código distinto del runtime actual."""
+
+    from .build import ELO_CODE_PATHS
+
+    try:
+        verify_code_inventory(
+            PROJECT_ROOT,
+            ELO_CODE_PATHS,
+            run.parameters.get("artifact_code_inventory"),
+        )
+    except CodeInventoryError as exc:
+        raise EloStoreError(
+            f"El run Elo {run.run_id!r} no coincide con el código actual; "
+            "reconstruya la base Elo antes de consultarla."
+        ) from exc
 
 
 def _row_to_rating_record(row: sqlite3.Row) -> RatingHistoryRow:
@@ -914,7 +934,9 @@ class EloStore:
             raise EloStoreError("No se pudo resolver el run Elo.") from exc
         finally:
             connection.close()
-        return _row_to_run_record(row)
+        run = _row_to_run_record(row)
+        _verify_run_code_inventory(run)
+        return run
 
     def fetch_rating_before(
         self,

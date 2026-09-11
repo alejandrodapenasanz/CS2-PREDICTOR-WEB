@@ -18,6 +18,13 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.features import MODEL_FEATURE_COLUMNS  # noqa: E402
+from src.artifact_integrity import build_code_inventory  # noqa: E402
+from src.features.dataset import FEATURE_CODE_PATHS  # noqa: E402
+from src.temporal import DEFAULT_SOURCE_DATE_POLICY  # noqa: E402
+from src.features.artifacts import (  # noqa: E402
+    preflight_feature_publication,
+    publish_feature_run,
+)
 from src.modeling.data import (  # noqa: E402
     ModelDataError,
     load_training_dataset,
@@ -42,6 +49,10 @@ def _write_fixture(root: Path, *, corrupt_hash: bool = False) -> Path:
                 date(2020, 1, 2),
                 date(2020, 1, 1),
             ],
+            "result_available_date": [
+                date(2020, 1, 23),
+                date(2020, 1, 22),
+            ],
             "tour_level": ["ATP Tour", "ATP Tour"],
             "surface": ["Hard", "Clay"],
             "rank_a": [1, 2],
@@ -54,11 +65,18 @@ def _write_fixture(root: Path, *, corrupt_hash: bool = False) -> Path:
     )
     frame.to_parquet(dataset_path, index=False)
     digest = "0" * 64 if corrupt_hash else _sha256(dataset_path)
+    conflicts_path = root / "ranking_conflicts.csv"
+    conflicts_path.write_text("gender,player_id\n", encoding="utf-8")
     manifest = {
+        "created_at_utc": "2026-08-01T00:00:00+00:00",
         "fingerprint": "f" * 64,
         "schema_version": "tennis-features-v1",
         "source_commit": "a" * 40,
         "historical_odds_available": False,
+        "source_date_policy": DEFAULT_SOURCE_DATE_POLICY.as_dict(),
+        "code_inventory": list(
+            build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
+        ),
         "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
         "datasets": [
             {
@@ -71,12 +89,34 @@ def _write_fixture(root: Path, *, corrupt_hash: bool = False) -> Path:
                 "max_date": "2020-01-02",
             }
         ],
+        "conflict_inventory": {
+            "path": conflicts_path.name,
+            "size": conflicts_path.stat().st_size,
+            "sha256": _sha256(conflicts_path),
+            "rows": 0,
+        },
     }
     manifest_path = root / "manifest.json"
     manifest_path.write_text(
         json.dumps(manifest), encoding="utf-8"
     )
     return manifest_path
+
+
+def _write_generational_fixture(root: Path) -> Path:
+    """Publica el fixture mediante un run inmutable y devuelve su puntero."""
+
+    output = root / "features_active"
+    preflight_feature_publication(output_dir=output)
+    publish = output / ".feature-build-model-data" / "publish"
+    publish.mkdir(parents=True)
+    _write_fixture(publish)
+    publish_feature_run(
+        publish,
+        fingerprint="f" * 64,
+        output_dir=output,
+    )
+    return output / "manifest.json"
 
 
 class ModelDataTest(unittest.TestCase):
@@ -103,6 +143,23 @@ class ModelDataTest(unittest.TestCase):
         self.assertEqual(
             loaded.frame["elo_general_diff"].tolist(), [-5.0, 10.0]
         )
+
+    def test_loads_through_verified_active_generation_pointer(self) -> None:
+        """Sigue el puntero y resuelve el Parquet relativo al run inmutable."""
+
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT / "tests"
+        ) as temporary:
+            manifest_path = _write_generational_fixture(Path(temporary))
+
+            loaded = load_training_dataset(
+                "M",
+                feature_columns=("elo_general_diff",),
+                manifest_path=manifest_path,
+            )
+
+        self.assertEqual(loaded.metadata.rows, 2)
+        self.assertEqual(loaded.source_manifest.path.parent.name, "f" * 64)
 
     def test_rejects_artifact_whose_hash_changed(self) -> None:
         """No entrena si el Parquet diverge del manifiesto de fase 6."""
@@ -133,6 +190,27 @@ class ModelDataTest(unittest.TestCase):
                 load_training_dataset(
                     "M",
                     feature_columns=("player_a_id",),
+                    manifest_path=manifest_path,
+                )
+
+    def test_rejects_manifest_built_by_different_code_inventory(self) -> None:
+        """Falla cerrado si cambia un hash de código del productor."""
+
+        with tempfile.TemporaryDirectory(
+            dir=PROJECT_ROOT / "tests"
+        ) as temporary:
+            manifest_path = _write_fixture(Path(temporary))
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            payload["code_inventory"][0]["sha256"] = "0" * 64
+            manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ModelDataError,
+                "código distinto",
+            ):
+                load_training_dataset(
+                    "M",
+                    feature_columns=("elo_general_diff",),
                     manifest_path=manifest_path,
                 )
 

@@ -13,7 +13,7 @@ from datetime import date, datetime
 import math
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, Mapping, cast
+from typing import Final, Iterable, Mapping, Protocol, cast
 
 from ..config import ELO_DATABASE_PATH
 from ..elo import (
@@ -288,6 +288,57 @@ class EloFeatureSnapshot:
             general_matches=rating.general_matches,
             surface_matches=rating.surface_matches,
             is_cold_start=rating.general_matches == 0,
+        )
+
+
+class EloFeatureProvider(Protocol):
+    """Contrato inyectable para resolver snapshots Elo causales en lote."""
+
+    def get_many(
+        self,
+        queries: Iterable[EloQuery],
+    ) -> tuple[EloSnapshot, ...]:
+        """Devuelve un snapshot por consulta, en el mismo orden."""
+
+        ...
+
+
+class RankingFeatureProvider(Protocol):
+    """Contrato inyectable para resolver rankings causales en lote."""
+
+    @property
+    def gender(self) -> Gender:
+        """Devuelve el único universo de género servido."""
+
+        ...
+
+    def get_many(
+        self,
+        player_ids: Iterable[int],
+        as_of_date: date,
+    ) -> tuple[RankingSnapshot, ...]:
+        """Devuelve un snapshot por jugador, en el mismo orden."""
+
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class _PersistedEloFeatureProvider:
+    """Adapta el servicio SQLite existente al contrato inyectable."""
+
+    database_path: Path
+    run_id: str | None
+
+    def get_many(
+        self,
+        queries: Iterable[EloQuery],
+    ) -> tuple[EloSnapshot, ...]:
+        """Consulta el run persistido conservando orden y semántica actual."""
+
+        return get_elos(
+            queries=queries,
+            db_path=self.database_path,
+            run_id=self.run_id,
         )
 
 
@@ -608,8 +659,10 @@ class MatchFeatureBuilder:
         age_index: PlayerAgeIndex,
         elo_database_path: Path = ELO_DATABASE_PATH,
         elo_run_id: str | None = None,
+        elo_provider: EloFeatureProvider | None = None,
+        ranking_provider: RankingFeatureProvider | None = None,
     ) -> None:
-        """Inyecta dependencias para mantener la construcción testeable."""
+        """Inyecta fuentes opcionales sin cambiar los defaults persistidos."""
 
         if ranking_index.gender not in {"M", "F"}:
             raise FeatureVectorError("RankingIndex contiene género inválido.")
@@ -618,6 +671,23 @@ class MatchFeatureBuilder:
         self.age_index = age_index
         self.elo_database_path = Path(elo_database_path)
         self.elo_run_id = elo_run_id
+        self.elo_provider: EloFeatureProvider = (
+            elo_provider
+            if elo_provider is not None
+            else _PersistedEloFeatureProvider(
+                database_path=self.elo_database_path,
+                run_id=self.elo_run_id,
+            )
+        )
+        self.ranking_provider: RankingFeatureProvider = (
+            ranking_provider
+            if ranking_provider is not None
+            else ranking_index
+        )
+        if self.ranking_provider.gender != ranking_index.gender:
+            raise FeatureVectorError(
+                "El proveedor de ranking y RankingIndex difieren en género."
+            )
 
     def build(
         self,
@@ -625,33 +695,55 @@ class MatchFeatureBuilder:
     ) -> MatchFeatureVector:
         """Construye el vector usando solo snapshots estrictamente previos a D."""
 
-        if request.gender != self.ranking_index.gender:
+        if request.gender != self.ranking_provider.gender:
             raise FeatureVectorError(
                 "El género de la petición no coincide con RankingIndex."
             )
         surface = normalise_surface(request.surface)
-        elo_results = get_elos(
-            queries=(
-                EloQuery(
-                    gender=request.gender,
-                    player_id=request.player_a_id,
-                    surface=surface,
-                    as_of_date=request.as_of_date,
-                ),
-                EloQuery(
-                    gender=request.gender,
-                    player_id=request.player_b_id,
-                    surface=surface,
-                    as_of_date=request.as_of_date,
-                ),
+        elo_queries = (
+            EloQuery(
+                gender=request.gender,
+                player_id=request.player_a_id,
+                surface=surface,
+                as_of_date=request.as_of_date,
             ),
-            db_path=self.elo_database_path,
-            run_id=self.elo_run_id,
+            EloQuery(
+                gender=request.gender,
+                player_id=request.player_b_id,
+                surface=surface,
+                as_of_date=request.as_of_date,
+            ),
         )
-        ranking_a, ranking_b = self.ranking_index.get_many(
-            (request.player_a_id, request.player_b_id),
+        elo_results = self.elo_provider.get_many(elo_queries)
+        if len(elo_results) != 2 or any(
+            not isinstance(snapshot, EloSnapshot)
+            for snapshot in elo_results
+        ):
+            raise FeatureVectorError(
+                "El proveedor Elo debe devolver exactamente dos EloSnapshot."
+            )
+        if any(
+            snapshot.as_of_date != request.as_of_date
+            for snapshot in elo_results
+        ):
+            raise FeatureVectorError(
+                "El proveedor Elo devolvió un corte temporal distinto."
+            )
+
+        player_ids = (request.player_a_id, request.player_b_id)
+        ranking_results = self.ranking_provider.get_many(
+            player_ids,
             request.as_of_date,
         )
+        if len(ranking_results) != 2 or any(
+            not isinstance(snapshot, RankingSnapshot)
+            for snapshot in ranking_results
+        ):
+            raise FeatureVectorError(
+                "El proveedor de ranking debe devolver exactamente dos "
+                "RankingSnapshot."
+            )
+        ranking_a, ranking_b = ranking_results
         age_a, age_b = self.age_index.get_pair(
             request.gender,
             request.player_a_id,

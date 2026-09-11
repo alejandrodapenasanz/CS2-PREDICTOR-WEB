@@ -1,5 +1,7 @@
-import scrapy
 from typing import Any
+
+import scrapy
+
 from .parsers import ParsersFactory as PF
 from .utils import update_json_data
 

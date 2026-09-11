@@ -19,12 +19,12 @@ class JsonFilePathGenerator(FilePathGenerator):
         os.makedirs(self.data_dir, exist_ok=True)
 
     def generate(self, filename: str) -> str:
-        if filename.endswith('.json'):
+        if filename.endswith(".json"):
             filename = filename[:-5]
 
         file_dir = os.path.dirname(os.path.join(self.data_dir, filename))
 
         if file_dir:
             os.makedirs(file_dir, exist_ok=True)
-            
+
         return f"{self.data_dir}/{filename}.json"

@@ -19,7 +19,9 @@ lib64/
 parts/
 sdist/
 var/
-wheels/
+wheels/*
+!wheels/README.md
+!wheels/flasgger-0.9.7.1-py2.py3-none-any.whl
 share/python-wheels/
 *.egg-info/
 .installed.cfg
@@ -122,6 +124,9 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.venv.build/
+.venv.previous/
+.venv.failed*/
 env/
 venv/
 ENV/
@@ -140,6 +145,7 @@ venv.bak/
 
 # mypy
 .mypy_cache/
+.cache/
 .dmypy.json
 dmypy.json
 

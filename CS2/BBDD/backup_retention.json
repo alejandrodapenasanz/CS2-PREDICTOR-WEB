@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "default_keep": 1,
+  "cleanup_targets": [
+    "cs2_integrity_test.db",
+    "cs2_dump.sql"
+  ]
+}

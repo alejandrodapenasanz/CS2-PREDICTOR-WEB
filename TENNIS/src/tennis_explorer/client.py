@@ -31,6 +31,13 @@ from urllib.parse import parse_qs, urlsplit
 import pandas as pd
 
 from src.config import TENNIS_EXPLORER_RAW_DIR
+from src.responsible_http import (
+    ResponsibleHttpClient,
+    ResponsibleHttpError,
+    WafBlockedError,
+    authorized_matches_endpoint_exception,
+    build_http_client,
+)
 
 from .parser import parse_daily_matches_html
 from .transport import ScraplingHttpSession, ScraplingTransportError
@@ -228,10 +235,18 @@ def get_daily_matches(
         # esta ejecución esperaba el lock exclusivo.
         _raise_if_circuit_open(raw_root)
         owned_session = session is None
-        http = session if session is not None else _build_http_session()
+        http = (
+            session
+            if session is not None
+            else _build_http_session(
+                sleeper=sleeper,
+                cache_root=raw_root.parent / "_http_cache",
+            )
+        )
         try:
-            sleeper(MIN_REQUEST_DELAY_SECONDS)
-            response = _single_get(http, source_url)
+            if session is not None:
+                sleeper(MIN_REQUEST_DELAY_SECONDS)
+            response = _single_get(http, source_url, cache_mode="default")
             try:
                 html, content_type = _validated_response_content(
                     response,
@@ -315,10 +330,18 @@ def refresh_daily_results(
     with _network_access_lock(raw_root):
         _raise_if_circuit_open(raw_root)
         owned_session = session is None
-        http = session if session is not None else _build_http_session()
+        http = (
+            session
+            if session is not None
+            else _build_http_session(
+                sleeper=sleeper,
+                cache_root=raw_root.parent / "_http_cache",
+            )
+        )
         try:
-            sleeper(MIN_REQUEST_DELAY_SECONDS)
-            response = _single_get(http, source_url)
+            if session is not None:
+                sleeper(MIN_REQUEST_DELAY_SECONDS)
+            response = _single_get(http, source_url, cache_mode="refresh")
             try:
                 html, content_type = _validated_response_content(
                     response,
@@ -378,11 +401,7 @@ def refresh_daily_results(
 def _read_clock(clock: Callable[[], datetime] | None) -> datetime:
     """Obtiene un instante con zona horaria y conserva su fecha local."""
 
-    observed_at = (
-        clock()
-        if clock is not None
-        else datetime.now().astimezone()
-    )
+    observed_at = clock() if clock is not None else datetime.now().astimezone()
     if not isinstance(observed_at, datetime):
         raise TypeError("clock debe devolver datetime.datetime.")
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
@@ -412,12 +431,7 @@ def _result_snapshot_paths(
     retrieved = retrieved_at_utc.astimezone(UTC)
     timestamp = retrieved.strftime("%Y%m%dT%H%M%S%fZ")
     stem = f"{timestamp}_{sha256[:12]}"
-    directory = (
-        raw_dir
-        / "results"
-        / f"{match_date.year:04d}"
-        / match_date.isoformat()
-    )
+    directory = raw_dir / "results" / f"{match_date.year:04d}" / match_date.isoformat()
     return _CachePaths(
         content=directory / f"{stem}.html",
         metadata=directory / f"{stem}.metadata.json",
@@ -453,31 +467,20 @@ def _raise_if_circuit_open(raw_dir: Path) -> None:
         "access_basis": _ACCESS_BASIS,
     }
     if any(value.get(key) != expected_value for key, expected_value in expected.items()):
-        raise TennisExplorerCacheError(
-            f"El cortacircuitos contiene metadata inesperada: {path}."
-        )
+        raise TennisExplorerCacheError(f"El cortacircuitos contiene metadata inesperada: {path}.")
     opened_at = value.get("opened_at_utc")
     source_url = value.get("source_url")
     reason = value.get("reason")
     if not all(isinstance(item, str) and item for item in (opened_at, source_url, reason)):
-        raise TennisExplorerCacheError(
-            f"El cortacircuitos está incompleto: {path}."
-        )
+        raise TennisExplorerCacheError(f"El cortacircuitos está incompleto: {path}.")
     try:
-        parsed_opened_at = datetime.fromisoformat(
-            opened_at.replace("Z", "+00:00")
-        )
+        parsed_opened_at = datetime.fromisoformat(opened_at.replace("Z", "+00:00"))
     except ValueError as exc:
         raise TennisExplorerCacheError(
             f"El cortacircuitos contiene una fecha inválida: {path}."
         ) from exc
-    if (
-        parsed_opened_at.tzinfo is None
-        or parsed_opened_at.utcoffset() is None
-    ):
-        raise TennisExplorerCacheError(
-            f"El cortacircuitos no contiene una fecha UTC: {path}."
-        )
+    if parsed_opened_at.tzinfo is None or parsed_opened_at.utcoffset() is None:
+        raise TennisExplorerCacheError(f"El cortacircuitos no contiene una fecha UTC: {path}.")
 
     raise TennisExplorerBlockedError(
         "El cortacircuitos de Tennis Explorer está abierto desde "
@@ -505,11 +508,7 @@ def _open_circuit_breaker(
         )
 
     status_code = getattr(response, "status_code", None)
-    reason = (
-        f"http_{status_code}"
-        if status_code in {403, 429}
-        else "waf_challenge_signature"
-    )
+    reason = f"http_{status_code}" if status_code in {403, 429} else "waf_challenge_signature"
     opened = opened_at_utc.astimezone(UTC)
     payload = {
         "schema_version": _CIRCUIT_BREAKER_SCHEMA_VERSION,
@@ -521,10 +520,9 @@ def _open_circuit_breaker(
         "access_basis": _ACCESS_BASIS,
         "reopen_policy": "manual_review_only",
     }
-    encoded = (
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-        + "\n"
-    ).encode("utf-8")
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         _write_new_file(partial, encoded)
@@ -558,10 +556,7 @@ def _network_access_lock(raw_dir: Path) -> Iterator[None]:
 
     try:
         with handle:
-            handle.write(
-                f"pid={os.getpid()}\ncreated_at_utc="
-                f"{datetime.now(UTC).isoformat()}\n"
-            )
+            handle.write(f"pid={os.getpid()}\ncreated_at_utc={datetime.now(UTC).isoformat()}\n")
             handle.flush()
             os.fsync(handle.fileno())
         yield
@@ -603,23 +598,18 @@ def _load_cache_pair(
         return None
     if content_exists != metadata_exists:
         raise TennisExplorerCacheError(
-            f"La caché de {expected_date} está incompleta; no se "
-            "redescargará silenciosamente."
+            f"La caché de {expected_date} está incompleta; no se redescargará silenciosamente."
         )
 
     try:
         content = paths.content.read_bytes()
-        metadata_value = json.loads(
-            paths.metadata.read_text(encoding="utf-8")
-        )
+        metadata_value = json.loads(paths.metadata.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise TennisExplorerCacheError(
             f"No se puede leer la caché de {expected_date}: {exc}"
         ) from exc
     if not isinstance(metadata_value, dict):
-        raise TennisExplorerCacheError(
-            f"La metadata de {expected_date} no es un objeto JSON."
-        )
+        raise TennisExplorerCacheError(f"La metadata de {expected_date} no es un objeto JSON.")
     metadata = dict(metadata_value)
     _validate_cache_metadata(
         metadata,
@@ -662,53 +652,50 @@ def _validate_cache_metadata(
         or isinstance(size_bytes, bool)
         or size_bytes != len(content)
     ):
-        raise TennisExplorerCacheError(
-            "El tamaño del snapshot no coincide con su metadata."
-        )
+        raise TennisExplorerCacheError("El tamaño del snapshot no coincide con su metadata.")
 
     expected_hash = metadata.get("sha256")
     actual_hash = hashlib.sha256(content).hexdigest()
     if not isinstance(expected_hash, str) or expected_hash != actual_hash:
-        raise TennisExplorerCacheError(
-            "El SHA-256 del snapshot no coincide con su metadata."
-        )
+        raise TennisExplorerCacheError("El SHA-256 del snapshot no coincide con su metadata.")
 
     content_type = metadata.get("content_type")
     user_agent = metadata.get("user_agent")
     retrieved = metadata.get("retrieved_at_utc")
     if not isinstance(content_type, str) or not content_type:
-        raise TennisExplorerCacheError(
-            "La metadata no contiene un Content-Type válido."
-        )
+        raise TennisExplorerCacheError("La metadata no contiene un Content-Type válido.")
     if not isinstance(user_agent, str) or not user_agent:
-        raise TennisExplorerCacheError(
-            "La metadata no contiene el User-Agent usado."
-        )
+        raise TennisExplorerCacheError("La metadata no contiene el User-Agent usado.")
     if not isinstance(retrieved, str):
-        raise TennisExplorerCacheError(
-            "La metadata no contiene retrieved_at_utc."
-        )
+        raise TennisExplorerCacheError("La metadata no contiene retrieved_at_utc.")
     try:
-        parsed_retrieved = datetime.fromisoformat(
-            retrieved.replace("Z", "+00:00")
-        )
+        parsed_retrieved = datetime.fromisoformat(retrieved.replace("Z", "+00:00"))
     except ValueError as exc:
         raise TennisExplorerCacheError(
             "retrieved_at_utc no es un instante ISO-8601 válido."
         ) from exc
-    if (
-        parsed_retrieved.tzinfo is None
-        or parsed_retrieved.utcoffset() is None
-    ):
-        raise TennisExplorerCacheError(
-            "retrieved_at_utc debe incluir zona horaria."
-        )
+    if parsed_retrieved.tzinfo is None or parsed_retrieved.utcoffset() is None:
+        raise TennisExplorerCacheError("retrieved_at_utc debe incluir zona horaria.")
 
 
-def _build_http_session() -> ScraplingHttpSession:
-    """Crea el transporte Scrapling estático auditado para una sola tentativa."""
+def _build_http_session(
+    *,
+    sleeper: Callable[[float], None] = time.sleep,
+    cache_root: Path | None = None,
+) -> ResponsibleHttpClient:
+    """Crea el cliente común sobre Scrapling estático y la excepción exacta."""
 
-    return ScraplingHttpSession()
+    transport = ScraplingHttpSession()
+    return build_http_client(
+        transport_kind="scrapling",
+        transport=transport,
+        cache_root=cache_root or TENNIS_EXPLORER_RAW_DIR.parent / "_http_cache",
+        default_headers=_request_headers(),
+        robots_user_agent=USER_AGENT,
+        robots_exception=authorized_matches_endpoint_exception,
+        detect_waf=True,
+        sleeper=sleeper,
+    )
 
 
 def _request_headers() -> dict[str, str]:
@@ -717,27 +704,41 @@ def _request_headers() -> dict[str, str]:
     return {
         "User-Agent": USER_AGENT,
         "Accept": (
-            "text/html,application/xhtml+xml,application/xml;q=0.9,"
-            "image/avif,image/webp,*/*;q=0.8"
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
         ),
         "Accept-Language": "en-US,en;q=0.9",
     }
 
 
-def _single_get(session: HttpSession, url: str) -> Any:
+def _single_get(
+    session: HttpSession,
+    url: str,
+    *,
+    cache_mode: str = "default",
+) -> Any:
     """Ejecuta exactamente un GET y traduce fallos de transporte."""
 
     try:
+        if isinstance(session, ResponsibleHttpClient):
+            return session.get(
+                url,
+                headers=_request_headers(),
+                timeout=REQUEST_TIMEOUT,
+                allow_redirects=False,
+                cache_mode=cache_mode,  # type: ignore[arg-type]
+            )
         return session.get(
             url,
             headers=_request_headers(),
             timeout=REQUEST_TIMEOUT,
             allow_redirects=False,
         )
-    except ScraplingTransportError as exc:
-        raise TennisExplorerHttpError(
-            f"Falló la única petición permitida a {url}: {exc}"
-        ) from exc
+    except WafBlockedError as exc:
+        # El dueño del cortacircuitos necesita la respuesta para registrar
+        # status/cabeceras antes de detenerse. Nunca se intenta resolver.
+        return exc.response
+    except (ScraplingTransportError, ResponsibleHttpError) as exc:
+        raise TennisExplorerHttpError(f"Falló la única petición permitida a {url}: {exc}") from exc
 
 
 def _validated_response_content(
@@ -757,9 +758,7 @@ def _validated_response_content(
     )
     content_value = getattr(response, "content", b"")
     if not isinstance(content_value, (bytes, bytearray)):
-        raise TennisExplorerHttpError(
-            f"La respuesta de {url} no contiene bytes HTTP válidos."
-        )
+        raise TennisExplorerHttpError(f"La respuesta de {url} no contiene bytes HTTP válidos.")
     content = bytes(content_value)
 
     if _looks_like_waf(status_code, headers, content):
@@ -768,17 +767,13 @@ def _validated_response_content(
             "desafío WAF. Se detiene sin reintentar ni intentar evadirlo."
         )
     if not isinstance(status_code, int):
-        raise TennisExplorerHttpError(
-            f"La respuesta de {url} no contiene un estado HTTP válido."
-        )
+        raise TennisExplorerHttpError(f"La respuesta de {url} no contiene un estado HTTP válido.")
     if 300 <= status_code < 400:
         raise TennisExplorerHttpError(
             f"{url} respondió con redirect HTTP {status_code}; no se sigue."
         )
     if status_code != 200:
-        raise TennisExplorerHttpError(
-            f"{url} respondió con HTTP {status_code}; no se reintenta."
-        )
+        raise TennisExplorerHttpError(f"{url} respondió con HTTP {status_code}; no se reintenta.")
 
     content_type = headers.get("content-type", "").strip()
     media_type = content_type.split(";", 1)[0].strip().lower()
@@ -863,8 +858,7 @@ def _write_cache_pair(
         )
     ):
         raise TennisExplorerCacheError(
-            f"No se sobrescribe una caché existente o parcial: "
-            f"{paths.content.parent}"
+            f"No se sobrescribe una caché existente o parcial: {paths.content.parent}"
         )
 
     metadata_bytes = (

@@ -27,7 +27,7 @@ def synthetic_results(seed: int = 42, weeks: int = 40) -> list[dict]:
             team1, team2 = rng.sample(teams, 2)
             probability = 1.0 / (1.0 + pow(2.718281828, -(strengths[team1] - strengths[team2])))
             team1_wins = rng.random() < probability
-            score1, score2 = ((2, rng.randint(0, 1)) if team1_wins else (rng.randint(0, 1), 2))
+            score1, score2 = (2, rng.randint(0, 1)) if team1_wins else (rng.randint(0, 1), 2)
             match_date = start + timedelta(days=week * 7 + slot)
             rows.append(
                 {
@@ -55,16 +55,24 @@ def main() -> int:
         command = [
             sys.executable,
             str(ROOT / "MODEL" / "train.py"),
-            "--raw", str(raw_path),
-            "--output-dir", str(output_path),
-            "--master", str(master_path),
-            "--algorithms", "logistic",
-            "--warmup-weeks", "4",
-            "--min-train", "30",
-            "--optuna-trials", "0",
+            "--raw",
+            str(raw_path),
+            "--output-dir",
+            str(output_path),
+            "--master",
+            str(master_path),
+            "--algorithms",
+            "logistic",
+            "--warmup-weeks",
+            "4",
+            "--min-train",
+            "30",
+            "--optuna-trials",
+            "0",
             "--no-promote",
             "--smoke",
-            "--seed", "42",
+            "--seed",
+            "42",
         ]
         completed = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=180)
         if completed.returncode != 0:
@@ -72,17 +80,19 @@ def main() -> int:
             print(completed.stderr, file=sys.stderr)
             return completed.returncode
         required = {
-            "model.pkl", "metrics.json", "favorite_accuracy_bands.json",
-            "experiment_manifest.json", "config.effective.yaml", "drift_report.json",
+            "model.pkl",
+            "metrics.json",
+            "favorite_accuracy_bands.json",
+            "experiment_manifest.json",
+            "config.effective.yaml",
+            "drift_report.json",
             "economic_backtest.json",
         }
         missing = sorted(name for name in required if not (output_path / name).exists())
         if missing:
             raise RuntimeError(f"Smoke output missing: {missing}")
         manifest = json.loads((output_path / "experiment_manifest.json").read_text(encoding="utf-8"))
-        effective_config = yaml.safe_load(
-            (output_path / "config.effective.yaml").read_text(encoding="utf-8")
-        )
+        effective_config = yaml.safe_load((output_path / "config.effective.yaml").read_text(encoding="utf-8"))
         metrics = json.loads((output_path / "metrics.json").read_text(encoding="utf-8"))
         if (
             manifest.get("random_seed") != 42

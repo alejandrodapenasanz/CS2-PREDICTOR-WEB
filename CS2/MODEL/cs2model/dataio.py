@@ -13,12 +13,13 @@ import math
 import sqlite3
 import statistics
 import sys
-from bisect import bisect_right
+from bisect import bisect_left
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from .identity import is_provisional_team_name
+from .odds import devig_two_way
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -377,10 +378,33 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
     odds_columns = {
         row[1] for row in conn.execute("PRAGMA table_info(odds)").fetchall()
     }
+    match_columns = {
+        row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
+    }
     observed_closing_clause = (
         "AND (? <> 'closing' OR odds.is_observed_closing = 1)"
         if "is_observed_closing" in odds_columns else ""
     )
+    opening_contract_clause = (
+        """
+              AND odds.captured_at_utc IS NOT NULL
+              AND m.datetime_utc IS NOT NULL
+              AND odds.captured_at_utc < m.datetime_utc
+              AND odds.odds_t1 > 1.001 AND odds.odds_t1 <= 100.0
+              AND odds.odds_t2 > 1.001 AND odds.odds_t2 <= 100.0
+        """
+        if market_type == "opening"
+        else """
+              AND (odds.captured_at_utc IS NULL OR m.datetime_utc IS NULL
+                   OR odds.captured_at_utc <= m.datetime_utc)
+        """
+    )
+    if market_type == "opening":
+        opening_contract_clause += (
+            "\n              AND m.datetime_precision = 'exact'"
+            if "datetime_precision" in match_columns
+            else "\n              AND instr(m.datetime_utc, 'T') > 0"
+        )
     try:
         rows = conn.execute(
             f"""
@@ -391,10 +415,7 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
             WHERE odds.market_type = ?
               AND (odds.prob_t1 IS NOT NULL OR odds.odds_t1 IS NOT NULL)
               {observed_closing_clause}
-              -- Guard anti-fuga: descarta odds "opening" capturadas DESPUES del
-              -- inicio del partido (no deberian existir, pero lo blinda).
-              AND (odds.captured_at_utc IS NULL OR m.datetime_utc IS NULL
-                   OR odds.captured_at_utc <= m.datetime_utc)
+              {opening_contract_clause}
             ORDER BY odds.match_id, odds.captured_at_utc, odds.bookmaker
             """,
             (market_type, market_type)
@@ -407,36 +428,56 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
         grouped.setdefault(int(row["match_id"]), []).append(row)
     out: dict[int, dict[str, Any]] = {}
     for match_id, items in grouped.items():
-        probs1: list[float] = []
-        probs2: list[float] = []
-        odds1: list[float] = []
-        odds2: list[float] = []
-        bookmakers: set[str] = set()
-        captured_at = (
-            items[0]["captured_at_utc"]
-            if market_type == "opening" else items[-1]["captured_at_utc"]
+        timestamps = list(
+            dict.fromkeys(str(item["captured_at_utc"]) for item in items)
         )
-        for item in items:
-            if item["captured_at_utc"] != captured_at:
+        if market_type == "closing":
+            timestamps = timestamps[-1:]
+        for captured_at in timestamps:
+            captured_items = [
+                item for item in items if str(item["captured_at_utc"]) == captured_at
+            ]
+            probs1: list[float] = []
+            probs2: list[float] = []
+            odds1: list[float] = []
+            odds2: list[float] = []
+            bookmakers: set[str] = set()
+            for item in captured_items:
+                if market_type == "opening":
+                    normalized = devig_two_way(item["odds_t1"], item["odds_t2"])
+                    if normalized is None:
+                        continue
+                    fair1, fair2, _overround = normalized
+                    probs1.append(fair1)
+                    probs2.append(fair2)
+                    odds1.append(float(item["odds_t1"]))
+                    odds2.append(float(item["odds_t2"]))
+                else:
+                    if item["prob_t1"] is not None:
+                        probs1.append(float(item["prob_t1"]))
+                    if item["prob_t2"] is not None:
+                        probs2.append(float(item["prob_t2"]))
+                    if item["odds_t1"] is not None:
+                        odds1.append(float(item["odds_t1"]))
+                    if item["odds_t2"] is not None:
+                        odds2.append(float(item["odds_t2"]))
+                if item["bookmaker"]:
+                    bookmakers.add(str(item["bookmaker"]))
+            if market_type == "opening" and not probs1:
                 continue
-            if item["bookmaker"]:
-                bookmakers.add(str(item["bookmaker"]))
-            if item["prob_t1"] is not None:
-                probs1.append(float(item["prob_t1"]))
-            if item["prob_t2"] is not None:
-                probs2.append(float(item["prob_t2"]))
-            if item["odds_t1"] is not None:
-                odds1.append(float(item["odds_t1"]))
-            if item["odds_t2"] is not None:
-                odds2.append(float(item["odds_t2"]))
-        out[match_id] = {
-            "team1_implied_prob_norm": sum(probs1) / len(probs1) if probs1 else None,
-            "team2_implied_prob_norm": sum(probs2) / len(probs2) if probs2 else None,
-            "team1_decimal": sum(odds1) / len(odds1) if odds1 else None,
-            "team2_decimal": sum(odds2) / len(odds2) if odds2 else None,
-            "captured_at": captured_at,
-            "bookmaker_count": len(bookmakers) or len(items),
-        }
+            out[match_id] = {
+                "team1_implied_prob_norm": (
+                    sum(probs1) / len(probs1) if probs1 else None
+                ),
+                "team2_implied_prob_norm": (
+                    sum(probs2) / len(probs2) if probs2 else None
+                ),
+                "team1_decimal": sum(odds1) / len(odds1) if odds1 else None,
+                "team2_decimal": sum(odds2) / len(odds2) if odds2 else None,
+                "captured_at": captured_at,
+                "bookmaker_count": len(bookmakers) or len(captured_items),
+            }
+            break
     return out
 
 
@@ -480,7 +521,7 @@ def _latest_analytics_by_match_asof(conn: sqlite3.Connection) -> dict[int, dict[
             WHERE m.status = 'completed'
               AND mas.captured_at_utc IS NOT NULL
               AND m.datetime_utc IS NOT NULL
-              AND mas.captured_at_utc <= m.datetime_utc
+              AND mas.captured_at_utc < m.datetime_utc
             ORDER BY mas.match_id, mas.captured_at_utc DESC, mas.analytics_snapshot_id DESC
             """
         ).fetchall()
@@ -493,10 +534,14 @@ def _latest_analytics_by_match_asof(conn: sqlite3.Connection) -> dict[int, dict[
             continue
         captured_at = _iso_date(row["captured_at_utc"])
         match_dt = _iso_date(row["datetime_utc"])
-        if captured_at is None or match_dt is None or captured_at > match_dt:
+        if captured_at is None or match_dt is None or captured_at >= match_dt:
             continue
         payload = _json_or_none(row["payload_json"])
         if isinstance(payload, dict) and payload.get("available"):
+            payload = dict(payload)
+            # The database column is the authoritative availability time.  Do
+            # not trust a missing or rewritten timestamp inside payload_json.
+            payload["captured_at"] = str(row["captured_at_utc"])
             out[match_id] = payload
     return out
 
@@ -531,7 +576,7 @@ def _prematch_lineups_by_match_asof(
             JOIN matches m ON m.match_id = pls.match_id
             WHERE pls.captured_at_utc IS NOT NULL
               AND m.datetime_utc IS NOT NULL
-              AND pls.captured_at_utc <= m.datetime_utc
+              AND pls.captured_at_utc < m.datetime_utc
             ORDER BY pls.match_id, pls.captured_at_utc, pls.team_id, pls.player_id,
                      pls.prematch_lineup_snapshot_id
             """
@@ -547,7 +592,7 @@ def _prematch_lineups_by_match_asof(
             continue
         captured_at = _iso_date(row["captured_at_utc"])
         match_dt = match["match_dt"]
-        if captured_at is None or match_dt is None or captured_at > match_dt:
+        if captured_at is None or match_dt is None or captured_at >= match_dt:
             continue
         payload = _json_or_none(row["payload_json"])
         if not isinstance(payload, dict):
@@ -563,10 +608,71 @@ def _prematch_lineups_by_match_asof(
         match = wanted[match_id]
         team1 = list((teams.get(match["team1_id"]) or {}).values())
         team2 = list((teams.get(match["team2_id"]) or {}).values())
-        if len(team1) < 5 or len(team2) < 5:
+        if len(team1) != 5 or len(team2) != 5:
             continue
         out[match_id] = {
             "captured_at": captured_at,
+            "team1": {"players": team1},
+            "team2": {"players": team2},
+        }
+    return out
+
+
+def _actual_lineups_by_match(
+    conn: sqlite3.Connection,
+    matches: list[sqlite3.Row],
+) -> dict[int, dict[str, Any]]:
+    """Load complete actual 5v5s as post-result evidence for later matches.
+
+    The caller may attach this payload to the current historical row, but the
+    chronological state is the only consumer and reads it exclusively from
+    ``observe()`` after that row's features and label have been emitted.
+    """
+
+    wanted = {
+        int(row["match_id"]): (int(row["team1_id"]), int(row["team2_id"]))
+        for row in matches
+    }
+    if not wanted:
+        return {}
+    try:
+        rows = conn.execute(
+            """
+            SELECT ml.match_id, ml.team_id, ml.is_standin,
+                   p.hltv_id AS hltv_player_id, p.nick
+            FROM match_lineups ml
+            JOIN players p ON p.player_id = ml.player_id
+            WHERE p.hltv_id IS NOT NULL
+            ORDER BY ml.match_id, ml.team_id, p.hltv_id
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+
+    grouped: dict[int, dict[int, dict[str, dict[str, Any]]]] = {}
+    for row in rows:
+        match_id = int(row["match_id"])
+        if match_id not in wanted:
+            continue
+        player_id = str(row["hltv_player_id"] or "").strip()
+        if not player_id:
+            continue
+        grouped.setdefault(match_id, {}).setdefault(int(row["team_id"]), {})[
+            player_id
+        ] = {
+            "hltv_player_id": player_id,
+            "nickname": str(row["nick"] or player_id),
+            "is_standin": bool(row["is_standin"]),
+        }
+
+    out: dict[int, dict[str, Any]] = {}
+    for match_id, (team1_id, team2_id) in wanted.items():
+        teams = grouped.get(match_id) or {}
+        team1 = list((teams.get(team1_id) or {}).values())
+        team2 = list((teams.get(team2_id) or {}).values())
+        if len(team1) != 5 or len(team2) != 5:
+            continue
+        out[match_id] = {
             "team1": {"players": team1},
             "team2": {"players": team2},
         }
@@ -607,7 +713,7 @@ def _team_player_snapshot_summary(
           AND tr.valid_from <= ?
           AND (tr.valid_to IS NULL OR tr.valid_to > ?)
           AND ps.captured_at_utc IS NOT NULL
-          AND ps.captured_at_utc <= ?
+          AND ps.captured_at_utc < ?
         ORDER BY ps.hltv_player_id, ps.captured_at_utc DESC, ps.player_stat_snapshot_id DESC
         """,
         (team_id, match_dt_text, match_dt_text, match_dt_text),
@@ -714,7 +820,7 @@ def _player_snapshot_features(
     team1_id: int,
     team2_id: int,
     match_dt_text: str,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     t1 = _team_player_snapshot_summary(conn, team1_id, match_dt_text)
     t2 = _team_player_snapshot_summary(conn, team2_id, match_dt_text)
     coverage_min = min(float(t1.get("coverage") or 0.0), float(t2.get("coverage") or 0.0))
@@ -735,8 +841,16 @@ def _player_snapshot_features(
         float(t2.get("maps_per_player_min") or 0.0),
     )
     snapshot_available = coverage_min >= 0.8 and maps_per_player_min >= PLAYER_MIN_MAPS_PER_PLAYER
+    captured_values = [
+        str(value)
+        for value in (t1.get("captured_at_max"), t2.get("captured_at_max"))
+        if value
+    ]
     return {
         "player_snapshot_available": 1.0 if snapshot_available else 0.0,
+        # Audit-only evidence used by enhanced-info.  features.py deliberately
+        # drops this non-numeric field from the learner matrix.
+        "captured_at_max": max(captured_values) if captured_values else None,
         "player_coverage_min": coverage_min,
         "player_maps_min": float(min(t1.get("maps_total") or 0, t2.get("maps_total") or 0)),
         "player_maps_per_player_min": maps_per_player_min,
@@ -796,7 +910,8 @@ def load_external_feature_store(conn_or_path: sqlite3.Connection | str | Path) -
             """
         ):
             roster_index.setdefault(str(row["hltv_team_id"]), []).append(dict(row))
-        return {"rankings": ranking_index, "rosters": roster_index}
+        from .pistols import load_pistol_store
+        return {"rankings": ranking_index, "rosters": roster_index, "pistols": load_pistol_store(conn)}
     except sqlite3.Error:
         return {"rankings": {}, "rosters": {}}
     finally:
@@ -815,7 +930,9 @@ def _ranking_asof(
     bucket = (store.get("rankings") or {}).get((str(hltv_team_id), ranking_type))
     if not bucket:
         return None
-    index = bisect_right(bucket["dates"], match_dt) - 1
+    # Strictly earlier, never equal.  This matters for exact kick-off snapshots
+    # and also makes the selector match the repository-wide < D contract.
+    index = bisect_left(bucket["dates"], match_dt) - 1
     return bucket["rows"][index] if index >= 0 else None
 
 
@@ -858,6 +975,7 @@ def external_snapshot_features_asof(
         "ranking_valve_points_diff": 0.0,
     }
     ages: list[float] = []
+    captured_values: list[str] = []
     for ranking_type in ("hltv", "valve"):
         row1 = _ranking_asof(store, team1_hltv_id, ranking_type, match_dt)
         row2 = _ranking_asof(store, team2_hltv_id, ranking_type, match_dt)
@@ -877,6 +995,7 @@ def external_snapshot_features_asof(
                 captured = _iso_date(row.get("captured_at_utc"))
                 if captured:
                     ages.append(max(0.0, (match_dt - captured).total_seconds() / 86400.0))
+                    captured_values.append(str(row.get("captured_at_utc")))
     ranking["ranking_available"] = float(ranking["ranking_sources"] > 0)
     ranking["ranking_age_days_max"] = max(ages) if ages else 0.0
 
@@ -897,7 +1016,15 @@ def external_snapshot_features_asof(
         "roster_days_min": min(roster1["days"], roster2["days"]) if roster_available else 0.0,
         "roster_size_min": min(roster1["size"], roster2["size"]) if roster_available else 0.0,
     }
-    return {"ranking_snapshot_features": ranking, "roster_snapshot_features": roster}
+    from .pistols import pistol_features_asof
+    return {
+        "pistol_snapshot_features": pistol_features_asof(store.get("pistols", {}), team1_hltv_id, team2_hltv_id, match_dt),
+        "ranking_snapshot_features": ranking,
+        "ranking_snapshot_evidence": {
+            "captured_at_max": max(captured_values) if captured_values else None,
+        },
+        "roster_snapshot_features": roster,
+    }
 
 
 def _looks_like_hltv_match_id(value: Any) -> bool:
@@ -952,7 +1079,18 @@ def load_training_rows_from_db(
     floor = min_date or (CS2_ERA_START if cs2_only else None)
     conn = sqlite3.connect(path)
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    # WAL requiere memoria compartida (-wal/-shm); en carpetas sincronizadas
+    # (OneDrive) o de red puede fallar. Si no queda activo, usamos DELETE.
+    try:
+        _jm = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+    except sqlite3.OperationalError:
+        _jm = None
+    if not _jm or str(_jm[0]).lower() != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except sqlite3.OperationalError:
+            pass
     conn.row_factory = sqlite3.Row
     try:
         odds_by_match = _opening_odds_by_match(conn)
@@ -974,7 +1112,8 @@ def load_training_rows_from_db(
                 m.team1_id, m.team2_id, m.best_of, m.stage,
                 m.environment, m.stage_detail, m.incentive_label, m.high_stakes,
                 m.opening_match, m.winner_advances, m.loser_eliminated, m.bracket,
-                m.context_json, m.score_t1, m.score_t2, m.winner_team_id,
+                m.context_json, m.prematch_captured_at_utc,
+                m.score_t1, m.score_t2, m.winner_team_id,
                 e.name AS event_name, e.tier AS event_tier,
                 t1.name AS team1_name, t2.name AS team2_name,
                 t1.hltv_id AS team1_hltv_id, t2.hltv_id AS team2_hltv_id
@@ -991,6 +1130,7 @@ def load_training_rows_from_db(
         ).fetchall()
         analytics_by_match = _latest_analytics_by_match_asof(conn)
         prematch_lineups_by_match = _prematch_lineups_by_match_asof(conn, rows)
+        actual_lineups_by_match = _actual_lineups_by_match(conn, rows)
         player_features_by_match = {
             int(row["match_id"]): _player_snapshot_features(
                 conn,
@@ -1055,6 +1195,7 @@ def load_training_rows_from_db(
                 "db_match_id": match_id,
                 "date": date_text,
                 "date_obj": parse_date(str(row["datetime_utc"])),
+                "kickoff_utc": str(row["datetime_utc"] or ""),
                 "datetime_precision": row["datetime_precision"] or (
                     "exact" if "T" in str(row["datetime_utc"] or "") else "date_only"
                 ),
@@ -1087,9 +1228,13 @@ def load_training_rows_from_db(
                 "analytics": analytics_payload,
                 "event_metadata": (analytics_payload or {}).get("event_metadata") or {},
                 "match_context": context_payload,
+                "context_captured_at_utc": row["prematch_captured_at_utc"],
                 "patch_version": context_payload.get("patch_version"),
                 "patch_released_at": context_payload.get("patch_released_at"),
                 "prematch_lineups": prematch_lineups_by_match.get(match_id, {}),
+                # Post-result truth: ChronologicalState consumes it only in
+                # observe(), never while emitting this match's features.
+                "actual_lineups": actual_lineups_by_match.get(match_id, {}),
                 "player_snapshot_features": player_features_by_match.get(match_id, {}),
                 **external_features_by_match.get(match_id, {}),
             }

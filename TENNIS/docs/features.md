@@ -23,18 +23,27 @@ los estados deportivos y rankings cumplen:
 fecha_observación < D
 ```
 
-Los partidos se recorren en orden cronológico y se congela el estado al comenzar
-cada `tourney_date`. Primero se generan todas las filas de `D` y solo después se
-aplican todos sus resultados a Elo, forma, H2H y descanso. No se usa `round`,
-`match_num`, el orden del CSV ni la posición de una fila para inventar un orden
-intradía.
+`tourney_date` suele ser el inicio aproximado del torneo, no el día real de la
+ronda. El esquema v2 aplica la política compartida
+`sackmann-tourney-start-embargo-v1`:
 
-`tourney_date` suele ser la fecha aproximada de inicio del torneo, no la fecha
-real de cada ronda. Por ello, dos rondas de un torneo que comparten
-`tourney_date` ven exactamente el mismo pasado. En particular, una ronda previa
-no alimenta la final del mismo torneo si ambas filas tienen la misma fecha. Es
-una pérdida deliberada de señal a cambio de una garantía anti-fugas
-conservadora.
+```text
+result_available_date = tourney_date + 21 días
+resultado_utilizable_en_D ⇔ result_available_date < D
+```
+
+La igualdad queda excluida: un resultado fechado en `T` entra por primera vez
+en un vector de `T+22`. El constructor recorre `tourney_date` en orden, genera
+el vector de cada partido mediante una previsualización que no muta el estado y
+mantiene sus resultados en una cola pendiente. Antes de abrir un bloque `D`,
+solo aplica las colas con `result_available_date < D` a Elo, forma, H2H y
+descanso. No usa `round`, `match_num`, el orden del CSV ni la posición de una
+fila para inventar orden intratorneo.
+
+El Parquet conserva ambas columnas: `match_date`/`tourney_date` como fecha
+fuente del ejemplo y `result_available_date` como frontera causal de su label.
+El embargo es conservador, pero no garantiza cubrir torneos excepcionalmente
+largos o reprogramados; esa incertidumbre residual se declara en la auditoría.
 
 Los universos `M` y `F` permanecen completamente separados. Dentro de cada
 género, todos los niveles elegibles alimentan un único estado histórico.
@@ -52,7 +61,7 @@ del fingerprint del dataset y no se ocultan en el código:
 | `days_per_year` | 365,2425 | Conversión de días a edad decimal |
 | `orientation_seed` | 42 | Orientación estable de A/B |
 
-El esquema publicado es `tennis-features-v1`.
+El esquema publicado es `tennis-features-v2`.
 
 ## Orientación reproducible de A y B
 
@@ -89,8 +98,9 @@ K_i(n_i) = 250 / (n_i + 5) ** 0.4
 R_i' = R_i + K_i(n_i) * (S_i - E_i)
 ```
 
-`n_i` solo cuenta partidos elegibles de fechas anteriores. El general se
-actualiza con todo partido elegible; el estado de superficie solo con partidos
+`n_i` solo cuenta resultados elegibles cuya fecha de disponibilidad sea
+estrictamente anterior al corte. El general se actualiza con todo partido
+elegible cuando termina su embargo; el estado de superficie solo con partidos
 de esa superficie. La mezcla usada como Elo efectivo de superficie es:
 
 ```text
@@ -110,8 +120,8 @@ En los nombres de columnas, `elo_surface_raw_*` es el Elo puro y
 
 ### Forma reciente
 
-Para cada jugador se almacenan bloques completos por fecha, con número de
-victorias y partidos:
+Para cada jugador se almacenan bloques completos de resultados ya disponibles,
+con número de victorias y partidos:
 
 ```text
 win_rate = victorias / partidos
@@ -122,7 +132,8 @@ reciente. Como no hay orden fiable dentro de una fecha, se incorpora entero el
 bloque diario que cruza el límite. Por tanto, `recent_n_matches_*` puede ser
 mayor que 10; ese contador hace visible el tamaño real del denominador.
 
-La ventana de `M=3` meses es:
+La ventana de `M=3` meses usa la fecha fuente de los resultados que ya superaron
+el embargo:
 
 ```text
 [D - 3 meses naturales, D)
@@ -150,7 +161,7 @@ orden estable usado internamente para almacenar el par.
 
 ### Descanso
 
-Para cada lado:
+Para cada lado, considerando solo resultados cuyo embargo ya terminó:
 
 ```text
 rest_days = D - fecha_último_partido_anterior
@@ -182,7 +193,7 @@ incompatibles de ranking, puntos o —en WTA— número de torneos, se ponen en
 cuarentena todas sus observaciones. Nunca se escoge «la primera», «la última»,
 la mejor ni un promedio: el índice retrocede al snapshot limpio anterior. Si no
 existe, ranking y puntos quedan nulos. El inventario reproducible se publica en
-`data/processed/features/ranking_conflicts.csv`.
+`data/processed/features_active/runs/<fingerprint>/ranking_conflicts.csv`.
 
 ### Edad y `Age.30`
 
@@ -241,8 +252,20 @@ son la razón de conservar también `tour_level_raw`.
 
 Los niveles `E` y `J`, aunque se pueden describir como contexto, son excluidos
 por la elegibilidad Elo y no producen filas de entrenamiento. También se
-excluyen walkovers, `BYE`, `RET`, `DEF`, `ABD`, `ABN`, auto-partidos y
-duplicados exactos conforme al contrato de la fase 3.
+excluyen walkovers (`W/O`, `Walkover`), `BYE`, auto-partidos y duplicados
+exactos. `RET`, `DEF`, `ABD` y `ABN` sí se conservan: acreditan un partido
+iniciado con ganador oficial y solo actualizan el estado cuando termina su
+embargo.
+
+La cuarentena DOB de identidades **no filtra el histórico**. Su fecha de
+nacimiento procede del maestro actual y no permite saber cuándo se descubrió
+una colisión; usarla como selector retrospectivo sería otra fuga. El manifiesto
+publica esas claves solo como diagnóstico ligado al artefacto y declara
+`historical_exclusion_rule=disabled_noncausal_dob_metadata`. La inferencia
+operativa actual puede bloquear o degradar una clave ya conocida, pero Elo,
+features, backtest y reentreno conservan todas sus filas históricas. Esto evita
+reescribir el pasado, aunque no elimina la posible contaminación por IDs
+reutilizados.
 
 ### Cuotas, mercado y edge
 
@@ -315,28 +338,54 @@ El constructor:
 1. verifica el manifiesto Sackmann, el commit y los blobs requeridos;
 2. vuelca cada género a un SQLite temporal ordenable sin cargar todo el
    histórico en memoria;
-3. procesa bloques completos de fecha con el mismo motor Elo;
+3. previsualiza cada bloque fuente y aplica únicamente resultados cuyo embargo
+   ya terminó, con el mismo contrato Elo v5;
 4. escribe por buffers un Parquet Zstandard con esquema Arrow explícito;
-5. publica desde *staging* y sustituye el manifiesto al final.
+5. verifica un preflight barato de escritura, `fsync`, rename y borrado;
+6. mueve el directorio publicable completo a un run inmutable;
+7. verifica hashes y sustituye atómicamente el puntero activo al final.
 
 Los artefactos son:
 
 ```text
-data/processed/features/training_M.parquet
-data/processed/features/training_F.parquet
-data/processed/features/ranking_conflicts.csv
-data/processed/features/manifest.json
+data/processed/features_active/manifest.json
+data/processed/features_active/runs/<fingerprint>/manifest.json
+data/processed/features_active/runs/<fingerprint>/training_M.parquet
+data/processed/features_active/runs/<fingerprint>/training_F.parquet
+data/processed/features_active/runs/<fingerprint>/ranking_conflicts.csv
 ```
 
 Cada `record_id` es el `source_record_hash` estable. El Parquet también conserva
 `source_commit`, `source_path` y `source_row_number`. El fingerprint SHA-256
 incluye commit, inventario y blobs fuente, géneros, parámetros de features,
-versión y parámetros Elo, esquema completo y allowlist del modelo.
+política de fecha fuente, contrato Elo v5 exacto, esquema completo, allowlist
+del modelo e inventario de código. También fija el snapshot diagnóstico de
+identidades para que el contexto operativo sea reproducible; esas claves no
+seleccionan filas históricas. El manifiesto declara de forma explícita que la
+exclusión histórica está desactivada.
 
 Sin `--force`, si fingerprint, tamaños y SHA-256 de todos los artefactos
-publicados coinciden, la ejecución los reutiliza. Un build incompleto nunca
-reemplaza al activo. Todas las rutas recibidas por la API/CLI se restringen al
-árbol `TENNIS/`.
+publicados coinciden, la ejecución verifica el run y lo reactiva sin
+recalcular. Con `--force` se reconstruye en staging y se exige que el mismo
+fingerprint produzca exactamente el mismo manifiesto salvo el timestamp; nunca
+se sobrescribe un run. Un build incompleto o una ACL dañada en el puntero no
+mezclan artefactos ni reemplazan al activo anterior. Todas las rutas recibidas
+por la API/CLI se restringen al árbol `TENNIS/`.
+
+Después de activar o reactivar un run ya verificado, la poda automática conserva
+el activo y solo la generación anterior más reciente (máximo dos runs). La
+selección usa `created_at_utc`, vuelve a validar manifiestos, tamaños y hashes,
+y sella el SHA-256 del manifiesto de cada generación. Falla cerrada si el
+`output`, `runs/`, el puntero o cualquier árbol de run contiene un
+enlace/junction, si cambia el puntero o si el inventario sellado queda obsoleto.
+Ese inventario se revalida antes de cada borrado y al terminar; el puntero
+activo nunca forma parte de los candidatos.
+
+El loader de entrenamiento y el contexto diario recalculan
+`FEATURE_CODE_PATHS` y exigen igualdad exacta con `code_inventory` del run. Un
+inventario ausente, mal formado o con cualquier hash distinto falla cerrado y
+obliga a reconstruir features; una subida de versión declarativa no puede
+ocultar que las fórmulas ejecutables cambiaron.
 
 Desde `TENNIS/`, en PowerShell:
 
@@ -366,7 +415,27 @@ Opciones principales:
 `--force` reconstruye deliberadamente un fingerprint ya publicado; no cambia
 por sí mismo parámetros ni fuentes.
 
-El directorio canónico `data/processed/features` solo admite
+El directorio canónico `data/processed/features_active` solo admite
 `--gender all`. Una construcción parcial debe usar un `--output-dir`
 diagnóstico distinto dentro de `TENNIS/`; así no puede sustituir el manifiesto
 activo de los dos universos con un único género.
+
+## Estadísticas TennisRatio candidatas
+
+Los perfiles públicos contienen, por partido, porcentajes de primer servicio,
+puntos ganados con primero/segundo, aces, dobles faltas, break points,
+hold/return games y rendimiento bajo presión. `match_statistics_v1` los expone
+como columnas normalizadas desde el JSON inmutable del sidecar, sin duplicar
+los cientos de miles de observaciones existentes. La API
+`load_mapped_match_stats(D)` exige
+fecha efectiva, publicación, captura e identidad estrictamente anteriores a
+`D`; una corrección posterior crea una versión posterior y no cambia consultas
+históricas.
+
+`build_tennisratio_stats_snapshot` produce agregados recientes, cobertura y
+tasas candidatas. No forman parte aún de `MODEL_FEATURE_COLUMNS`: la primera
+captura causal es de agosto de 2026 y retrofechar estadísticas históricas sería
+una fuga de disponibilidad. Se activarán solo cuando exista muestra forward
+etiquetada suficiente, una ablación temporal mejore log-loss (Brier desempata)
+y el challenger supere la puerta normal de promoción. Hasta entonces se
+recogen diariamente y el modelo vivo permanece compatible.

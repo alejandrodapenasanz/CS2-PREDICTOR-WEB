@@ -9,9 +9,9 @@ Default behavior:
   - retrains the final production artifact with the best config by log loss
 
 Usage:
-    python MODEL/run_professional_training.py
-    python MODEL/run_professional_training.py --half-lives 45,60,90 --wf-gaps 0
-    python MODEL/run_professional_training.py --skip-final
+    .venv\\Scripts\\python.exe MODEL/run_professional_training.py
+    .venv\\Scripts\\python.exe MODEL/run_professional_training.py --half-lives 45,60,90 --wf-gaps 0
+    .venv\\Scripts\\python.exe MODEL/run_professional_training.py --skip-final
 """
 
 from __future__ import annotations
@@ -33,6 +33,15 @@ ROOT = Path(__file__).resolve().parents[1]
 TRAIN_SCRIPT = ROOT / "MODEL" / "train.py"
 RESULTS_DIR = ROOT / "MODEL" / "results"
 BASELINE_NAMES = {"base_rate", "elo", "glicko"}
+
+
+def require_cpython_313() -> None:
+    """Abort unless training runs with the project's exact CPython version."""
+    if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 13):
+        raise SystemExit(
+            "Professional training requires CPython 3.13 from CS2/.venv. "
+            "Run CS2/start.ps1 once to provision it."
+        )
 
 
 @dataclass
@@ -234,12 +243,13 @@ def main() -> int:
     parser.add_argument("--quiet-train", action="store_true",
                         help="Do not pass --verbose to MODEL/train.py.")
     parser.add_argument("--install-deps", action="store_true",
-                        help="Install requirements.txt and catboost before training.")
+                        help="Install the hashed requirements.lock.txt into the active CPython 3.13 environment.")
     parser.add_argument("--raw", default=None)
     parser.add_argument("--warmup-weeks", type=int, default=None)
     parser.add_argument("--min-train", type=int, default=None)
     parser.add_argument("--no-cs2-filter", action="store_true")
     args = parser.parse_args()
+    require_cpython_313()
 
     if not TRAIN_SCRIPT.exists():
         raise SystemExit(f"No existe {TRAIN_SCRIPT}")
@@ -270,22 +280,31 @@ def main() -> int:
 
         if args.install_deps:
             rc = tee_command(
-                [sys.executable, "-m", "pip", "install", "-r", str(ROOT / "requirements.txt")],
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--no-deps",
+                    "--only-binary=:all:",
+                    "--require-hashes",
+                    "-r",
+                    str(ROOT / "requirements.lock.txt"),
+                ],
                 report_fh,
-                "Install requirements",
+                "Install locked requirements",
                 env,
             )
             if rc != 0:
                 return rc
-            if not args.no_catboost:
-                rc = tee_command(
-                    [sys.executable, "-m", "pip", "install", "catboost"],
-                    report_fh,
-                    "Install CatBoost",
-                    env,
-                )
-                if rc != 0:
-                    return rc
+            rc = tee_command(
+                [sys.executable, "-m", "pip", "check"],
+                report_fh,
+                "Validate locked requirements",
+                env,
+            )
+            if rc != 0:
+                return rc
 
         if not args.no_catboost:
             try:

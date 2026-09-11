@@ -12,7 +12,7 @@ import math
 from typing import Final, Mapping
 
 
-MODEL_ARTIFACT_VERSION: Final[str] = "tennis-model-v2"
+MODEL_ARTIFACT_VERSION: Final[str] = "tennis-model-v3"
 DEFAULT_RANDOM_SEED: Final[int] = 42
 
 

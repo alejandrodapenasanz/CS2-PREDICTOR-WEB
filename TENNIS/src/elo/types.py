@@ -45,7 +45,7 @@ class EventProvenance:
 
 @dataclass(frozen=True)
 class MatchEvent:
-    """Representa un resultado histórico normalizado antes de filtrarlo."""
+    """Representa un resultado con fecha efectiva y fecha fuente separadas."""
 
     date: date
     gender: Gender
@@ -59,6 +59,7 @@ class MatchEvent:
     tourney_id: str | None = None
     match_num: str | None = None
     round: str | None = None
+    source_date: date | None = None
 
     def __post_init__(self) -> None:
         """Valida identidad, vocabularios y hash sin normalizar silenciosamente."""
@@ -68,6 +69,11 @@ class MatchEvent:
             or not isinstance(self.date, date)
         ):
             raise ValueError("date debe ser datetime.date estricto.")
+        if self.source_date is not None and (
+            isinstance(self.source_date, datetime)
+            or not isinstance(self.source_date, date)
+        ):
+            raise ValueError("source_date debe ser datetime.date o None.")
         if self.gender not in {"M", "F"}:
             raise ValueError("gender debe ser exactamente M o F.")
         for name, player_id in (
@@ -97,6 +103,12 @@ class MatchEvent:
             )
 
     @property
+    def result_source_date(self) -> date:
+        """Devuelve la ``tourney_date`` original usada para causalidad."""
+
+        return self.date if self.source_date is None else self.source_date
+
+    @property
     def logical_key(self) -> tuple[object, ...]:
         """Identifica una copia exacta sin mezclar universos de género."""
 
@@ -111,6 +123,7 @@ class MatchEvent:
 
         return (
             self.date,
+            self.result_source_date,
             self.provenance.source_commit,
             self.provenance.source_path,
             self.provenance.source_row,
@@ -224,6 +237,16 @@ class DateBlockResult:
     decisions: tuple[EventDecision, ...]
     states: tuple[PlayerEloState, ...]
     snapshots: tuple[EloSnapshot, ...]
+    audit: AuditCounts
+
+
+@dataclass(frozen=True)
+class PreviewBlockResult:
+    """Resultado prefecha calculado sin aplicar ni publicar ningún estado."""
+
+    date: date
+    rated_matches: tuple[RatedMatch, ...]
+    decisions: tuple[EventDecision, ...]
     audit: AuditCounts
 
 

@@ -9,17 +9,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRAPY_ROOT = PROJECT_ROOT / "hltv_scraper"
 DATA_ROOT = SCRAPY_ROOT / "data"
 
 
-def scrapy_executable() -> Path:
-    exe = PROJECT_ROOT / ".venv" / "Scripts" / "scrapy.exe"
-    if exe.exists():
-        return exe
-    return Path("scrapy")
+def scrapy_command(spider: str) -> list[str]:
+    """Return a relocatable Scrapy command using the active interpreter."""
+
+    return [sys.executable, "-m", "scrapy", "crawl", spider]
 
 
 def load_json(path: Path) -> Any:
@@ -40,7 +38,7 @@ def run_spider(
     log_level: str = "ERROR",
 ) -> tuple[bool, str]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [str(scrapy_executable()), "crawl", spider]
+    cmd = scrapy_command(spider)
     if spider_args:
         cmd.extend(spider_args)
     cmd.extend(["-L", log_level, "-O", str(output_path)])
@@ -149,8 +147,8 @@ def collect_match_details(
         data = load_json(output) if ok else []
         item = data[0] if isinstance(data, list) and len(data) == 1 else data
         match_payload = item.get("match", {}) if isinstance(item, dict) else {}
-        valid = ok and bool(match_payload.get("team1", {}).get("name")) and bool(
-            match_payload.get("team2", {}).get("name")
+        valid = (
+            ok and bool(match_payload.get("team1", {}).get("name")) and bool(match_payload.get("team2", {}).get("name"))
         )
         if valid:
             details.append({"id": match_id, "source_match": match, "detail": item})
@@ -312,9 +310,7 @@ def collect_player_profiles(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Collect raw HLTV data through the local Scrapy spiders."
-    )
+    parser = argparse.ArgumentParser(description="Collect raw HLTV data through the local Scrapy spiders.")
     parser.add_argument("--results-pages", type=int, default=10)
     parser.add_argument("--match-detail-limit", type=int, default=25)
     parser.add_argument("--team-profile-limit", type=int, default=30)

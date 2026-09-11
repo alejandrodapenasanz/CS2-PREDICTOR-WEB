@@ -13,7 +13,7 @@ import math
 from typing import Final
 
 
-ALGORITHM_VERSION: Final[str] = "sackmann-elo-v3"
+ALGORITHM_VERSION: Final[str] = "multisource-general-elo-v6"
 
 
 @dataclass(frozen=True)

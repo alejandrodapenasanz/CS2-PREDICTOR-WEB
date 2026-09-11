@@ -58,22 +58,23 @@ class HltvPlayerStatsOverviewSpider(scrapy.Spider):
 
     def on_error(self, failure):
         self.logger.error(
-            f"Request failed: {failure}. "
-            f"If status is 403 — cf_clearance expired or IP/UA mismatch. Re-run grab_cf.py."
+            f"Request failed: {failure}. If status is 403 — cf_clearance expired or IP/UA mismatch. Re-run grab_cf.py."
         )
 
     def parse(self, response):
         if response.status == 403 or "challenge" in response.text[:2000].lower():
-            self.logger.error("Received a challenge page despite the cookie — refresh cf_clearance by re-running grab_cf.py.")
+            self.logger.error(
+                "Received a challenge page despite the cookie — refresh cf_clearance by re-running grab_cf.py."
+            )
             return
 
-        summary_parser = PF.get_parser('player_summary_stats')
+        summary_parser = PF.get_parser("player_summary_stats")
         summary = summary_parser.parse(response.css("div.player-summary-stat-box"))
 
-        role_stats_parser = PF.get_parser('player_role_stats')
+        role_stats_parser = PF.get_parser("player_role_stats")
         role_stats = role_stats_parser.parse(response.css("div.role-stats-container"))
 
-        player_statistics_parser = PF.get_parser('player_statistics')
+        player_statistics_parser = PF.get_parser("player_statistics")
         player_statistics = player_statistics_parser.parse(response.css("div.statistics"))
 
         yield {

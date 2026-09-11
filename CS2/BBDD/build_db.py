@@ -28,8 +28,11 @@ import os
 import re
 import shutil
 import sqlite3
+import stat as stat_module
 import sys
+import tempfile
 from collections import defaultdict
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,20 +52,31 @@ from PIPELINE.opportunity import (
     MIN_RELIABILITY,
     POLICY_VERSION as OPPORTUNITY_POLICY_VERSION,
 )
+from BBDD.backup_retention import (
+    BackupAutomaticResult,
+    FileState,
+    backup_operation_lock,
+    run_automatic_backup_retention,
+    validate_sqlite_backup,
+)
 
 SCHEMA = ROOT / "BBDD" / "cs2_prediction_schema.sql"
 DEFAULT_RAW = (
-    ROOT / "SCRAPER" / "hltv-scraper-api" / "hltv_scraper" / "data" / "raw"
-    / "history_10000_2026-06-28" / "results_all.json"
+    ROOT
+    / "SCRAPER"
+    / "hltv-scraper-api"
+    / "hltv_scraper"
+    / "data"
+    / "raw"
+    / "history_10000_2026-06-28"
+    / "results_all.json"
 )
 DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
 DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
 DEFAULT_ROSTER_HISTORY = ROOT / "PIPELINE" / "master" / "roster_history.json"
 DEFAULT_BACKUP_DIR = ROOT / "BBDD" / "backups"
 _MIRROR_BACKUP_ENV = os.environ.get("CS2_BACKUP_MIRROR_DIR", "").strip()
-DEFAULT_MIRROR_BACKUP_DIR: Path | None = (
-    Path(_MIRROR_BACKUP_ENV).expanduser() if _MIRROR_BACKUP_ENV else None
-)
+DEFAULT_MIRROR_BACKUP_DIR: Path | None = Path(_MIRROR_BACKUP_ENV).expanduser() if _MIRROR_BACKUP_ENV else None
 
 
 def utcnow() -> str:
@@ -100,16 +114,31 @@ EVENT_LIVE_COLUMNS: dict[str, str] = {
 
 ODDS_LIVE_COLUMNS: dict[str, str] = {
     "quality": (
-        "TEXT NOT NULL DEFAULT 'observed' "
-        "CHECK (quality IN ('observed','closing_observed','proxy','legacy_proxy'))"
+        "TEXT NOT NULL DEFAULT 'observed' CHECK (quality IN ('observed','closing_observed','proxy','legacy_proxy'))"
     ),
     "seconds_to_start": "INTEGER",
-    "is_observed_closing": (
-        "INTEGER NOT NULL DEFAULT 0 CHECK (is_observed_closing IN (0,1))"
-    ),
+    "is_observed_closing": ("INTEGER NOT NULL DEFAULT 0 CHECK (is_observed_closing IN (0,1))"),
 }
 
 PREDICTION_LIVE_COLUMNS: dict[str, str] = {
+    "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
+    "prediction_architecture": "TEXT",
+    "opening_odds_recovered": (
+        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
+    ),
+    "opening_odds_captured_at_utc": "TEXT",
+    "ensemble_disagreement": (
+        "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
+    ),
+    "estimate_band_half_width": (
+        "REAL CHECK (estimate_band_half_width IS NULL OR "
+        "(estimate_band_half_width >= 0 AND estimate_band_half_width <= 0.5))"
+    ),
+    "estimate_confidence_level": ("TEXT CHECK (estimate_confidence_level IN ('low','medium','high'))"),
+    "estimate_history_coverage": (
+        "REAL CHECK (estimate_history_coverage IS NULL OR "
+        "(estimate_history_coverage >= 0 AND estimate_history_coverage <= 1))"
+    ),
     "opportunity_score": "REAL",
     "opportunity_eligible": "INTEGER CHECK (opportunity_eligible IN (0,1))",
     "opportunity_rank": "INTEGER",
@@ -120,10 +149,48 @@ PREDICTION_LIVE_COLUMNS: dict[str, str] = {
     "opportunity_min_reliability": "REAL",
 }
 
+PREDICTION_LEDGER_LIVE_COLUMNS: dict[str, str] = {
+    "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
+    "prediction_architecture": "TEXT",
+    "opening_odds_recovered": (
+        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
+    ),
+    "opening_odds_captured_at_utc": "TEXT",
+    "ensemble_disagreement": (
+        "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
+    ),
+    "estimate_band_half_width": (
+        "REAL CHECK (estimate_band_half_width IS NULL OR "
+        "(estimate_band_half_width >= 0 AND estimate_band_half_width <= 0.5))"
+    ),
+    "estimate_confidence_level": ("TEXT CHECK (estimate_confidence_level IN ('low','medium','high'))"),
+    "estimate_history_coverage": (
+        "REAL CHECK (estimate_history_coverage IS NULL OR "
+        "(estimate_history_coverage >= 0 AND estimate_history_coverage <= 1))"
+    ),
+}
+
 
 def configure_connection(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON;")
-    conn.execute("PRAGMA journal_mode = WAL;")
+    # Espera si el fichero está bloqueado (p.ej. OneDrive sincronizando) en vez
+    # de fallar al instante con "database is locked".
+    conn.execute("PRAGMA busy_timeout = 30000;")
+    # WAL rinde mejor, pero requiere memoria compartida (ficheros -wal/-shm). En
+    # carpetas sincronizadas (OneDrive) o unidades de red eso puede fallar con
+    # "disk I/O error"/"database is locked". Intentamos WAL y, si no queda activo,
+    # degradamos a un journal que no usa memoria compartida (DELETE).
+    mode = ""
+    try:
+        row = conn.execute("PRAGMA journal_mode = WAL;").fetchone()
+        mode = (row[0] if row else "").lower()
+    except sqlite3.OperationalError:
+        mode = ""
+    if mode != "wal":
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE;")
+        except sqlite3.OperationalError:
+            pass
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -173,9 +240,7 @@ def backfill_prediction_opportunities(conn: sqlite3.Connection) -> int:
         by_version[str(row[1])].append(row)
         by_version_day[(str(row[1]), str(row[4] or ""))].append(row)
 
-    updates: dict[int, list[int | bool | None]] = {
-        int(row[0]): [None, None, False] for row in rows
-    }
+    updates: dict[int, list[int | bool | None]] = {int(row[0]): [None, None, False] for row in rows}
     sort_key = lambda row: (-float(row[2]), -float(row[3]), int(row[0]))
     for version_rows in by_version.values():
         for rank, row in enumerate(sorted(version_rows, key=sort_key), start=1):
@@ -191,10 +256,7 @@ def backfill_prediction_opportunities(conn: sqlite3.Connection) -> int:
         SET opportunity_rank=?, opportunity_rank_day=?, is_best_opportunity=?
         WHERE prediction_id=?
         """,
-        [
-            (values[0], values[1], int(bool(values[2])), prediction_id)
-            for prediction_id, values in updates.items()
-        ],
+        [(values[0], values[1], int(bool(values[2])), prediction_id) for prediction_id, values in updates.items()],
     )
     return len(updates)
 
@@ -226,7 +288,9 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
     for column, ddl in PREDICTION_LIVE_COLUMNS.items():
         if column not in prediction_columns:
             conn.execute(f"ALTER TABLE predictions ADD COLUMN {column} {ddl}")
-            opportunity_schema_changed = True
+            opportunity_schema_changed = opportunity_schema_changed or (
+                column.startswith("opportunity_") or column == "is_best_opportunity"
+            )
 
     conn.executescript(
         """
@@ -332,6 +396,29 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
                 (decision_prob_team1 > 0 AND decision_prob_team1 < 1)
             ),
             reliability_score REAL,
+            prediction_regime TEXT CHECK (
+                prediction_regime IN ('odds','no_odds')
+            ),
+            prediction_architecture TEXT,
+            opening_odds_recovered INTEGER CHECK (
+                opening_odds_recovered IN (0,1)
+            ),
+            opening_odds_captured_at_utc TEXT,
+            ensemble_disagreement REAL CHECK (
+                ensemble_disagreement IS NULL OR
+                (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5)
+            ),
+            estimate_band_half_width REAL CHECK (
+                estimate_band_half_width IS NULL OR
+                (estimate_band_half_width >= 0 AND estimate_band_half_width <= 0.5)
+            ),
+            estimate_confidence_level TEXT CHECK (
+                estimate_confidence_level IN ('low','medium','high')
+            ),
+            estimate_history_coverage REAL CHECK (
+                estimate_history_coverage IS NULL OR
+                (estimate_history_coverage >= 0 AND estimate_history_coverage <= 1)
+            ),
             prediction_json TEXT NOT NULL,
             features_json   TEXT,
             data_quality_json TEXT,
@@ -368,6 +455,10 @@ def ensure_live_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_team_aliases_team ON team_aliases(team_id);
         """
     )
+    ledger_columns = table_columns(conn, "prediction_ledger")
+    for column, ddl in PREDICTION_LEDGER_LIVE_COLUMNS.items():
+        if column not in ledger_columns:
+            conn.execute(f"ALTER TABLE prediction_ledger ADD COLUMN {column} {ddl}")
     conn.execute(
         """
         UPDATE matches
@@ -440,9 +531,7 @@ def parse_money_amount(value) -> int | None:
     match = re.search(r"(\d+(?:\.\d+)?)\s*([KMB])?", text)
     if not match:
         return None
-    multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(
-        match.group(2) or "", 1
-    )
+    multiplier = {"K": 1_000, "M": 1_000_000, "B": 1_000_000_000}.get(match.group(2) or "", 1)
     return int(round(float(match.group(1)) * multiplier))
 
 
@@ -467,12 +556,8 @@ def iter_odds_rows(point: dict, market_type: str):
     captured_at = point.get("captured_at")
     if not captured_at:
         return
-    is_observed_closing = bool(
-        market_type == "closing" and point.get("is_observed_closing")
-    )
-    quality = point.get("quality") or (
-        "closing_observed" if is_observed_closing else "observed"
-    )
+    is_observed_closing = bool(market_type == "closing" and point.get("is_observed_closing"))
+    quality = point.get("quality") or ("closing_observed" if is_observed_closing else "observed")
     seconds_to_start = safe_float(point.get("seconds_to_start"))
     providers = point.get("providers") or []
     if providers:
@@ -662,9 +747,16 @@ def insert_roster_history(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int])
         if team_id is None:
             cur.execute(
                 "INSERT OR IGNORE INTO teams(name, hltv_id) VALUES (?,?)",
-                (entry.get("team_name") or f"HLTV team {team_hltv_id}", int(team_hltv_id) if team_hltv_id.isdigit() else None),
+                (
+                    entry.get("team_name") or f"HLTV team {team_hltv_id}",
+                    int(team_hltv_id) if team_hltv_id.isdigit() else None,
+                ),
             )
-            row = cur.execute("SELECT team_id FROM teams WHERE hltv_id = ?", (int(team_hltv_id),)).fetchone() if team_hltv_id.isdigit() else None
+            row = (
+                cur.execute("SELECT team_id FROM teams WHERE hltv_id = ?", (int(team_hltv_id),)).fetchone()
+                if team_hltv_id.isdigit()
+                else None
+            )
             if not row:
                 row = cur.execute("SELECT team_id FROM teams WHERE name = ?", (entry.get("team_name"),)).fetchone()
             if not row:
@@ -792,7 +884,9 @@ def insert_hltv_assets(
             right_team_id = resolve_team_id(right_team, team_ids, team_ids_by_hltv)
             breakdown = info.get("breakdown") or {}
             left_score = left_team.get("score") if left_team.get("score") is not None else breakdown.get("score_left")
-            right_score = right_team.get("score") if right_team.get("score") is not None else breakdown.get("score_right")
+            right_score = (
+                right_team.get("score") if right_team.get("score") is not None else breakdown.get("score_right")
+            )
             rounds_t1, rounds_t2 = orient_pair(
                 left_score,
                 right_score,
@@ -1314,7 +1408,9 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 path=path,
                 payload=payload,
                 captured_at=payload.get("captured_at") or run_captured_at,
-                hltv_match_id=str(payload.get("identifier") or "") if payload.get("kind") in {"match_page", "match_snapshot", "analytics_page"} else None,
+                hltv_match_id=str(payload.get("identifier") or "")
+                if payload.get("kind") in {"match_page", "match_snapshot", "analytics_page"}
+                else None,
             )
 
         for path in sorted((run_dir / "match_snapshots").glob("*.json")):
@@ -1366,7 +1462,9 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
             )
 
         team_profiles_path = run_dir / "team_profiles.json"
-        team_profiles = json.loads(team_profiles_path.read_text(encoding="utf-8")) if team_profiles_path.exists() else []
+        team_profiles = (
+            json.loads(team_profiles_path.read_text(encoding="utf-8")) if team_profiles_path.exists() else []
+        )
         for item in team_profiles:
             team_id = str(item.get("id") or "")
             raw_count += insert_raw_snapshot(
@@ -1443,24 +1541,159 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
     return {"raw_snapshots_rows": raw_count, "player_stat_snapshots_rows": player_count}
 
 
-def backup_database(db_path: Path, backup_dir: Path | None, mirror_dir: Path | None = None) -> dict[str, str | None]:
-    result: dict[str, str | None] = {"backup": None, "mirror_backup": None}
-    if backup_dir is None:
-        return result
-    backup_dir.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
+def _database_file_identity(db_path: Path) -> tuple[int, int]:
+    """Return a stable identity for a real, non-reparse live database path."""
+
+    status = db_path.lstat()
+    reparse_flag = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    attributes = int(getattr(status, "st_file_attributes", 0))
+    if db_path.is_symlink() or attributes & reparse_flag or not stat_module.S_ISREG(status.st_mode):
+        raise RuntimeError(f"live database must be a real regular file: {db_path}")
+    return int(status.st_dev), int(status.st_ino)
+
+
+def _create_verified_database_backup(db_path: Path, target: Path) -> dict[str, Any]:
+    """Create a consistent SQLite snapshot and publish it only after validation."""
+
+    source_identity = _database_file_identity(db_path)
+    if os.path.lexists(target):
+        raise FileExistsError(f"backup target already exists: {target}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{target.name}.",
+        suffix=".pending",
+        dir=target.parent,
+    )
+    os.close(descriptor)
+    temporary = Path(temporary_name)
+    try:
+        source_uri = db_path.resolve(strict=True).as_uri() + "?mode=ro"
+        with (
+            closing(sqlite3.connect(source_uri, uri=True)) as source,
+            closing(sqlite3.connect(temporary)) as destination,
+        ):
+            source.execute("PRAGMA query_only=ON")
+            source.backup(destination)
+            destination.commit()
+            if _database_file_identity(db_path) != source_identity:
+                raise RuntimeError("live database identity changed while the snapshot was being created")
+        validation = validate_sqlite_backup(temporary)
+        if not validation.ok:
+            raise RuntimeError("backup verification failed: " + ", ".join(validation.result))
+        if _database_file_identity(db_path) != source_identity:
+            raise RuntimeError("live database identity changed before the snapshot was published")
+        if os.path.lexists(target):
+            raise FileExistsError(f"backup target appeared while snapshotting: {target}")
+        os.replace(temporary, target)
+        return {
+            **validation.as_dict(),
+            "name": target.name,
+        }
+    finally:
+        for pending in (
+            temporary,
+            Path(str(temporary) + "-wal"),
+            Path(str(temporary) + "-shm"),
+            Path(str(temporary) + "-journal"),
+        ):
+            if os.path.lexists(pending):
+                pending.unlink()
+
+
+def _automatic_retention_summary(decision: BackupAutomaticResult) -> dict[str, Any]:
+    applied = decision.result
+    return {
+        "mode": "auto" if decision.applied else "preview",
+        "applied": decision.applied,
+        "reason": decision.reason,
+        "approval_marker": str(decision.approval_marker),
+        "keep_latest": decision.plan.keep_latest,
+        "required_keep": decision.plan.required_keep.name if decision.plan.required_keep else None,
+        "blocked": list(decision.plan.blocked),
+        "delete_count": len(decision.plan.delete),
+        "delete_bytes": decision.plan.delete_bytes,
+        "deleted": list(applied.deleted) if applied is not None else [],
+        "deleted_bytes": applied.deleted_bytes if applied is not None else 0,
+    }
+
+
+def _backup_database_once(
+    db_path: Path,
+    backup_dir: Path,
+    mirror_dir: Path | None,
+    *,
+    managed_layout: bool,
+    held_lock: FileState | None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "backup": None,
+        "backup_validation": None,
+        "mirror_backup": None,
+        "backup_retention": None,
+    }
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%fZ")
     target = backup_dir / f"{db_path.stem}_{stamp}{db_path.suffix}"
-    shutil.copy2(db_path, target)
+    result["backup_validation"] = _create_verified_database_backup(db_path, target)
     result["backup"] = str(target)
     if mirror_dir is not None:
         mirror_dir.mkdir(parents=True, exist_ok=True)
         mirror_target = mirror_dir / target.name
-        shutil.copy2(db_path, mirror_target)
-        for source in [DEFAULT_MASTER, ROOT / "PIPELINE" / "master" / "manifest.json", ROOT / "PIPELINE" / "master" / "roster_history.json"]:
+        shutil.copy2(target, mirror_target)
+        for source in [
+            DEFAULT_MASTER,
+            ROOT / "PIPELINE" / "master" / "manifest.json",
+            ROOT / "PIPELINE" / "master" / "roster_history.json",
+        ]:
             if source.exists():
                 shutil.copy2(source, mirror_dir / source.name)
         result["mirror_backup"] = str(mirror_target)
+    bbdd_dir = backup_dir.parent
+    if managed_layout:
+        decision = run_automatic_backup_retention(
+            bbdd_dir,
+            required_keep=target,
+            config_path=bbdd_dir / "backup_retention.json",
+            _held_lock=held_lock,
+        )
+        result["backup_retention"] = _automatic_retention_summary(decision)
+    else:
+        result["backup_retention"] = {
+            "mode": "skipped",
+            "applied": False,
+            "reason": "unmanaged_layout",
+        }
     return result
+
+
+def backup_database(db_path: Path, backup_dir: Path | None, mirror_dir: Path | None = None) -> dict[str, Any]:
+    if backup_dir is None:
+        return {
+            "backup": None,
+            "backup_validation": None,
+            "mirror_backup": None,
+            "backup_retention": None,
+        }
+    db_path = Path(db_path).absolute()
+    backup_dir = Path(backup_dir).absolute()
+    mirror_dir = Path(mirror_dir).absolute() if mirror_dir is not None else None
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    bbdd_dir = backup_dir.parent
+    managed_layout = backup_dir.name == "backups" and db_path == bbdd_dir / "cs2.db"
+    if managed_layout:
+        with backup_operation_lock(bbdd_dir) as held_lock:
+            return _backup_database_once(
+                db_path,
+                backup_dir,
+                mirror_dir,
+                managed_layout=True,
+                held_lock=held_lock,
+            )
+    return _backup_database_once(
+        db_path,
+        backup_dir,
+        mirror_dir,
+        managed_layout=False,
+        held_lock=None,
+    )
 
 
 def _event_id_for(
@@ -1561,12 +1794,8 @@ def _team_id_for(
     if key in team_cache:
         team_id = team_cache[key]
         if hltv_key.isdigit():
-            current = cur.execute(
-                "SELECT hltv_id FROM teams WHERE team_id=?", (team_id,)
-            ).fetchone()
-            existing_for_hltv = cur.execute(
-                "SELECT team_id FROM teams WHERE hltv_id=?", (int(hltv_key),)
-            ).fetchone()
+            current = cur.execute("SELECT hltv_id FROM teams WHERE team_id=?", (team_id,)).fetchone()
+            existing_for_hltv = cur.execute("SELECT team_id FROM teams WHERE hltv_id=?", (int(hltv_key),)).fetchone()
             if current and current[0] is None and existing_for_hltv is None:
                 cur.execute(
                     "UPDATE teams SET hltv_id=? WHERE team_id=?",
@@ -1587,7 +1816,9 @@ def _team_id_for(
     if hltv_int is not None:
         row = cur.execute("SELECT team_id FROM teams WHERE hltv_id = ?", (hltv_int,)).fetchone()
     else:
-        row = cur.execute("SELECT team_id FROM teams WHERE lower(name) = lower(?) ORDER BY team_id LIMIT 1", (name,)).fetchone()
+        row = cur.execute(
+            "SELECT team_id FROM teams WHERE lower(name) = lower(?) ORDER BY team_id LIMIT 1", (name,)
+        ).fetchone()
     if not row:
         raise RuntimeError(f"No se pudo crear/leer team: {name}")
     team_id = int(row[0])
@@ -1595,8 +1826,7 @@ def _team_id_for(
     if hltv_key:
         team_hltv_cache[hltv_key] = team_id
     cur.execute(
-        "INSERT OR IGNORE INTO team_aliases(alias_key, alias_name, team_id, source, created_at_utc) "
-        "VALUES (?,?,?,?,?)",
+        "INSERT OR IGNORE INTO team_aliases(alias_key, alias_name, team_id, source, created_at_utc) VALUES (?,?,?,?,?)",
         (key, name, team_id, "created", utcnow()),
     )
     return team_id
@@ -1633,12 +1863,12 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
     # Precarga de (match_id -> team1_id, team2_id) en una sola query, en vez de
     # un SELECT por equipo dentro del bucle (N+1 + consulta duplicada por partido).
     match_team_ids: dict[int, tuple[int, int]] = {
-        int(mid): (int(t1), int(t2))
-        for mid, t1, t2 in conn.execute("SELECT match_id, team1_id, team2_id FROM matches")
+        int(mid): (int(t1), int(t2)) for mid, t1, t2 in conn.execute("SELECT match_id, team1_id, team2_id FROM matches")
     }
     state = ChronologicalState()
     n_ratings = 0
     n_features = 0
+
     def write_before(row: dict[str, Any]) -> None:
         nonlocal n_ratings, n_features
         match_id = int(row["db_match_id"]) if row.get("db_match_id") else None
@@ -1670,9 +1900,20 @@ def _recompute_mart(conn: sqlite3.Connection, rows: list[dict[str, Any]]) -> dic
                 "avg_score_diff, recent_opp_elo, streak, matches_played, days_since_last) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    match_id, db_team_id, row["date"], fr["glicko_rating"], fr["glicko_rd"], fr["glicko_sigma"],
-                    fr["elo"], fr["form_winrate_10"], fr["form_winrate_20"], fr["winrate_overall"],
-                    fr["avg_score_diff"], fr["recent_opp_elo"], fr["streak"], fr["matches_played"],
+                    match_id,
+                    db_team_id,
+                    row["date"],
+                    fr["glicko_rating"],
+                    fr["glicko_rd"],
+                    fr["glicko_sigma"],
+                    fr["elo"],
+                    fr["form_winrate_10"],
+                    fr["form_winrate_20"],
+                    fr["winrate_overall"],
+                    fr["avg_score_diff"],
+                    fr["recent_opp_elo"],
+                    fr["streak"],
+                    fr["matches_played"],
                     fr["days_since_last"],
                 ),
             )
@@ -1741,7 +1982,9 @@ def seed_database_once(
         team1_id = _team_id_for(cur, team_cache, team_hltv_cache, name=row["team1"], hltv_id=row.get("team1_id"))
         team2_id = _team_id_for(cur, team_cache, team_hltv_cache, name=row["team2"], hltv_id=row.get("team2_id"))
         context = match_contexts.get(str(row.get("id"))) or asset_match_context(row.get("asset"))
-        environment = context.get("environment") if context and context.get("environment") in {"lan", "online"} else "unknown"
+        environment = (
+            context.get("environment") if context and context.get("environment") in {"lan", "online"} else "unknown"
+        )
         stage = schema_stage(context.get("stage")) if context else None
         bracket = context.get("bracket") if context and context.get("bracket") in {"upper", "lower"} else None
         winner_team_id = team1_id if row["team1_win"] else team2_id
@@ -1787,7 +2030,9 @@ def seed_database_once(
     n_rosters = insert_roster_history(cur, team_hltv_cache)
     match_id_map = {
         str(hltv_id): int(match_id)
-        for match_id, hltv_id in conn.execute("SELECT match_id, hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL")
+        for match_id, hltv_id in conn.execute(
+            "SELECT match_id, hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL"
+        )
     }
     match_teams = {
         int(match_id): (int(team1_id), int(team2_id))
@@ -1856,9 +2101,7 @@ def main() -> int:
     args = parser.parse_args()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
     mirror_dir = (
-        None
-        if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir
-        else Path(args.mirror_backup_dir)
+        None if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir else Path(args.mirror_backup_dir)
     )
     stats = seed_database_once(
         Path(args.raw),

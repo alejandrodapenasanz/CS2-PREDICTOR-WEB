@@ -116,20 +116,68 @@ Radiografía completa del proyecto. Hallazgos clave que condicionan todo lo dem�
 **Qué hace hoy `-Retrain`:** ejecuta `MODEL/train.py`, que hace walk-forward
 temporal y publica como métrica primaria `nested_model_policy`: cada semana elige
 el candidato por menor log loss usando únicamente predicciones OOS de semanas
-anteriores. Después selecciona con todo el OOS ya cerrado el `production_model`
-que se ajustará para predecir el periodo siguiente. Entrena, calibra, versiona el
-artefacto y deja la evidencia en `MODEL/results/REPORT.md`. También arranca con
-**auto-heal de BLACKBOX** y deja `timing.json`.
+anteriores. La puerta fuerte usa `recipe_mask <= live_cutoff` para congelar
+features, familia `best_name`, Optuna purgado y pesos. Ajusta un shadow **una sola
+vez** con ese prefijo y le hace predecir el sufijo completo sin refits ni acceso a
+sus etiquetas. Después revela las etiquetas y compara shadow fijo e incumbente
+sobre las mismas filas point-in-time e IDs; no usa aquí las predicciones
+walk-forward post-corte del informe general.
 
-**Matiz honesto (no lo ocultes):** el resultado de `nested_model_policy` estima
-la política causal de selección; la métrica retrospectiva de un candidato fijo
-solo es diagnóstica. El harness independiente (`MODEL/evaluate.py` anidado y
-`MODEL/compare_models.py` con el zoo) aplica la misma disciplina y certifica si
-otro Model A o assembly merece ser integrado.
+La receta congelada se puede refitear sobre todo el histórico disponible antes de
+cerrar la decisión porque ese cálculo no alimenta al shadow; su pickle **solo se
+publica si gana**. La comparación exige 100 filas comunes, mejora log loss de
+`0,001` o, dentro de esa banda de empate, mejora Brier de `0,0005`. Un rechazo o
+muestra insuficiente deja intactos `latest.json`, `last_good.json` y la copia
+runtime `model.pkl`. También
+arranca con **auto-heal de BLACKBOX** y deja `timing.json`.
+
+`promotion_decision.json` incluye `holdout_sha256` sobre IDs/fechas/etiquetas y,
+cuando hay muestra evaluable, `prediction_sha256` sobre esos campos más las
+probabilidades de incumbente y shadow. Así las métricas quedan ligadas a las
+predicciones exactas, no solo a la lista de partidos.
+
+El pipeline normal mantiene separado el corte de promoción (`live_cutoff`, el
+`date_max` del vivo) del corte del disparador. Para este último usa
+`attempt_cutoff = max(live_cutoff, último intento terminal válido registrado)` y
+solo vuelve a disparar automáticamente al acumular 100 partidos etiquetados con
+fecha estrictamente posterior a `attempt_cutoff`. Así un rechazo o aplazamiento
+no repite determinísticamente el mismo entrenamiento. `-Retrain` y auto-retrain
+difieren solo en el disparador, nunca en la puerta ni en su `live_cutoff`.
+
+El bundle núcleo (`model.pkl`, metadata, SHAP, manifest y config) se construye en
+staging y se mueve una sola vez a una versión nueva; esos archivos son
+inmutables. El health gate final carga directamente
+`registry/<version>/model.pkl`; su `candidate_reference` verifica el SHA-256 y ese
+mismo valor se exige como `expected_candidate_sha256` en CAS. Los sidecars
+auditables `promotion_decision.json` y `deployment.json` son añadidos sancionados y no
+alteran el bundle núcleo ni el SHA del modelo. La metadata puede decir
+`promotion_approved=true` y
+`deployment_state=pending_pointer_commit` porque retrata el estado anterior al
+commit: no confirma por sí sola que el modelo esté vivo. La publicación se prueba
+con `latest.json`, el hash runtime y `deployment.json`; este último replica
+`decision_holdout_sha256` y `decision_prediction_sha256`.
+
+Bajo `registry/.deployment.lock`, CAS confirma versión+hash del incumbente y hash
+del challenger. Los parámetros son obligatorios: promoción requiere
+`expected_incumbent` y `expected_candidate_sha256`; bootstrap requiere el SHA
+esperado del candidato. Un cambio concurrente aborta sin mutación. Si el recibo
+`deployment.json` falla después del commit, se advierte sin revertir un despliegue
+que los punteros ya confirman.
+
+**Matiz honesto (no lo ocultes):** `nested_model_policy` estima la política causal
+walk-forward general, mientras la puerta productiva mide el shadow fijo entrenado
+solo hasta `live_cutoff`. No se ha medido de forma independiente el pickle
+full-history: puede prepararse antes de la decisión, pero se ajusta con todo el
+histórico y no alimenta al shadow. Su health gate certifica bytes y contrato
+operativo, no añade otra estimación de rendimiento. La métrica
+retrospectiva de un candidato fijo solo es diagnóstica. El harness independiente
+(`MODEL/evaluate.py` anidado y `MODEL/compare_models.py` con el zoo) aplica la
+misma disciplina y certifica si otro Model A o assembly merece ser integrado.
 
 **Receta recomendada (empírica) para tener de verdad el mejor modelo:**
-1. `.\start.ps1 -Retrain` → artefacto de producción elegido causalmente por log
-   loss. Suficiente para operar la web.
+1. `.\start.ps1 -Retrain` → challenger elegido causalmente por log loss y
+   sometido a la puerta común. Comprueba el informe de promoción: puede promover,
+   rechazar o aplazar sin degradar la web.
 2. `python MODEL\compare_models.py --window both --n-trials 40` sobre tu `cs2.db` →
    comparativa honesta (zoo × block-wise, nested). Mira `MODEL_COMPARISON.md`.
 3. Compara `nested_policy` con `nested_model_policy`. `diagnostic_best_combo` sirve
@@ -138,9 +186,11 @@ otro Model A o assembly merece ser integrado.
    su fitter y se vuelve a certificar antes de sustituir el artefacto.
 4. Decide por **log loss/calibración/CLV**, no por accuracy.
 
-> Resumen: `-Retrain` ya te da un modelo seleccionado causalmente por log loss; para
-> **certificar** que es el mejor, contrástalo con `compare_models.py` sobre datos
-> reales. No promociones nada a ciegas por resultados sintéticos.
+> Resumen: `-Retrain` produce un challenger seleccionado causalmente; solo pasa a
+> vivo si bate al incumbente sobre el holdout común. Para ampliar la
+> **certificación**, contrástalo con `compare_models.py` sobre datos reales. El
+> vivo puede restaurarse con `start.ps1 -RollbackModel` o
+> `MODEL/manage_models.py rollback`.
 
 ---
 
@@ -161,7 +211,7 @@ upgrade de modelo + esta documentación. Trabaja sobre `pre-dev`.
 - **L2 enriquecido real: HECHO.** `test_leakage_audit.py` reconstruye prefijos de
   `cs2.db` y prueba los selectores as-of.
 - **Lock de deps: HECHO.** `requirements.lock.txt` es el grafo resuelto para
-  Python 3.12 y CI lo instala.
+  CPython 3.13 y CI lo instala.
 - **Cifras únicas**: `MODEL/results/REPORT.md` es la fuente viva; PROJECT/README
   tienen tablas ilustrativas con fecha.
 - Familias `two_stage`/GBDT/nivel-de-mapa: reevaluar cuando crezca la cobertura.
@@ -177,7 +227,7 @@ python MODEL\evaluate.py --synthetic --window both     # smoke del harness anida
 python MODEL\compare_models.py --synthetic --n-trials 8 # smoke del zoo/block-wise
 ```
 El resto de la suite (`pytest TESTS/`) y `ruff`/`mypy`/smoke corren en el CI
-(Python 3.12 con todas las deps).
+(CPython 3.13 con todas las deps).
 
 ---
 

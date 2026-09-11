@@ -6,6 +6,7 @@ from datetime import date, datetime, timedelta, timezone
 import math
 from pathlib import Path
 import sys
+from typing import Iterable, cast
 import unittest
 
 
@@ -13,14 +14,25 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.features.players import PlayerAgeSnapshot  # noqa: E402
-from src.features.rankings import RankingSnapshot  # noqa: E402
-from src.features.state import HistorySnapshot  # noqa: E402
+from src.elo import EloQuery, EloSnapshot, Gender  # noqa: E402
+from src.features.players import (  # noqa: E402
+    PlayerAgeIndex,
+    PlayerAgeSnapshot,
+)
+from src.features.rankings import (  # noqa: E402
+    RankingIndex,
+    RankingSnapshot,
+)
+from src.features.state import (  # noqa: E402
+    CausalHistoryState,
+    HistorySnapshot,
+)
 from src.features.vector import (  # noqa: E402
     MODEL_FEATURE_COLUMNS,
     VECTOR_COLUMNS,
     EloFeatureSnapshot,
     FeatureVectorError,
+    MatchFeatureBuilder,
     MatchFeatureRequest,
     assemble_match_feature_vector,
 )
@@ -145,6 +157,83 @@ def _assemble(request: MatchFeatureRequest | None = None):
     )
 
 
+class _InjectedEloProvider:
+    """Proveedor Elo de prueba que evita cualquier acceso a SQLite."""
+
+    def __init__(self) -> None:
+        """Inicializa el registro de consultas recibidas."""
+
+        self.queries: tuple[EloQuery, ...] = ()
+
+    def get_many(
+        self,
+        queries: Iterable[EloQuery],
+    ) -> tuple[EloSnapshot, ...]:
+        """Responde snapshots causales alineados con cada consulta."""
+
+        self.queries = tuple(queries)
+        return tuple(
+            EloSnapshot(
+                gender=query.gender,
+                player_id=query.player_id,
+                as_of_date=query.as_of_date,
+                state_date=query.as_of_date - timedelta(days=1),
+                general_elo=1700.0 if query.player_id == 1 else 1600.0,
+                surface=query.surface,
+                surface_elo_raw=(
+                    1720.0 if query.player_id == 1 else 1620.0
+                ),
+                combined_elo=(
+                    1710.0 if query.player_id == 1 else 1610.0
+                ),
+                general_matches=100,
+                surface_matches=50,
+                is_cold_start=False,
+                run_id="injected",
+                source_commit="a" * 40,
+            )
+            for query in self.queries
+        )
+
+
+class _InjectedRankingProvider:
+    """Proveedor de ranking de prueba con género explícito."""
+
+    gender: Gender = "M"
+
+    def get_many(
+        self,
+        player_ids: Iterable[int],
+        as_of_date: date,
+    ) -> tuple[RankingSnapshot, ...]:
+        """Responde rankings alineados con ids y fecha recibidos."""
+
+        if as_of_date != CUTOFF:
+            raise AssertionError("El builder alteró el corte solicitado.")
+        return tuple(
+            _ranking(player_id, 10 if player_id == 1 else 40, 2000)
+            for player_id in player_ids
+        )
+
+
+class _InjectedAgeIndex:
+    """Adaptador mínimo de edades para aislar el test del builder."""
+
+    def get_pair(
+        self,
+        gender: str,
+        player_a_id: int,
+        player_b_id: int,
+        *,
+        as_of_date: date,
+    ) -> tuple[PlayerAgeSnapshot, PlayerAgeSnapshot]:
+        """Devuelve el par de edades correspondiente a la petición."""
+
+        if gender != "M" or as_of_date != CUTOFF:
+            raise AssertionError("El builder alteró género o corte.")
+        return _age(player_a_id, 30.0), _age(player_b_id, 25.0)
+
+
 class MatchFeatureVectorTest(unittest.TestCase):
     """Comprueba diferencias, nulos, mercado y allowlist."""
 
@@ -257,6 +346,25 @@ class MatchFeatureVectorTest(unittest.TestCase):
                 age_a=_age(1, 30.0),
                 age_b=_age(2, 25.0),
             )
+
+    def test_builder_uses_injected_elo_and_ranking_providers(self) -> None:
+        """El overlay puede sustituir Elo/ranking sin consultar persistencia."""
+
+        elo_provider = _InjectedEloProvider()
+        ranking_provider = _InjectedRankingProvider()
+        builder = MatchFeatureBuilder(
+            history_state=CausalHistoryState(),
+            ranking_index=cast(RankingIndex, ranking_provider),
+            age_index=cast(PlayerAgeIndex, _InjectedAgeIndex()),
+            elo_provider=elo_provider,
+            ranking_provider=ranking_provider,
+        )
+
+        vector = builder.build(_request())
+
+        self.assertEqual(len(elo_provider.queries), 2)
+        self.assertEqual(vector.values["elo_general_diff"], 100.0)
+        self.assertEqual(vector.values["rank_diff"], -30)
 
 
 if __name__ == "__main__":

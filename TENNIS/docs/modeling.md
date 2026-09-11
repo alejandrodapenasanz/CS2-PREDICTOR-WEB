@@ -106,8 +106,8 @@ test        = temporada Y
 Los tres conjuntos son disjuntos y cumplen:
 
 ```text
-max(train_date) < min(calibration_date)
-max(calibration_date) < min(test_date)
+max(train_result_available_date) < min(calibration_match_date)
+max(calibration_result_available_date) < min(test_match_date)
 ```
 
 Se repite el proceso para cada `Y` y se acumulan únicamente sus predicciones
@@ -144,7 +144,16 @@ Para despliegue:
 
 1. se ajusta el modelo base final con todo el histórico causal disponible;
 2. el calibrador final se ajusta con las probabilidades crudas OOF temporales
-   de 2016–2025, nunca con predicciones in-sample del modelo final.
+   de 2016–2025, nunca con predicciones in-sample del modelo final;
+3. antes del ajuste se reconcilian género, `record_id`, fecha, label,
+   temporada, límites de cada fold y rango de probabilidades contra el dataset
+   original. Una tabla OOF inyectada o manipulada falla cerrada.
+
+Las métricas `*_platt` del informe evalúan calibradores independientes por
+fold (`Y-1 → Y`). El Platt final agrupado es causal para partidos posteriores
+a todo el OOF, pero no es exactamente uno de esos calibradores y todavía no
+tiene un tramo futuro independiente propio. No se atribuyen al bundle final
+unas métricas que no fueron medidas sobre él.
 
 ## Baselines
 
@@ -240,14 +249,49 @@ models/phase7/runs/<fingerprint>/
 ```
 
 El fingerprint incorpora los Parquet y su manifiesto, parámetros, perfil,
-versiones de librerías, código del paquete y script de reentreno. El run se
-publica desde staging, no se sobrescribe y todos sus archivos quedan
+versiones de librerías y un inventario explícito del código de entrenamiento
+y del runtime diario. Ese inventario incluye `src/temporal.py`, todos los
+módulos de modelado, `scripts/retrain_models.py` y los consumidores de
+`src/daily_pipeline`; no se descubre mediante glob. El run se
+registra desde staging, no se sobrescribe y todos sus archivos quedan
 inventariados con tamaño y SHA-256. Una segunda ejecución idéntica verifica y
-reutiliza el run.
+reutiliza el run, pero registrar o reutilizar nunca mueve producción.
+
+La puerta selecciona el último año OOF completo común (por defecto 2025), exige
+exactamente las mismas claves `gender+record_id`, fechas, labels y segmentos y
+puntúa `lightgbm_platt` con el mismo evaluador. Registra N, periodo, hash del
+cohort, hashes de probabilidades y configuración Platt. Log-loss es principal:
+se exige una mejora mínima de `0,001`; dentro de esa banda solo promociona una
+mejora Brier de al menos `0,0005`. Accuracy es métrica de producto y no decide.
+El mismo Parquet se carga y puntúa dos veces; probabilidades y métricas deben
+coincidir con tolerancia absoluta `1e-12`.
+
+`models/phase7/manifest.json` apunta al champion y `last_good.json` al último
+champion validado disponible para rollback. La conmutación usa compare-and-swap
+del hash del puntero. Comandos operativos:
+
+```powershell
+.venv\Scripts\python.exe scripts\retrain_models.py --rollback
+.venv\Scripts\python.exe scripts\retrain_models.py --retention-preview
+.venv\Scripts\python.exe scripts\retrain_models.py --confirm-prune <TOKEN_DE_LA_PREVIEW>
+```
+
+La retención configurable conserva los últimos N runs más champion y
+`last_good`. Antes de la primera poda real solo presenta la keep-list; la
+confirmación exacta habilita futuras podas con la misma política. Cada plan se
+recalcula antes de borrar. Un fallo de Windows queda en
+`models/phase7/cleanup_pending.json`, se avisa y el pipeline continúa.
 
 `src.modeling.service.load_active_deployment_model()` verifica todos los hashes
-antes de deserializar el bundle y devuelve la probabilidad cruda, la calibrada
-y, cuando existe mercado, `edge = p_modelo - p_mercado`.
+y exige que el subconjunto persistido de inferencia coincida exactamente con el
+código actual antes de deserializar el bundle. La identidad amplia del
+challenger incluye también entrenamiento, puerta y CLI; cambiarlas no obliga a
+promover un empate ni invalida por sí solo el predictor vivo. Su método
+`predict(..., as_of_date=D)` exige
+en la propia API `training_available_max_date < D`. Si recibe mercado, también exige
+`market_retrieved_at_utc.date() < D`; sin esa procedencia no calcula edge.
+El pipeline diario repite estas comprobaciones y conserva nula toda comparación
+de mercado no acreditada.
 
 Las métricas reales y las limitaciones están en
 [`model_report.md`](model_report.md).

@@ -40,6 +40,9 @@ class ExpandingSeasonSplitsTest(unittest.TestCase):
             },
             index=range(100, 112),
         )
+        self.frame["result_available_date"] = (
+            self.frame["match_date"] + pd.Timedelta(days=21)
+        )
 
     def test_fold_uses_past_calibration_previous_year_and_future_test(
         self,
@@ -119,7 +122,42 @@ class ExpandingSeasonSplitsTest(unittest.TestCase):
             TemporalSplitError,
             "posteriores",
         ):
-            validate_temporal_fold(self.frame["match_date"], leaking)
+            validate_temporal_fold(
+                self.frame["match_date"],
+                leaking,
+                availability_dates=self.frame["result_available_date"],
+            )
+
+    def test_late_previous_season_result_is_embargoed_from_early_test(
+        self,
+    ) -> None:
+        """Una etiqueta de diciembre no entra si aún no estaba disponible."""
+
+        frame = pd.DataFrame(
+            {
+                "record_id": ["train", "cal-ok", "cal-late", "test"],
+                "match_date": pd.to_datetime(
+                    [
+                        "2019-06-01",
+                        "2020-06-01",
+                        "2020-12-31",
+                        "2021-01-10",
+                    ]
+                ),
+            }
+        )
+        frame["result_available_date"] = (
+            frame["match_date"] + pd.Timedelta(days=21)
+        )
+        folds = build_expanding_season_folds(
+            frame,
+            test_seasons=(2021,),
+            record_id_column="record_id",
+        )
+        _, calibration, test = folds[0].take(frame)
+
+        self.assertEqual(calibration["record_id"].tolist(), ["cal-ok"])
+        self.assertEqual(test["record_id"].tolist(), ["test"])
 
 
 if __name__ == "__main__":

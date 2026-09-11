@@ -1,0 +1,21 @@
+{
+  "default_minimum_interval_seconds": 1.0,
+  "host_overrides": {
+    "www.tennisabstract.com": {
+      "rate_limit_attempts": 3,
+      "rate_limit_base_seconds": 30.0,
+      "rate_limit_max_seconds": 300.0,
+      "rate_limit_wait_budget_seconds": 90.0
+    },
+    "www.tennisratio.com": {
+      "rate_limit_attempts": 3,
+      "rate_limit_base_seconds": 30.0,
+      "rate_limit_max_seconds": 300.0,
+      "rate_limit_wait_budget_seconds": 90.0
+    }
+  },
+  "lock_stale_seconds": 300.0,
+  "lock_timeout_seconds": 30.0,
+  "response_cache_ttl_seconds": 300,
+  "robots_ttl_seconds": 86400
+}

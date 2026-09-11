@@ -4,9 +4,20 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pytest-*/
+.test-tmp/
+.tennis-quality-*/
+.root-launcher-*/
+TENNIS/pytest_tennisratio_run*/
+TENNIS/tennisratio_p1_run*/
+TENNIS/quality/pytest-*/
+TENNIS/quality/mypy-*/
 CS2/TESTS/.cache/
 .venv/
 venv/
+CS2/.venv.build/
+CS2/.venv.previous/
+CS2/.venv.failed*/
 
 # Secrets / local sessions
 .env
@@ -18,6 +29,9 @@ CS2/SCRAPER/hltv-scraper-api/hltv_scraper/*session*.json
 
 # Local virtual environments
 CS2/SCRAPER/hltv-scraper-api/.venv/
+CS2/SCRAPER/hltv-scraper-api/.venv.build/
+CS2/SCRAPER/hltv-scraper-api/.venv.previous/
+CS2/SCRAPER/hltv-scraper-api/.venv.failed*/
 
 # CA bundle especifico de maquina (redes con inspeccion TLS); no versionar
 CS2/SCRAPER/hltv-scraper-api/corp_ca_bundle.pem
@@ -48,6 +62,7 @@ CS2/BBDD/BLACKBOX/.staging/
 CS2/BBDD/BLACKBOX/.prev/
 CS2/BBDD/BLACKBOX/.verify_tmp.sqlite
 CS2/MODEL/artifacts/*.pkl
+CS2/MODEL/artifacts/pending_cleanup.json
 CS2/MODEL/artifacts/registry/
 CS2/MODEL/results/*.json
 CS2/MODEL/results/*.csv

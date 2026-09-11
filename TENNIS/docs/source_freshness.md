@@ -74,11 +74,14 @@ La actualización web aprobada se limita a estos dos informes públicos:
 
 Política de acceso:
 
-- una ejecución ordinaria como máximo cada 24 horas;
-- exactamente un `GET` secuencial por género, dos solicitudes totales;
+- la frecuencia de ejecución la controla manualmente el operador; el código no
+  impone un cupo diario artificial;
+- cada invocación realiza como máximo un `GET` secuencial por género, dos
+  solicitudes totales;
 - peticiones condicionales mediante `If-Modified-Since` y `If-None-Match`;
 - agente de usuario identificable;
 - sin reintentos durante esa ejecución ante `403`, `429` o errores `5xx`;
+- cortacircuitos persistente de 24 horas después de cualquiera de esos fallos;
 - conservación del HTML crudo, URL, hash, cabeceras HTTP e instante UTC;
 - nunca solicitar `/jsfrags/`, `/jsmatches/` ni `/jsplayers/`, que están
   excluidos por <https://www.tennisabstract.com/robots.txt>.

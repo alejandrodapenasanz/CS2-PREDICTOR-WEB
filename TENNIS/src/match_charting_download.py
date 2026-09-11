@@ -24,30 +24,23 @@ from typing import Any, Final, Mapping
 from urllib.parse import quote
 
 import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
 
 from src.config import MATCH_CHARTING_RAW_DIR
+from src.responsible_http import ResponsibleHttpClient, build_http_client
 
 
 LOGGER = logging.getLogger(__name__)
 
-SOURCE_REPOSITORY: Final[str] = (
-    "JeffSackmann/tennis_MatchChartingProject"
-)
+SOURCE_REPOSITORY: Final[str] = "JeffSackmann/tennis_MatchChartingProject"
 SOURCE_REF: Final[str] = "master"
-SOURCE_WEB_URL: Final[str] = (
-    "https://github.com/JeffSackmann/tennis_MatchChartingProject"
-)
+SOURCE_WEB_URL: Final[str] = "https://github.com/JeffSackmann/tennis_MatchChartingProject"
 
 GITHUB_API_ROOT: Final[str] = "https://api.github.com"
 RAW_CONTENT_ROOT: Final[str] = "https://raw.githubusercontent.com"
 REQUEST_TIMEOUT: Final[tuple[float, float]] = (15.0, 180.0)
 DOWNLOAD_CHUNK_SIZE: Final[int] = 1024 * 1024
 
-SUPPORT_FILES: Final[frozenset[str]] = frozenset(
-    {"README.md", "data_dictionary.txt"}
-)
+SUPPORT_FILES: Final[frozenset[str]] = frozenset({"README.md", "data_dictionary.txt"})
 REQUIRED_FILES: Final[frozenset[str]] = frozenset(
     {
         "README.md",
@@ -148,29 +141,19 @@ class PreviousManifest:
     blob_shas: Mapping[str, str]
 
 
-def build_http_session() -> requests.Session:
+def build_http_session() -> ResponsibleHttpClient:
     """Crea una sesión HTTP identificada y con reintentos conservadores."""
 
-    retry = Retry(
-        total=4,
-        connect=4,
-        read=4,
-        status=4,
-        backoff_factor=0.75,
-        status_forcelist=(429, 500, 502, 503, 504),
-        allowed_methods=frozenset({"GET"}),
-        respect_retry_after_header=True,
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session = requests.Session()
-    session.headers.update(
-        {
+    return build_http_client(
+        default_headers={
             "Accept": "application/vnd.github+json",
             "User-Agent": "TENNIS-Match-Charting-Ingestion/1",
-        }
+        },
+        robots_user_agent="TENNIS-Match-Charting-Ingestion",
+        request_retry_attempts=5,
+        request_retry_delay_seconds=0.75,
+        request_retry_statuses=(429, 500, 502, 503, 504),
     )
-    session.mount("https://", adapter)
-    return session
 
 
 def _request_json(
@@ -184,13 +167,9 @@ def _request_json(
         response.raise_for_status()
         payload = response.json()
     except (requests.RequestException, ValueError) as exc:
-        raise MatchChartingDownloadError(
-            f"No se pudo consultar la fuente remota: {url}"
-        ) from exc
+        raise MatchChartingDownloadError(f"No se pudo consultar la fuente remota: {url}") from exc
     if not isinstance(payload, Mapping):
-        raise SourceLayoutError(
-            f"La respuesta remota no es un objeto JSON: {url}"
-        )
+        raise SourceLayoutError(f"La respuesta remota no es un objeto JSON: {url}")
     return payload
 
 
@@ -207,24 +186,17 @@ def _extract_tree_sha(commit_payload: Mapping[str, Any]) -> str:
 
     commit = commit_payload.get("commit")
     if not isinstance(commit, Mapping):
-        raise SourceLayoutError(
-            "La respuesta del commit no contiene el objeto commit."
-        )
+        raise SourceLayoutError("La respuesta del commit no contiene el objeto commit.")
     tree = commit.get("tree")
     if not isinstance(tree, Mapping):
-        raise SourceLayoutError(
-            "La respuesta del commit no contiene el objeto commit.tree."
-        )
+        raise SourceLayoutError("La respuesta del commit no contiene el objeto commit.tree.")
     return _require_sha(tree.get("sha"), "El SHA del árbol")
 
 
 def _is_selected_path(remote_path: str) -> bool:
     """Indica si la ruta es un CSV o uno de los dos documentos admitidos."""
 
-    return (
-        remote_path.casefold().endswith(".csv")
-        or remote_path in SUPPORT_FILES
-    )
+    return remote_path.casefold().endswith(".csv") or remote_path in SUPPORT_FILES
 
 
 def _validate_remote_path(remote_path: str) -> None:
@@ -237,9 +209,7 @@ def _validate_remote_path(remote_path: str) -> None:
         or ".." in posix_path.parts
         or "\\" in remote_path
     ):
-        raise SourceLayoutError(
-            f"Ruta remota insegura en el inventario: {remote_path!r}."
-        )
+        raise SourceLayoutError(f"Ruta remota insegura en el inventario: {remote_path!r}.")
 
 
 def _parse_tree_files(
@@ -248,14 +218,10 @@ def _parse_tree_files(
     """Selecciona y valida todos los blobs CSV y documentos requeridos."""
 
     if tree_payload.get("truncated") is True:
-        raise SourceLayoutError(
-            "GitHub devolvió un árbol truncado; faltaría parte del inventario."
-        )
+        raise SourceLayoutError("GitHub devolvió un árbol truncado; faltaría parte del inventario.")
     raw_entries = tree_payload.get("tree")
     if not isinstance(raw_entries, list):
-        raise SourceLayoutError(
-            "La respuesta del árbol no contiene una lista tree."
-        )
+        raise SourceLayoutError("La respuesta del árbol no contiene una lista tree.")
 
     selected: list[SourceFile] = []
     observed_paths: set[str] = set()
@@ -263,21 +229,15 @@ def _parse_tree_files(
         if not isinstance(entry, Mapping) or entry.get("type") != "blob":
             continue
         remote_path = entry.get("path")
-        if not isinstance(remote_path, str) or not _is_selected_path(
-            remote_path
-        ):
+        if not isinstance(remote_path, str) or not _is_selected_path(remote_path):
             continue
         _validate_remote_path(remote_path)
         if remote_path in observed_paths:
-            raise SourceLayoutError(
-                f"Ruta remota duplicada en el árbol: {remote_path!r}."
-            )
+            raise SourceLayoutError(f"Ruta remota duplicada en el árbol: {remote_path!r}.")
 
         size = entry.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size < 0:
-            raise SourceLayoutError(
-                f"Tamaño remoto inválido para {remote_path!r}."
-            )
+            raise SourceLayoutError(f"Tamaño remoto inválido para {remote_path!r}.")
         blob_sha = _require_sha(
             entry.get("sha"),
             f"El SHA de blob de {remote_path!r}",
@@ -293,9 +253,7 @@ def _parse_tree_files(
 
     missing = sorted(REQUIRED_FILES.difference(observed_paths))
     if missing:
-        raise SourceLayoutError(
-            f"Faltan archivos obligatorios del repositorio MCP: {missing}."
-        )
+        raise SourceLayoutError(f"Faltan archivos obligatorios del repositorio MCP: {missing}.")
     if not any(item.kind == "csv" for item in selected):
         raise SourceLayoutError("El inventario MCP no contiene ningún CSV.")
 
@@ -321,10 +279,7 @@ def fetch_source_inventory(
     owned_session = session is None
     active_session = session or build_http_session()
     try:
-        commit_url = (
-            f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/commits/"
-            f"{SOURCE_REF}"
-        )
+        commit_url = f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/commits/{SOURCE_REF}"
         commit_payload = _request_json(active_session, commit_url)
         commit_sha = _require_sha(
             commit_payload.get("sha"),
@@ -332,10 +287,7 @@ def fetch_source_inventory(
         )
         tree_sha = _extract_tree_sha(commit_payload)
 
-        tree_url = (
-            f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/git/trees/"
-            f"{tree_sha}?recursive=1"
-        )
+        tree_url = f"{GITHUB_API_ROOT}/repos/{SOURCE_REPOSITORY}/git/trees/{tree_sha}?recursive=1"
         tree_payload = _request_json(active_session, tree_url)
         files = _parse_tree_files(tree_payload)
         return SourceInventory(
@@ -369,9 +321,7 @@ def _safe_destination(source_root: Path, remote_path: str) -> Path:
     root = source_root.resolve()
     destination = (root / Path(remote_path)).resolve()
     if not destination.is_relative_to(root):
-        raise SourceLayoutError(
-            f"La ruta remota escapa del directorio fuente: {remote_path!r}."
-        )
+        raise SourceLayoutError(f"La ruta remota escapa del directorio fuente: {remote_path!r}.")
     return destination
 
 
@@ -394,51 +344,29 @@ def _load_previous_manifest(path: Path) -> PreviousManifest | None:
         return None
     payload = _read_json_object(path)
     if payload.get("source_repository") != SOURCE_REPOSITORY:
-        raise ManifestError(
-            f"El manifiesto activo no pertenece a {SOURCE_REPOSITORY}: {path}."
-        )
+        raise ManifestError(f"El manifiesto activo no pertenece a {SOURCE_REPOSITORY}: {path}.")
     if payload.get("source_ref") != SOURCE_REF:
-        raise ManifestError(
-            f"El manifiesto activo no corresponde a {SOURCE_REF}: {path}."
-        )
+        raise ManifestError(f"El manifiesto activo no corresponde a {SOURCE_REF}: {path}.")
     source_commit = payload.get("source_commit")
-    if (
-        not isinstance(source_commit, str)
-        or _SHA_PATTERN.fullmatch(source_commit) is None
-    ):
-        raise ManifestError(
-            f"El manifiesto activo tiene un commit inválido: {path}."
-        )
+    if not isinstance(source_commit, str) or _SHA_PATTERN.fullmatch(source_commit) is None:
+        raise ManifestError(f"El manifiesto activo tiene un commit inválido: {path}.")
 
     raw_files = payload.get("files")
     if not isinstance(raw_files, list):
-        raise ManifestError(
-            f"El manifiesto activo no contiene una lista files: {path}."
-        )
+        raise ManifestError(f"El manifiesto activo no contiene una lista files: {path}.")
     blob_shas: dict[str, str] = {}
     for raw_file in raw_files:
         if not isinstance(raw_file, Mapping):
-            raise ManifestError(
-                f"El manifiesto activo contiene una entrada inválida: {path}."
-            )
+            raise ManifestError(f"El manifiesto activo contiene una entrada inválida: {path}.")
         remote_path = raw_file.get("remote_path")
         blob_sha = raw_file.get("git_blob_sha")
         if not isinstance(remote_path, str):
-            raise ManifestError(
-                f"El manifiesto activo contiene una ruta inválida: {path}."
-            )
+            raise ManifestError(f"El manifiesto activo contiene una ruta inválida: {path}.")
         _validate_remote_path(remote_path)
-        if (
-            not isinstance(blob_sha, str)
-            or _SHA_PATTERN.fullmatch(blob_sha) is None
-        ):
-            raise ManifestError(
-                f"El manifiesto activo contiene un blob inválido: {path}."
-            )
+        if not isinstance(blob_sha, str) or _SHA_PATTERN.fullmatch(blob_sha) is None:
+            raise ManifestError(f"El manifiesto activo contiene un blob inválido: {path}.")
         if remote_path in blob_shas:
-            raise ManifestError(
-                f"El manifiesto activo repite {remote_path!r}: {path}."
-            )
+            raise ManifestError(f"El manifiesto activo repite {remote_path!r}: {path}.")
         blob_shas[remote_path] = blob_sha
     return PreviousManifest(
         source_commit=source_commit,
@@ -453,9 +381,7 @@ def _local_blob_sha(path: Path) -> tuple[int, str]:
         size = path.stat().st_size
         return size, _git_blob_sha(path, size)
     except OSError as exc:
-        raise MatchChartingDownloadError(
-            f"No se pudo validar el archivo local {path}."
-        ) from exc
+        raise MatchChartingDownloadError(f"No se pudo validar el archivo local {path}.") from exc
 
 
 def _requires_download(
@@ -482,10 +408,7 @@ def _requires_download(
         )
 
     local_size, local_sha = _local_blob_sha(destination)
-    if (
-        local_size == source_file.size
-        and local_sha == source_file.git_blob_sha
-    ):
+    if local_size == source_file.size and local_sha == source_file.git_blob_sha:
         return False, False
     if previous_blob_sha is not None and local_sha == previous_blob_sha:
         return True, True
@@ -506,10 +429,7 @@ def _download_one(
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = destination.with_name(f"{destination.name}.part")
     encoded_path = quote(source_file.remote_path, safe="/")
-    url = (
-        f"{RAW_CONTENT_ROOT}/{SOURCE_REPOSITORY}/{commit_sha}/"
-        f"{encoded_path}"
-    )
+    url = f"{RAW_CONTENT_ROOT}/{SOURCE_REPOSITORY}/{commit_sha}/{encoded_path}"
     digest = hashlib.sha1(usedforsecurity=False)
     digest.update(f"blob {source_file.size}\0".encode("ascii"))
     bytes_written = 0
@@ -522,9 +442,7 @@ def _download_one(
         ) as response:
             response.raise_for_status()
             with temporary_path.open("wb") as target:
-                for chunk in response.iter_content(
-                    chunk_size=DOWNLOAD_CHUNK_SIZE
-                ):
+                for chunk in response.iter_content(chunk_size=DOWNLOAD_CHUNK_SIZE):
                     if not chunk:
                         continue
                     target.write(chunk)
@@ -606,9 +524,7 @@ def _manifest_file_signature(
     signature: list[tuple[str, int, str]] = []
     for item in raw_files:
         if not isinstance(item, Mapping):
-            raise ManifestError(
-                "El manifiesto versionado contiene una entrada inválida."
-            )
+            raise ManifestError("El manifiesto versionado contiene una entrada inválida.")
         remote_path = item.get("remote_path")
         size = item.get("size")
         blob_sha = item.get("git_blob_sha")
@@ -618,9 +534,7 @@ def _manifest_file_signature(
             or isinstance(size, bool)
             or not isinstance(blob_sha, str)
         ):
-            raise ManifestError(
-                "El manifiesto versionado contiene campos inválidos."
-            )
+            raise ManifestError("El manifiesto versionado contiene campos inválidos.")
         signature.append((remote_path, size, blob_sha))
     return tuple(signature)
 
@@ -648,9 +562,7 @@ def _validate_versioned_manifest(
         or payload.get("source_tree") != inventory.tree_sha
         or _manifest_file_signature(payload) != expected_signature
     ):
-        raise ManifestError(
-            f"El manifiesto versionado contradice el snapshot remoto: {path}."
-        )
+        raise ManifestError(f"El manifiesto versionado contradice el snapshot remoto: {path}.")
 
 
 def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
@@ -684,11 +596,7 @@ def _write_manifests(
     """Publica el manifiesto activo y conserva uno inmutable por commit."""
 
     active_path = source_root / ACTIVE_MANIFEST_FILENAME
-    versioned_path = (
-        source_root
-        / VERSIONED_MANIFEST_DIRECTORY
-        / f"{inventory.commit_sha}.json"
-    )
+    versioned_path = source_root / VERSIONED_MANIFEST_DIRECTORY / f"{inventory.commit_sha}.json"
 
     if versioned_path.exists():
         payload = _read_json_object(versioned_path)

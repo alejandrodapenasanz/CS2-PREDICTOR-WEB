@@ -100,15 +100,100 @@ class ParticipantIntegrityTests(unittest.TestCase):
                               'raw.json','{}')
                     """
                 )
-                self.assertEqual(
-                    repair_integrity.purge_unconfirmed_live_matches(conn), 1
-                )
+                purge = repair_integrity.purge_unconfirmed_live_matches(conn)
+                self.assertEqual(purge["purged"], 1)
+                self.assertEqual(purge["protected_skipped"], 0)
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0], 0
                 )
                 self.assertEqual(
                     conn.execute("SELECT COUNT(*) FROM raw_snapshots").fetchone()[0], 1
                 )
+            finally:
+                conn.close()
+
+    def test_repair_preserves_complete_match_when_prediction_ledger_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            conn = build_db.connect_live_db(Path(temp) / "protected.db")
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("INSERT INTO events(name) VALUES ('Event')")
+                event_id = conn.execute("SELECT event_id FROM events").fetchone()[0]
+                conn.execute("INSERT INTO teams(name,hltv_id) VALUES ('Alpha',1)")
+                conn.execute("INSERT INTO teams(name,hltv_id) VALUES ('TBD',NULL)")
+                team_ids = [row[0] for row in conn.execute("SELECT team_id FROM teams ORDER BY team_id")]
+                conn.execute(
+                    """
+                    INSERT INTO matches(
+                        hltv_match_id,event_id,datetime_utc,datetime_precision,
+                        team1_id,team2_id,best_of,status,data_tier
+                    ) VALUES ('protected-102',?,'2099-01-02T12:00:00Z','exact',?,?,3,
+                              'scheduled','prematch_captured')
+                    """,
+                    (event_id, *team_ids),
+                )
+                match = conn.execute(
+                    """
+                    SELECT m.team1_id,m.team2_id,m.datetime_utc,m.datetime_precision,m.status,
+                           t1.name,t2.name,t1.hltv_id,t2.hltv_id
+                    FROM matches m JOIN teams t1 ON t1.team_id=m.team1_id
+                    JOIN teams t2 ON t2.team_id=m.team2_id
+                    WHERE m.hltv_match_id='protected-102'
+                    """
+                ).fetchone()
+                match_id = conn.execute(
+                    "SELECT match_id FROM matches WHERE hltv_match_id='protected-102'"
+                ).fetchone()[0]
+                prediction = {
+                    "id": "protected-102",
+                    "captured_at": "2099-01-02T10:00:00Z",
+                    "prediction": {
+                        "model_prob_team1": 0.7,
+                        "decision_prob_team1": 0.7,
+                        "reliability_score": 0.8,
+                    },
+                    "model_trace": {
+                        "artifact_sha256": "a" * 64,
+                        "config_sha256": "b" * 64,
+                        "feature_policy_sha256": "c" * 64,
+                        "is_fallback": False,
+                    },
+                }
+                ingest.upsert_prediction_ledger(
+                    conn,
+                    prediction,
+                    match_id=match_id,
+                    match_row=match,
+                    model_version="model@protected",
+                )
+                conn.execute(
+                    """
+                    INSERT INTO predictions(
+                        match_id,hltv_match_id,model_version,predicted_at_utc,prob_team1
+                    ) VALUES (?,?,?,?,?)
+                    """,
+                    (match_id, "protected-102", "model@protected", "2099-01-02T10:00:00Z", 0.7),
+                )
+                before = {
+                    table: [tuple(row) for row in conn.execute(f'SELECT * FROM "{table}"')]
+                    for table in ("matches", "predictions", "prediction_ledger")
+                }
+
+                purge = repair_integrity.purge_unconfirmed_live_matches(conn)
+
+                self.assertEqual(
+                    purge,
+                    {
+                        "purged": 0,
+                        "protected_skipped": 1,
+                        "protected_match_ids": [match_id],
+                    },
+                )
+                after = {
+                    table: [tuple(row) for row in conn.execute(f'SELECT * FROM "{table}"')]
+                    for table in ("matches", "predictions", "prediction_ledger")
+                }
+                self.assertEqual(after, before)
             finally:
                 conn.close()
 
@@ -364,7 +449,16 @@ class PredictionLedgerTests(unittest.TestCase):
         self.conn.close()
         self.temp.cleanup()
 
-    def _row(self, captured_at: str, probability: float) -> dict:
+    def _row(
+        self,
+        captured_at: str,
+        probability: float,
+        *,
+        ensemble_disagreement: float = 0.04,
+        estimate_band_half_width: float = 0.08,
+        estimate_confidence_level: str = "high",
+        estimate_history_coverage: float = 0.75,
+    ) -> dict:
         return {
             "id": "99",
             "captured_at": captured_at,
@@ -372,6 +466,14 @@ class PredictionLedgerTests(unittest.TestCase):
                 "model_prob_team1": probability,
                 "decision_prob_team1": probability,
                 "reliability_score": 0.8,
+                "prediction_regime": "odds",
+                "prediction_architecture": "router_two_models",
+                "opening_odds_recovered": True,
+                "opening_odds_captured_at_utc": "2026-01-02T09:00:00Z",
+                "ensemble_disagreement": ensemble_disagreement,
+                "estimate_band_half_width": estimate_band_half_width,
+                "estimate_confidence_level": estimate_confidence_level,
+                "estimate_history_coverage": estimate_history_coverage,
             },
             "features": {"elo_prob_centered": probability - 0.5},
             "data_quality": {"real_pre_match_snapshot": True},
@@ -384,7 +486,7 @@ class PredictionLedgerTests(unittest.TestCase):
             },
         }
 
-    def test_frozen_prediction_cannot_be_rewritten_and_is_scored(self) -> None:
+    def _match_and_id(self) -> tuple[sqlite3.Row, int]:
         match = self.conn.execute(
             """
             SELECT m.team1_id,m.team2_id,m.datetime_utc,m.datetime_precision,m.status,
@@ -396,6 +498,119 @@ class PredictionLedgerTests(unittest.TestCase):
         match_id = self.conn.execute(
             "SELECT match_id FROM matches WHERE hltv_match_id='99'"
         ).fetchone()[0]
+        return match, int(match_id)
+
+    def test_estimate_metadata_is_stored_in_prediction_and_open_ledger(self) -> None:
+        self.conn.execute(
+            "UPDATE matches SET datetime_utc='2099-01-02T12:00:00Z' WHERE hltv_match_id='99'"
+        )
+        run_dir = Path(self.temp.name) / "estimate_run"
+        run_dir.mkdir()
+        (run_dir / "predictions_enriched.json").write_text(
+            json.dumps([self._row("2099-01-02T10:00:00Z", 0.7)]),
+            encoding="utf-8",
+        )
+
+        ingest.insert_predictions(self.conn, run_dir)
+
+        expected = (0.04, 0.08, "high", 0.75)
+        columns = (
+            "ensemble_disagreement, estimate_band_half_width, "
+            "estimate_confidence_level, estimate_history_coverage"
+        )
+        prediction = self.conn.execute(f"SELECT {columns} FROM predictions").fetchone()
+        ledger = self.conn.execute(
+            f"SELECT ledger_status, {columns} FROM prediction_ledger"
+        ).fetchone()
+        self.assertEqual(tuple(prediction), expected)
+        self.assertEqual(tuple(ledger), ("open", *expected))
+        odds_columns = (
+            "prediction_regime, prediction_architecture, "
+            "opening_odds_recovered, opening_odds_captured_at_utc"
+        )
+        self.assertEqual(
+            tuple(
+                self.conn.execute(
+                    f"SELECT {odds_columns} FROM predictions"
+                ).fetchone()
+            ),
+            (
+                "odds",
+                "router_two_models",
+                1,
+                "2026-01-02T09:00:00Z",
+            ),
+        )
+        self.assertEqual(
+            tuple(
+                self.conn.execute(
+                    f"SELECT {odds_columns} FROM prediction_ledger"
+                ).fetchone()
+            ),
+            (
+                "odds",
+                "router_two_models",
+                1,
+                "2026-01-02T09:00:00Z",
+            ),
+        )
+
+    def test_invalid_estimate_metadata_fails_closed_to_null(self) -> None:
+        match, match_id = self._match_and_id()
+        row = self._row(
+            "2026-01-02T10:00:00Z",
+            0.7,
+            ensemble_disagreement=-0.01,
+            estimate_band_half_width=0.51,
+            estimate_confidence_level="unsupported",
+            estimate_history_coverage=1.01,
+        )
+
+        ingest.upsert_prediction_ledger(
+            self.conn,
+            row,
+            match_id=match_id,
+            match_row=match,
+            model_version="model@v1",
+        )
+
+        stored = self.conn.execute(
+            """
+            SELECT ensemble_disagreement, estimate_band_half_width,
+                   estimate_confidence_level, estimate_history_coverage
+            FROM prediction_ledger
+            """
+        ).fetchone()
+        self.assertEqual(tuple(stored), (None, None, None, None))
+
+    def test_invalid_newer_prediction_cannot_replace_valid_open_ledger(self) -> None:
+        match, match_id = self._match_and_id()
+        ingest.upsert_prediction_ledger(
+            self.conn,
+            self._row("2026-01-02T10:00:00Z", 0.7),
+            match_id=match_id,
+            match_row=match,
+            model_version="model@v1",
+        )
+        before = tuple(self.conn.execute("SELECT * FROM prediction_ledger").fetchone())
+        invalid = self._row("2026-01-02T11:00:00Z", 0.2)
+        invalid["model_trace"]["artifact_sha256"] = None
+        invalid["model_trace"]["is_fallback"] = True
+
+        changed = ingest.upsert_prediction_ledger(
+            self.conn,
+            invalid,
+            match_id=match_id,
+            match_row=match,
+            model_version="fallback@invalid",
+        )
+
+        after = tuple(self.conn.execute("SELECT * FROM prediction_ledger").fetchone())
+        self.assertEqual(changed, 0)
+        self.assertEqual(after, before)
+
+    def test_frozen_prediction_cannot_be_rewritten_and_is_scored(self) -> None:
+        match, match_id = self._match_and_id()
         ingest.upsert_prediction_ledger(
             self.conn,
             self._row("2026-01-02T10:00:00Z", 0.7),
@@ -406,15 +621,27 @@ class PredictionLedgerTests(unittest.TestCase):
         ingest.finalize_prediction_ledger(self.conn, "2026-01-02T12:01:00Z")
         ingest.upsert_prediction_ledger(
             self.conn,
-            self._row("2026-01-02T11:00:00Z", 0.2),
+            self._row(
+                "2026-01-02T11:00:00Z",
+                0.2,
+                ensemble_disagreement=0.19,
+                estimate_band_half_width=0.38,
+                estimate_confidence_level="low",
+                estimate_history_coverage=0.1,
+            ),
             match_id=match_id,
             match_row=match,
             model_version="model@v1",
         )
         frozen = self.conn.execute(
-            "SELECT ledger_status,prob_team1 FROM prediction_ledger"
+            """
+            SELECT ledger_status, prob_team1, ensemble_disagreement,
+                   estimate_band_half_width, estimate_confidence_level,
+                   estimate_history_coverage
+            FROM prediction_ledger
+            """
         ).fetchone()
-        self.assertEqual((frozen[0], frozen[1]), ("frozen", 0.7))
+        self.assertEqual(tuple(frozen), ("frozen", 0.7, 0.04, 0.08, "high", 0.75))
         team1 = match[0]
         self.conn.execute(
             """

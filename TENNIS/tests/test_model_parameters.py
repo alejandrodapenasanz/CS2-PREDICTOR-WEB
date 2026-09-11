@@ -24,7 +24,7 @@ class ModelingParametersTest(unittest.TestCase):
     def test_parameters_are_versioned_and_serializable(self) -> None:
         """Expone una versión estable y mappings reproducibles."""
 
-        self.assertEqual(MODEL_ARTIFACT_VERSION, "tennis-model-v1")
+        self.assertEqual(MODEL_ARTIFACT_VERSION, "tennis-model-v3")
         self.assertEqual(LogisticParameters().as_dict()["c"], 1.0)
         self.assertEqual(
             LightGBMParameters().as_dict()["n_estimators"], 500

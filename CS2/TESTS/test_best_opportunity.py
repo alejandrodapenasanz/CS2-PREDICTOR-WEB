@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 
@@ -10,10 +11,7 @@ from PIPELINE.opportunity import annotate_opportunities
 def _confirmed_rosters() -> dict:
     return {
         side: {
-            "players": [
-                {"id": f"{side}-{index}", "name": f"{side} player {index}"}
-                for index in range(1, 6)
-            ],
+            "players": [{"id": f"{side}-{index}", "name": f"{side} player {index}"} for index in range(1, 6)],
             "announced_lineup_complete": True,
             "integrity": {
                 "status": "confirmed",
@@ -58,6 +56,37 @@ def test_annotate_opportunities_applies_gates_and_daily_ranks() -> None:
     assert predictions["3"]["opportunity_rank"] is None
     assert predictions["4"]["opportunity_rank_day"] == 1
     assert predictions["4"]["is_best_opportunity"] is True
+
+
+def test_estimate_band_fields_do_not_change_opportunity_order_or_ranks() -> None:
+    baseline = [
+        _entry("1", "2026-07-01", 0.70, 0.90),
+        _entry("2", "2026-07-01", 0.80, 0.60),
+        _entry("3", "2026-07-02", 0.65, 1.00),
+    ]
+    with_bands = copy.deepcopy(baseline)
+    for index, entry in enumerate(with_bands):
+        entry["prediction"].update(
+            {
+                "ensemble_disagreement": 0.01 + index * 0.12,
+                "estimate_band_half_width": 0.02 + index * 0.10,
+                "estimate_confidence_level": ("high", "medium", "low")[index],
+                "estimate_history_coverage": (1.0, 0.5, 0.0)[index],
+            }
+        )
+
+    annotate_opportunities(baseline)
+    annotate_opportunities(with_bands)
+    ranking_fields = (
+        "opportunity_score",
+        "opportunity_eligible",
+        "opportunity_rank",
+        "opportunity_rank_day",
+        "is_best_opportunity",
+    )
+    expected = {entry["id"]: tuple(entry["prediction"][field] for field in ranking_fields) for entry in baseline}
+    actual = {entry["id"]: tuple(entry["prediction"][field] for field in ranking_fields) for entry in with_bands}
+    assert actual == expected
 
 
 def test_incomplete_announced_lineup_is_never_a_best_opportunity() -> None:
@@ -197,24 +226,23 @@ def test_prediction_reingest_never_deletes_older_prematch_snapshots(tmp_path: Pa
     path.write_text(json.dumps([prediction("1002")]), encoding="utf-8")
     assert ingest.insert_predictions(conn, run_dir) == 1
 
-    ids = {
-        row[0]
-        for row in conn.execute(
-            "SELECT hltv_match_id FROM predictions ORDER BY hltv_match_id"
-        )
-    }
+    ids = {row[0] for row in conn.execute("SELECT hltv_match_id FROM predictions ORDER BY hltv_match_id")}
     conn.close()
     assert ids == {"1001", "1002"}
 
 
 def test_best_opportunity_web_has_no_result_cap() -> None:
-    html = (Path(__file__).resolve().parents[2] / "WEB" / "index.html").read_text(
-        encoding="utf-8"
-    )
-    render_best = html.split("function renderBest(){", 1)[1].split(
-        "// ---------- model view ----------", 1
-    )[0]
+    html = (Path(__file__).resolve().parents[2] / "WEB" / "index.html").read_text(encoding="utf-8")
+    render_best = html.split("function renderBest(){", 1)[1].split("// ---------- model view ----------", 1)[0]
 
     assert ".slice(" not in render_best
     assert "x.m.prediction?.opportunity_eligible===true" in render_best
     assert "decisionConfidence(x.m)>=probMin && x.rel>=relMin" in render_best
+    assert 'Math.max(0.65, parseFloat($("bestProb")' in render_best
+    assert "upsets sufridos" in render_best
+    assert "como favorito modelo ≥51%" in render_best
+
+    assert '<option value="0.65">Prob. ganar ≥ 65% (mínimo)</option>' in html
+    assert "decisionConfidence(m)>=.65&&reliability(m)>=.45" in html
+    assert "prediction_ledger prepartido congelado" in html
+    assert "perdio como favorito de mercado" not in html

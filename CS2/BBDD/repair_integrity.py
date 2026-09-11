@@ -671,8 +671,18 @@ def provisional_match_ids(conn: sqlite3.Connection) -> list[int]:
     ]
 
 
-def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> int:
-    for match_id in match_ids:
+def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> dict[str, Any]:
+    """Delete disposable normalized matches, but never ledger evidence or its match."""
+
+    purged = 0
+    protected_match_ids: list[int] = []
+    for match_id in dict.fromkeys(match_ids):
+        if conn.execute(
+            "SELECT 1 FROM prediction_ledger WHERE match_id=? LIMIT 1",
+            (match_id,),
+        ).fetchone():
+            protected_match_ids.append(match_id)
+            continue
         map_ids = [
             int(row[0])
             for row in conn.execute(
@@ -702,7 +712,6 @@ def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> int:
                 (snapshot_id,),
             )
         for table, column in (
-            ("prediction_ledger", "match_id"),
             ("predictions", "match_id"),
             ("odds", "match_id"),
             ("prematch_lineup_snapshots", "match_id"),
@@ -717,16 +726,21 @@ def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> int:
                 f'DELETE FROM "{table}" WHERE "{column}"=?',
                 (match_id,),
             )
-        conn.execute("DELETE FROM matches WHERE match_id=?", (match_id,))
-    return len(match_ids)
+        deleted = conn.execute("DELETE FROM matches WHERE match_id=?", (match_id,))
+        purged += max(int(deleted.rowcount), 0)
+    return {
+        "purged": purged,
+        "protected_skipped": len(protected_match_ids),
+        "protected_match_ids": protected_match_ids,
+    }
 
 
-def purge_unconfirmed_live_matches(conn: sqlite3.Connection) -> int:
+def purge_unconfirmed_live_matches(conn: sqlite3.Connection) -> dict[str, Any]:
     """Remove unresolved normalized rows while preserving raw recovery evidence."""
     return _purge_match_ids(conn, unconfirmed_live_match_ids(conn))
 
 
-def purge_provisional_matches(conn: sqlite3.Connection) -> int:
+def purge_provisional_matches(conn: sqlite3.Connection) -> dict[str, Any]:
     """Remove any legacy match that still contains a bracket placeholder."""
     return _purge_match_ids(conn, provisional_match_ids(conn))
 
@@ -762,8 +776,24 @@ def run_repair(
         report.update(merge_unambiguous_team_identities(conn))
         report.update(backfill_historical_match_ids(conn, raw_path, master_path))
         report.update(repair_prediction_references(conn))
-        report["provisional_matches_purged"] = purge_provisional_matches(conn)
-        report["unconfirmed_live_matches_purged"] = purge_unconfirmed_live_matches(conn)
+        provisional_purge = purge_provisional_matches(conn)
+        unconfirmed_purge = purge_unconfirmed_live_matches(conn)
+        report["provisional_matches_purged"] = provisional_purge["purged"]
+        report["provisional_matches_protected_skipped"] = provisional_purge[
+            "protected_skipped"
+        ]
+        report["unconfirmed_live_matches_purged"] = unconfirmed_purge["purged"]
+        report["unconfirmed_live_matches_protected_skipped"] = unconfirmed_purge[
+            "protected_skipped"
+        ]
+        protected_match_ids = sorted(
+            set(provisional_purge["protected_match_ids"])
+            | set(unconfirmed_purge["protected_match_ids"])
+        )
+        report["prediction_ledger_protected_matches_skipped"] = len(
+            protected_match_ids
+        )
+        report["prediction_ledger_protected_match_ids"] = protected_match_ids
         report["provisional_teams_deleted"] = delete_unreferenced_provisional_teams(conn)
         foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_key_errors:

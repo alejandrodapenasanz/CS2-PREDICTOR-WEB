@@ -59,10 +59,7 @@ def _window_comparison(values: list[float], cfg: DriftConfig) -> dict[str, Any]:
     reference = values[max(0, reference_end - cfg.reference_window) : reference_end]
     current_mean = _mean(current)
     reference_mean = _mean(reference)
-    ratio = (
-        current_mean / reference_mean
-        if current_mean is not None and reference_mean not in (None, 0.0) else None
-    )
+    ratio = current_mean / reference_mean if current_mean is not None and reference_mean not in (None, 0.0) else None
     return {
         "available": True,
         "n": len(values),
@@ -81,10 +78,7 @@ def _regime_summary(records: list[dict[str, Any]], field: str) -> dict[str, Any]
         if value in (None, "", "unknown"):
             continue
         groups.setdefault(str(value), []).append(float(record["log_loss"]))
-    return {
-        key: {"n": len(values), "mean_log_loss": _mean(values)}
-        for key, values in sorted(groups.items())
-    }
+    return {key: {"n": len(values), "mean_log_loss": _mean(values)} for key, values in sorted(groups.items())}
 
 
 def build_drift_report(

@@ -1,0 +1,348 @@
+{
+  "generated_at_utc": "2026-08-26T16:11:27Z",
+  "production_reference_accuracy_long_walk_forward": {
+    "accuracy": 0.644,
+    "correct": 5097,
+    "n": 7914,
+    "role": "product reference only; promotion is decided on common holdout"
+  },
+  "live": {
+    "version": "20260810_064827Z",
+    "date_max": "2026-08-10",
+    "architecture": "model_a_no_odds"
+  },
+  "warmup": {
+    "raw_rows_preserved": 10414,
+    "features_built_before_filtering": true,
+    "state_reconstructions": 1
+  },
+  "enhanced_info": {
+    "total_rows": 10414,
+    "enhanced_rows": 1061,
+    "enhanced_fraction": 0.10188208181294411,
+    "source_counts": {
+      "opening_odds": 719,
+      "player_snapshots": 684,
+      "rankings": 758,
+      "analytics": 840,
+      "context": 986,
+      "announced_lineup": 737
+    }
+  },
+  "recency_weighting": {
+    "half_life_days": 365.0,
+    "formula": "max(1e-3, 0.5 ** (age_days / half_life_days))"
+  },
+  "common_holdout": {
+    "n": 324,
+    "date_min": "2026-08-11",
+    "date_max": "2026-08-26"
+  },
+  "variants": {
+    "all": {
+      "fit_rows": 10090,
+      "holdout": {
+        "n": 324,
+        "accuracy": 0.6234567901234568,
+        "log_loss": 0.6487023562339492,
+        "brier": 0.2288065231207833,
+        "ece_10": 0.05287339044051898,
+        "roc_auc": 0.6676828106542697
+      },
+      "gate": {
+        "status": "reject",
+        "promote": false,
+        "n": 324,
+        "cutoff": "2026-08-10",
+        "min_samples": 100,
+        "log_loss_epsilon": 0.001,
+        "brier_epsilon": 0.0005,
+        "incumbent": {
+          "log_loss": 0.6489686516506527,
+          "brier": 0.2289515074514827
+        },
+        "challenger": {
+          "log_loss": 0.6487023562339492,
+          "brier": 0.2288065231207833
+        },
+        "delta_log_loss": -0.0002662954167034215,
+        "delta_brier": -0.0001449843306993992,
+        "reason": "brier_tiebreak_not_improved",
+        "holdout_sha256": "c93e6bddfeac5270b34b512b4ecfa78f913e6133b095a46b1ac29db3c75b5830",
+        "prediction_sha256": "c453901b8b31fe4d81d3b6392340fca7a5754e7e881003d327b86ca20e2f776d",
+        "message": "PROMOTION REJECT: n=324 cutoff=>2026-08-10 log_loss incumbent=0.648969 challenger=0.648702 delta=-0.000266; brier incumbent=0.228952 challenger=0.228807 delta=-0.000145; reason=brier_tiebreak_not_improved",
+        "cohort": {
+          "n": 324,
+          "date_min": "2026-08-11",
+          "date_max": "2026-08-26",
+          "regime_counts": {
+            "no_odds": 105,
+            "odds": 219
+          },
+          "odds_fraction": 0.6759259259259259,
+          "no_odds_fraction": 0.32407407407407407
+        },
+        "by_regime": {
+          "odds": {
+            "n": 219,
+            "incumbent": {
+              "n": 219,
+              "accuracy": 0.6073059360730594,
+              "log_loss": 0.6515979092162768,
+              "brier": 0.23056791202221327,
+              "ece_10": 0.04798158097274352,
+              "roc_auc": 0.6564898231564898
+            },
+            "challenger": {
+              "n": 219,
+              "accuracy": 0.6118721461187214,
+              "log_loss": 0.6524049476561514,
+              "brier": 0.23086315794040715,
+              "ece_10": 0.07126235034503553,
+              "roc_auc": 0.6551551551551551
+            }
+          },
+          "no_odds": {
+            "n": 105,
+            "incumbent": {
+              "n": 105,
+              "accuracy": 0.6476190476190476,
+              "log_loss": 0.6434847715852079,
+              "brier": 0.22558014934681614,
+              "ece_10": 0.06164811146678068,
+              "roc_auc": 0.6865021770682148
+            },
+            "challenger": {
+              "n": 105,
+              "accuracy": 0.6476190476190476,
+              "log_loss": 0.6409798084104987,
+              "brier": 0.22451697049699634,
+              "ece_10": 0.06209700793792137,
+              "roc_auc": 0.6926705370101597
+            }
+          }
+        }
+      }
+    },
+    "only_enhanced": {
+      "fit_rows": 737,
+      "holdout": {
+        "n": 324,
+        "accuracy": 0.6080246913580247,
+        "log_loss": 0.667427582668606,
+        "brier": 0.2367028297500947,
+        "ece_10": 0.10231252287018243,
+        "roc_auc": 0.6625385817170293
+      },
+      "gate": {
+        "status": "reject",
+        "promote": false,
+        "n": 324,
+        "cutoff": "2026-08-10",
+        "min_samples": 100,
+        "log_loss_epsilon": 0.001,
+        "brier_epsilon": 0.0005,
+        "incumbent": {
+          "log_loss": 0.6489686516506527,
+          "brier": 0.2289515074514827
+        },
+        "challenger": {
+          "log_loss": 0.667427582668606,
+          "brier": 0.2367028297500947
+        },
+        "delta_log_loss": 0.018458931017953373,
+        "delta_brier": 0.007751322298612001,
+        "reason": "log_loss_regressed",
+        "holdout_sha256": "c93e6bddfeac5270b34b512b4ecfa78f913e6133b095a46b1ac29db3c75b5830",
+        "prediction_sha256": "3022b2b3b848438e9a76182b1a1e92aca8992238ea7af975e692f3f89c678176",
+        "message": "PROMOTION REJECT: n=324 cutoff=>2026-08-10 log_loss incumbent=0.648969 challenger=0.667428 delta=+0.018459; brier incumbent=0.228952 challenger=0.236703 delta=+0.007751; reason=log_loss_regressed",
+        "cohort": {
+          "n": 324,
+          "date_min": "2026-08-11",
+          "date_max": "2026-08-26",
+          "regime_counts": {
+            "no_odds": 105,
+            "odds": 219
+          },
+          "odds_fraction": 0.6759259259259259,
+          "no_odds_fraction": 0.32407407407407407
+        },
+        "by_regime": {
+          "odds": {
+            "n": 219,
+            "incumbent": {
+              "n": 219,
+              "accuracy": 0.6073059360730594,
+              "log_loss": 0.6515979092162768,
+              "brier": 0.23056791202221327,
+              "ece_10": 0.04798158097274352,
+              "roc_auc": 0.6564898231564898
+            },
+            "challenger": {
+              "n": 219,
+              "accuracy": 0.5981735159817352,
+              "log_loss": 0.6701605744215663,
+              "brier": 0.2389594692936818,
+              "ece_10": 0.10734838458795613,
+              "roc_auc": 0.6529863196529864
+            }
+          },
+          "no_odds": {
+            "n": 105,
+            "incumbent": {
+              "n": 105,
+              "accuracy": 0.6476190476190476,
+              "log_loss": 0.6434847715852079,
+              "brier": 0.22558014934681614,
+              "ece_10": 0.06164811146678068,
+              "roc_auc": 0.6865021770682148
+            },
+            "challenger": {
+              "n": 105,
+              "accuracy": 0.6285714285714286,
+              "log_loss": 0.6617273427267176,
+              "brier": 0.2319961244163274,
+              "ece_10": 0.1069379336364574,
+              "roc_auc": 0.6792452830188679
+            }
+          }
+        }
+      }
+    },
+    "recency_weighted": {
+      "fit_rows": 10090,
+      "holdout": {
+        "n": 324,
+        "accuracy": 0.6172839506172839,
+        "log_loss": 0.6480040864855676,
+        "brier": 0.22847381743302886,
+        "ece_10": 0.042043827518351534,
+        "roc_auc": 0.6682543916472964
+      },
+      "gate": {
+        "status": "reject",
+        "promote": false,
+        "n": 324,
+        "cutoff": "2026-08-10",
+        "min_samples": 100,
+        "log_loss_epsilon": 0.001,
+        "brier_epsilon": 0.0005,
+        "incumbent": {
+          "log_loss": 0.6489686516506527,
+          "brier": 0.2289515074514827
+        },
+        "challenger": {
+          "log_loss": 0.6480040864855676,
+          "brier": 0.22847381743302886
+        },
+        "delta_log_loss": -0.0009645651650850295,
+        "delta_brier": -0.0004776900184538524,
+        "reason": "brier_tiebreak_not_improved",
+        "holdout_sha256": "c93e6bddfeac5270b34b512b4ecfa78f913e6133b095a46b1ac29db3c75b5830",
+        "prediction_sha256": "60add0f51660e2e15fa60c6c483185816dbb75dad44815215abda3bd2aa9494b",
+        "message": "PROMOTION REJECT: n=324 cutoff=>2026-08-10 log_loss incumbent=0.648969 challenger=0.648004 delta=-0.000965; brier incumbent=0.228952 challenger=0.228474 delta=-0.000478; reason=brier_tiebreak_not_improved",
+        "cohort": {
+          "n": 324,
+          "date_min": "2026-08-11",
+          "date_max": "2026-08-26",
+          "regime_counts": {
+            "no_odds": 105,
+            "odds": 219
+          },
+          "odds_fraction": 0.6759259259259259,
+          "no_odds_fraction": 0.32407407407407407
+        },
+        "by_regime": {
+          "odds": {
+            "n": 219,
+            "incumbent": {
+              "n": 219,
+              "accuracy": 0.6073059360730594,
+              "log_loss": 0.6515979092162768,
+              "brier": 0.23056791202221327,
+              "ece_10": 0.04798158097274352,
+              "roc_auc": 0.6564898231564898
+            },
+            "challenger": {
+              "n": 219,
+              "accuracy": 0.6027397260273972,
+              "log_loss": 0.650973399178603,
+              "brier": 0.23022181600118086,
+              "ece_10": 0.06430418163010035,
+              "roc_auc": 0.6569903236569903
+            }
+          },
+          "no_odds": {
+            "n": 105,
+            "incumbent": {
+              "n": 105,
+              "accuracy": 0.6476190476190476,
+              "log_loss": 0.6434847715852079,
+              "brier": 0.22558014934681614,
+              "ece_10": 0.06164811146678068,
+              "roc_auc": 0.6865021770682148
+            },
+            "challenger": {
+              "n": 105,
+              "accuracy": 0.6476190476190476,
+              "log_loss": 0.6418109485829512,
+              "brier": 0.22482799184802613,
+              "ece_10": 0.05094342858475982,
+              "roc_auc": 0.6897677793904209
+            }
+          }
+        }
+      }
+    }
+  },
+  "winner": "recency_weighted",
+  "winner_beats_live_gate": false,
+  "bias": {
+    "tier": {
+      "unknown": {
+        "n": 10414,
+        "enhanced_n": 1061,
+        "enhanced_fraction": 0.10188208181294411
+      }
+    },
+    "environment": {
+      "lan": {
+        "n": 259,
+        "enhanced_n": 258,
+        "enhanced_fraction": 0.9961389961389961
+      },
+      "online": {
+        "n": 728,
+        "enhanced_n": 728,
+        "enhanced_fraction": 1.0
+      },
+      "unknown": {
+        "n": 9427,
+        "enhanced_n": 75,
+        "enhanced_fraction": 0.00795587143311764
+      }
+    },
+    "recency": {
+      "0_90d": {
+        "n": 1779,
+        "enhanced_n": 1061,
+        "enhanced_fraction": 0.5964024732996065
+      },
+      "91_365d": {
+        "n": 8635,
+        "enhanced_n": 0,
+        "enhanced_fraction": 0.0
+      }
+    },
+    "warnings": [
+      "enhanced_available is uneven by environment (max-min=99.2%)",
+      "enhanced_available is uneven by recency (max-min=59.6%)"
+    ],
+    "interpretation": "only_enhanced may specialize toward covered tiers, LAN/online regimes or recent seasons; its hold-out score must therefore be measured on all matches, not only covered matches."
+  },
+  "promotion": {
+    "requested": true,
+    "performed": false,
+    "message": "winner rejected; live and last_good unchanged"
+  }
+}

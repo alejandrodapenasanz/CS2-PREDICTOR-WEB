@@ -1,6 +1,6 @@
-from abc import ABC, abstractmethod
 import json
 import os
+from abc import ABC, abstractmethod
 
 
 class DataLoader(ABC):
@@ -14,7 +14,7 @@ class JsonDataLoader(DataLoader):
         try:
             if not os.path.exists(file):
                 return {}
-                
+
             with open(file, "r") as json_file:
                 return json.load(json_file)
         except Exception as e:

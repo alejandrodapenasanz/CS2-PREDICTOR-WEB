@@ -22,7 +22,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]          # .../CS2
+ROOT = Path(__file__).resolve().parents[1]  # .../CS2
 sys.path.insert(0, str(ROOT / "BBDD"))
 sys.path.insert(0, str(ROOT / "MODEL"))
 
@@ -39,7 +39,9 @@ def _make_synthetic_db(db_path: Path) -> None:
         conn.execute("INSERT INTO teams(team_id,name,country,hltv_id) VALUES (1,'Alpha','SE',101),(2,'Beta','DK',102)")
         conn.execute("INSERT INTO players(player_id,nick,hltv_id) VALUES (1,'p1',201),(2,'p2',202)")
         conn.execute("INSERT INTO events(event_id,name,hltv_event_id,is_lan,tier) VALUES (1,'Major 2025','E1',1,'S')")
-        conn.execute("INSERT INTO team_rosters(roster_id,team_id,player_id,valid_from) VALUES (1,1,1,'2025-01-01'),(2,2,2,'2025-01-01')")
+        conn.execute(
+            "INSERT INTO team_rosters(roster_id,team_id,player_id,valid_from) VALUES (1,1,1,'2025-01-01'),(2,2,2,'2025-01-01')"
+        )
         conn.execute(
             "INSERT INTO matches(match_id,hltv_match_id,event_id,datetime_utc,team1_id,team2_id,"
             "best_of,status,data_tier,winner_team_id,score_t1,score_t2) "
@@ -49,7 +51,16 @@ def _make_synthetic_db(db_path: Path) -> None:
             "INSERT INTO maps(map_id,match_id,map_number,map_name,winner_team_id,rounds_t1,rounds_t2) "
             "VALUES (1,1,1,'Mirage',1,13,7),(2,1,2,'Inferno',2,10,13),(3,1,3,'Nuke',1,13,11)"
         )
-        conn.execute("INSERT INTO veto(veto_id,match_id,step_order,team_id,action,map_name) VALUES (1,1,1,1,'ban','Anubis')")
+        conn.execute(
+            "INSERT INTO veto(veto_id,match_id,step_order,team_id,action,map_name) VALUES (1,1,1,1,'ban','Anubis')"
+        )
+        conn.execute(
+            "INSERT INTO map_round_sources(round_source_id,map_id,source_file,source_url,sha256,"
+            "captured_at_utc,played_at_utc,round_format,map_name,team_left_hltv_id,team_right_hltv_id,parser_version) "
+            "VALUES(1,1,'fixture.html.gz','https://www.hltv.org/stats/matches/mapstatsid/1/a-b',"
+            "'fixture-sha','2025-06-01T12:00:00Z','2025-06-01T10:00:00Z','mr12','Mirage','101','102',1)"
+        )
+        conn.execute("INSERT INTO map_rounds VALUES(1,1,1,1,0,1,'101','ct','ct_win.svg')")
         conn.execute("INSERT INTO match_lineups(match_id,team_id,player_id,is_standin) VALUES (1,1,1,0),(1,2,2,0)")
         conn.execute(
             "INSERT INTO map_player_stats(map_id,player_id,team_id,kills,deaths,adr,kast,rating) "
@@ -62,6 +73,15 @@ def _make_synthetic_db(db_path: Path) -> None:
         conn.execute(
             "INSERT INTO predictions(prediction_id,match_id,hltv_match_id,model_version,predicted_at_utc,prob_team1) "
             "VALUES (1,1,'1000001','m@2025',' 2025-05-31T00:00:00Z',0.6)"
+        )
+        conn.execute(
+            "INSERT INTO prediction_ledger(ledger_id,match_id,hltv_match_id,team1_id,team2_id,"
+            "kickoff_utc,predicted_at_utc,model_version,prob_team1,prediction_regime,"
+            "prediction_json,ledger_status,result_filled_at_utc,actual_team1_win,"
+            "prediction_correct,realized_log_loss,realized_brier,created_at_utc,updated_at_utc) "
+            "VALUES (1,1,'1000001',1,2,'2025-06-01T10:00:00Z','2025-05-31T00:00:00Z',"
+            "'m@2025',0.6,'odds','{}','evaluated','2025-06-01T12:00:00Z',1,1,"
+            "0.5108256237659907,0.16,'2025-05-31T00:00:00Z','2025-06-01T12:00:00Z')"
         )
         conn.execute(
             "INSERT INTO raw_snapshots(raw_snapshot_id,kind,run_id,source_file,payload_json) "
@@ -130,6 +150,7 @@ class BlackboxDisasterTests(unittest.TestCase):
         after = {t: _table_hash(self.db, t) for t in bb.SOURCE_OF_TRUTH_TABLES}
         for t in bb.SOURCE_OF_TRUTH_TABLES:
             self.assertEqual(before[t], after[t], f"la tabla fuente '{t}' difiere tras restaurar")
+        self.assertEqual(_count(self.db, "prediction_ledger"), 1)
 
         # 6) la tabla DERIVADA no se guardo y queda vacia.
         self.assertGreater(_count(aside, "ratings_history"), 0, "el original tenia una fila derivada")
@@ -160,6 +181,7 @@ class BlackboxDisasterTests(unittest.TestCase):
         """
         try:
             from cs2model import dataio  # noqa: E402
+
             return len(dataio.load_training_rows_from_db(db_path))
         except ImportError:
             conn = sqlite3.connect(db_path)

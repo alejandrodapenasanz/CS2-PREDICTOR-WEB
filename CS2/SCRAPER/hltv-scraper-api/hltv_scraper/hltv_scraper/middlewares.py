@@ -3,18 +3,16 @@
 # See documentation in:
 # https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+import json
 import os
 import random
 import time
-import json
 from pathlib import Path
 
+# useful for handling different item types with a single interface
+from itemadapter import ItemAdapter, is_item
 from scrapy import signals
 from scrapy.downloadermiddlewares.retry import get_retry_request
-
-# useful for handling different item types with a single interface
-from itemadapter import is_item, ItemAdapter
-
 
 # ===========================================================================
 # Anti-bloqueo (PROJECT.md §4.5.2): rotación de User-Agent realista, backoff
@@ -38,9 +36,7 @@ class RotateUserAgentMiddleware:
         request.headers["User-Agent"] = random.choice(DESKTOP_USER_AGENTS)
         # Cabeceras de navegador habituales (ayudan con Cloudflare).
         request.headers.setdefault("Accept-Language", "en-US,en;q=0.9")
-        request.headers.setdefault(
-            "Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        )
+        request.headers.setdefault("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
         return None
 
 
@@ -99,9 +95,9 @@ class BackoffRetryMiddleware:
                 try:
                     delay = float(retry_after)
                 except (TypeError, ValueError):
-                    delay = self.base_delay * (2 ** attempt)
+                    delay = self.base_delay * (2**attempt)
             else:
-                delay = self.base_delay * (2 ** attempt)
+                delay = self.base_delay * (2**attempt)
             delay = min(delay, self.max_delay) + random.uniform(0, 1.5)
             spider.logger.warning(
                 f"[backoff] {response.status} en {request.url} -> espera {delay:.1f}s (intento {attempt})"
@@ -109,7 +105,9 @@ class BackoffRetryMiddleware:
             time.sleep(delay)  # simple y suficiente a bajo volumen
             new = get_retry_request(
                 request.replace(meta={**request.meta, "block_retry": attempt}),
-                spider=spider, reason=f"http_{response.status}", max_retry_times=self.max_retries,
+                spider=spider,
+                reason=f"http_{response.status}",
+                max_retry_times=self.max_retries,
             )
             return new or response
         return response

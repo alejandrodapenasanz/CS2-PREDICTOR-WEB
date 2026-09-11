@@ -21,6 +21,7 @@ from .identifiers import (
     required_text,
 )
 from .types import OperationsValidationError
+from ..temporal import DEFAULT_SOURCE_DATE_POLICY
 
 
 PREDICTION_REQUIRED_COLUMNS = frozenset(
@@ -38,6 +39,8 @@ PREDICTION_REQUIRED_COLUMNS = frozenset(
         "model_probability_b",
         "prediction_status",
         "model_fingerprint",
+        "model_training_max_date",
+        "model_training_available_max_date",
     }
 )
 
@@ -89,11 +92,14 @@ class PredictionValidity:
     match_date: str
     prediction_as_of_utc: str | None
     source_retrieved_at_utc: str | None
+    scheduled_start_utc: str | None
     player_a_slug: str | None
     player_b_slug: str | None
     model_probability_raw_a: float | None
     model_probability_a: float | None
     model_probability_b: float | None
+    model_training_max_date: str | None
+    model_training_available_max_date: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,10 +204,13 @@ def _prediction_failure_reasons(
     match_date: str,
     prediction_as_of_utc: str | None,
     source_retrieved_at_utc: str | None,
+    scheduled_start_utc: str | None,
     player_a_slug: str | None,
     player_b_slug: str | None,
     probability_a: float | None,
     probability_b: float | None,
+    model_training_max_date: str | None,
+    model_training_available_max_date: str | None,
 ) -> tuple[str, ...]:
     """Enumera razones que excluyen una fila de la selección oficial."""
 
@@ -235,6 +244,8 @@ def _prediction_failure_reasons(
         reasons.append("prediction_timestamp_missing")
     if source_retrieved_at_utc is None:
         reasons.append("source_timestamp_missing")
+    if scheduled_start_utc is None:
+        reasons.append("scheduled_start_utc_missing")
     if (
         prediction_as_of_utc is not None
         and source_retrieved_at_utc is not None
@@ -242,18 +253,47 @@ def _prediction_failure_reasons(
         < pd.Timestamp(prediction_as_of_utc)
     ):
         reasons.append("source_not_strictly_before_prediction")
-    training_date_value = optional_scalar(
-        row.get("model_training_max_date")
-    )
-    if training_date_value is not None:
-        training_date = canonical_date(
-            training_date_value,
-            "model_training_max_date",
+    match_day = date.fromisoformat(match_date)
+    if (
+        scheduled_start_utc is not None
+        and pd.Timestamp(scheduled_start_utc).date() != match_day
+    ):
+        reasons.append("scheduled_start_date_conflict")
+    if (
+        prediction_as_of_utc is not None
+        and scheduled_start_utc is not None
+        and not pd.Timestamp(prediction_as_of_utc)
+        < pd.Timestamp(scheduled_start_utc)
+    ):
+        reasons.append("prediction_not_strictly_before_scheduled_start")
+    if (
+        prediction_as_of_utc is not None
+        and pd.Timestamp(prediction_as_of_utc).date() > match_day
+    ):
+        reasons.append("prediction_created_after_match_date")
+    if (
+        source_retrieved_at_utc is not None
+        and pd.Timestamp(source_retrieved_at_utc).date() > match_day
+    ):
+        reasons.append("source_captured_after_match_date")
+    if model_training_max_date is None:
+        reasons.append("model_training_max_date_missing")
+    if model_training_available_max_date is None:
+        reasons.append("model_training_available_max_date_missing")
+    else:
+        available_day = date.fromisoformat(
+            model_training_available_max_date
         )
-        if not date.fromisoformat(training_date) < date.fromisoformat(
-            match_date
+        if not available_day < match_day:
+            reasons.append("model_results_not_available_before_match")
+        if (
+            model_training_max_date is not None
+            and DEFAULT_SOURCE_DATE_POLICY.availability_date(
+                date.fromisoformat(model_training_max_date)
+            )
+            != available_day
         ):
-            reasons.append("model_not_strictly_before_match")
+            reasons.append("model_training_dates_inconsistent")
     return tuple(reasons)
 
 
@@ -279,6 +319,11 @@ def validate_prediction_row(
         "source_retrieved_at_utc",
         required=False,
     )
+    scheduled_start = canonical_utc_datetime(
+        row.get("scheduled_start_utc"),
+        "scheduled_start_utc",
+        required=False,
+    )
     slug_a = canonical_slug(row.get("player_a_slug"), "player_a_slug")
     slug_b = canonical_slug(row.get("player_b_slug"), "player_b_slug")
     raw_probability = optional_float(
@@ -296,15 +341,42 @@ def validate_prediction_row(
         "model_probability_b",
         probability=True,
     )
+    training_date_value = optional_scalar(
+        row.get("model_training_max_date")
+    )
+    model_training_max_date = (
+        canonical_date(
+            training_date_value,
+            "model_training_max_date",
+        )
+        if training_date_value is not None
+        else None
+    )
+    available_date_value = optional_scalar(
+        row.get("model_training_available_max_date")
+    )
+    model_training_available_max_date = (
+        canonical_date(
+            available_date_value,
+            "model_training_available_max_date",
+        )
+        if available_date_value is not None
+        else None
+    )
     reasons = _prediction_failure_reasons(
         row,
         match_date=match_date,
         prediction_as_of_utc=prediction_as_of,
         source_retrieved_at_utc=source_retrieved,
+        scheduled_start_utc=scheduled_start,
         player_a_slug=slug_a,
         player_b_slug=slug_b,
         probability_a=probability_a,
         probability_b=probability_b,
+        model_training_max_date=model_training_max_date,
+        model_training_available_max_date=(
+            model_training_available_max_date
+        ),
     )
     return PredictionValidity(
         is_valid=not reasons,
@@ -312,11 +384,16 @@ def validate_prediction_row(
         match_date=match_date,
         prediction_as_of_utc=prediction_as_of,
         source_retrieved_at_utc=source_retrieved,
+        scheduled_start_utc=scheduled_start,
         player_a_slug=slug_a,
         player_b_slug=slug_b,
         model_probability_raw_a=raw_probability,
         model_probability_a=probability_a,
         model_probability_b=probability_b,
+        model_training_max_date=model_training_max_date,
+        model_training_available_max_date=(
+            model_training_available_max_date
+        ),
     )
 
 
@@ -477,4 +554,3 @@ def validate_source_kind(value: object) -> str:
             "source_kind no puede proceder de predicción, label o resultado."
         )
     return source_kind
-

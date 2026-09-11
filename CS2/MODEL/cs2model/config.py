@@ -49,6 +49,48 @@ class HealthGateConfig:
 
 
 @dataclass(frozen=True)
+class PromotionConfig:
+    """Thresholds for causal challenger/incumbent comparison."""
+
+    min_common_holdout_rows: int = 100
+    log_loss_epsilon: float = 0.001
+    brier_epsilon: float = 0.0005
+    auto_retrain_new_labeled: int = 100
+
+
+@dataclass(frozen=True)
+class RetentionConfig:
+    """Conservative retention counts; protected pointers are additional."""
+
+    registry_keep: int = 0
+    pipeline_runs_keep: int = 2
+
+
+@dataclass(frozen=True)
+class SegmentCalibrationConfig:
+    """Descriptive thresholds; these never auto-promote a model."""
+
+    min_backtest_segment_rows: int = 100
+    min_live_segment_rows: int = 100
+    min_live_total_rows_for_decisions: int = 1000
+    reliability_bins: int = 10
+    min_absolute_gap: float = 0.03
+    min_ece: float = 0.04
+
+
+@dataclass(frozen=True)
+class RosterRatingConfig:
+    """Causal, proportional decay for the roster-aware rating challenger."""
+
+    lineup_size: int = 5
+    lookback_days: int = 90
+    core_change_min_replacements: int = 2
+    minimum_credit_fraction: float = 0.20
+    neutral_rating: float = 1500.0
+    maximum_rd: float = 350.0
+
+
+@dataclass(frozen=True)
 class DriftConfig:
     rolling_window: int = 200
     reference_window: int = 500
@@ -77,11 +119,15 @@ class EconomicConfig:
 
 @dataclass(frozen=True)
 class ProjectConfig:
-    version: int = 3
+    version: int = 6
     random_seed: int = 42
     training: TrainingConfig = field(default_factory=TrainingConfig)
     feature_selection: FeatureSelectionConfig = field(default_factory=FeatureSelectionConfig)
     health_gates: HealthGateConfig = field(default_factory=HealthGateConfig)
+    promotion: PromotionConfig = field(default_factory=PromotionConfig)
+    retention: RetentionConfig = field(default_factory=RetentionConfig)
+    segment_calibration: SegmentCalibrationConfig = field(default_factory=SegmentCalibrationConfig)
+    roster_rating: RosterRatingConfig = field(default_factory=RosterRatingConfig)
     feature_thresholds: dict[str, int] = field(default_factory=dict)
     estimators: dict[str, dict[str, Any]] = field(default_factory=dict)
     drift: DriftConfig = field(default_factory=DriftConfig)
@@ -112,27 +158,24 @@ def load_config(path: str | Path | None = None) -> ProjectConfig:
     if not isinstance(raw, dict):
         raise ValueError("Top-level configuration must be a mapping")
     config = ProjectConfig(
-        version=int(raw.get("version", 3)),
+        version=int(raw.get("version", 6)),
         random_seed=int(raw.get("random_seed", 42)),
         training=TrainingConfig(**_mapping(raw.get("training"), "training")),
-        feature_selection=FeatureSelectionConfig(
-            **_mapping(raw.get("feature_selection"), "feature_selection")
-        ),
-        health_gates=HealthGateConfig(
-            **_mapping(raw.get("health_gates"), "health_gates")
-        ),
+        feature_selection=FeatureSelectionConfig(**_mapping(raw.get("feature_selection"), "feature_selection")),
+        health_gates=HealthGateConfig(**_mapping(raw.get("health_gates"), "health_gates")),
+        promotion=PromotionConfig(**_mapping(raw.get("promotion"), "promotion")),
+        retention=RetentionConfig(**_mapping(raw.get("retention"), "retention")),
+        segment_calibration=SegmentCalibrationConfig(**_mapping(raw.get("segment_calibration"), "segment_calibration")),
+        roster_rating=RosterRatingConfig(**_mapping(raw.get("roster_rating"), "roster_rating")),
         feature_thresholds={
-            str(key): int(value)
-            for key, value in _mapping(raw.get("feature_thresholds"), "feature_thresholds").items()
+            str(key): int(value) for key, value in _mapping(raw.get("feature_thresholds"), "feature_thresholds").items()
         },
         estimators={
             str(key): dict(_mapping(value, f"estimators.{key}"))
             for key, value in _mapping(raw.get("estimators"), "estimators").items()
         },
         drift=DriftConfig(**_mapping(raw.get("drift"), "drift")),
-        economic_backtest=EconomicConfig(
-            **_mapping(raw.get("economic_backtest"), "economic_backtest")
-        ),
+        economic_backtest=EconomicConfig(**_mapping(raw.get("economic_backtest"), "economic_backtest")),
     )
     validate_config(config)
     return config
@@ -165,6 +208,37 @@ def validate_config(config: ProjectConfig) -> None:
         raise ValueError("health gate maxima must be >= 0")
     if not 0 < gates.min_recent_coverage_ratio <= 1:
         raise ValueError("health gate coverage ratio must be in (0, 1]")
+    promotion = config.promotion
+    if promotion.min_common_holdout_rows < 20:
+        raise ValueError("promotion.min_common_holdout_rows must be >= 20")
+    if promotion.auto_retrain_new_labeled < promotion.min_common_holdout_rows:
+        raise ValueError("promotion.auto_retrain_new_labeled must be >= min_common_holdout_rows")
+    if promotion.log_loss_epsilon < 0 or promotion.brier_epsilon < 0:
+        raise ValueError("promotion epsilon values must be >= 0")
+    if config.retention.registry_keep < 0:
+        raise ValueError("retention.registry_keep must be >= 0")
+    if config.retention.pipeline_runs_keep < 1:
+        raise ValueError("retention.pipeline_runs_keep must be >= 1")
+    segment = config.segment_calibration
+    if segment.min_backtest_segment_rows < 30 or segment.min_live_segment_rows < 30:
+        raise ValueError("segment calibration minimum group sizes must be >= 30")
+    if segment.min_live_total_rows_for_decisions < segment.min_live_segment_rows:
+        raise ValueError("live decision minimum must be >= live segment minimum")
+    if segment.reliability_bins < 2:
+        raise ValueError("segment calibration reliability_bins must be >= 2")
+    if segment.min_absolute_gap < 0 or segment.min_ece < 0:
+        raise ValueError("segment calibration deviation thresholds must be >= 0")
+    roster_rating = config.roster_rating
+    if roster_rating.lineup_size < 2:
+        raise ValueError("roster_rating.lineup_size must be >= 2")
+    if roster_rating.lookback_days < 1:
+        raise ValueError("roster_rating.lookback_days must be >= 1")
+    if not 1 <= roster_rating.core_change_min_replacements <= roster_rating.lineup_size:
+        raise ValueError("roster_rating.core_change_min_replacements must be within the lineup")
+    if not 0.0 < roster_rating.minimum_credit_fraction < 1.0:
+        raise ValueError("roster_rating.minimum_credit_fraction must be in (0, 1)")
+    if roster_rating.maximum_rd <= 0.0:
+        raise ValueError("roster_rating.maximum_rd must be positive")
     if any(value < 0 for value in config.feature_thresholds.values()):
         raise ValueError("feature thresholds must be >= 0")
     if config.drift.min_samples < 10 or config.drift.rolling_window < config.drift.min_samples:
@@ -188,4 +262,3 @@ def get_runtime_config() -> ProjectConfig:
 def set_runtime_config(config: ProjectConfig) -> None:
     global _RUNTIME_CONFIG
     _RUNTIME_CONFIG = config
-

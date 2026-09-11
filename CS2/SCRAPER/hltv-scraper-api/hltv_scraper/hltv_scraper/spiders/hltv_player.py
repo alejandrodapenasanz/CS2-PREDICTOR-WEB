@@ -1,5 +1,7 @@
-import scrapy
 from typing import Any, Generator
+
+import scrapy
+
 from .parsers import ParsersFactory as PF
 
 
@@ -13,5 +15,5 @@ class HltvPlayerSpider(scrapy.Spider):
 
     def parse(self, response) -> Generator[None, Any, None]:
         profile = response.css("div.playerProfile")
-        data = PF.get_parser('player_profile').parse(profile)
+        data = PF.get_parser("player_profile").parse(profile)
         yield data

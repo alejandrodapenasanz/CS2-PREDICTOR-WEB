@@ -14,7 +14,8 @@ import re
 from typing import Any, Final, Protocol
 
 import requests
-from requests.adapters import HTTPAdapter
+
+from src.responsible_http import ResponsibleHttpClient, build_http_client
 
 
 SCRAPLING_LATEST_RELEASE_URL: Final[str] = (
@@ -25,9 +26,7 @@ GITHUB_API_VERSION: Final[str] = "2022-11-28"
 REQUEST_TIMEOUT: Final[tuple[float, float]] = (10.0, 30.0)
 USER_AGENT: Final[str] = "TENNIS-academic-release-check/1.0"
 
-_STABLE_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^[vV]?([0-9]+(?:\.[0-9]+)+)$"
-)
+_STABLE_VERSION_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[vV]?([0-9]+(?:\.[0-9]+)+)$")
 _ALLOWED_MEDIA_TYPES: Final[frozenset[str]] = frozenset(
     {
         "application/json",
@@ -70,19 +69,17 @@ class ScraplingReleaseCheck:
     def update_available(self) -> bool:
         """Indica si GitHub publica una versión estable posterior al pin."""
 
-        return _version_key(self.latest_version) > _version_key(
-            self.pinned_version
-        )
+        return _version_key(self.latest_version) > _version_key(self.pinned_version)
 
 
-def build_http_session() -> requests.Session:
+def build_http_session() -> ResponsibleHttpClient:
     """Crea una sesión de Requests con reintentos desactivados explícitamente."""
 
-    no_retry_adapter = HTTPAdapter(max_retries=0)
-    session = requests.Session()
-    session.mount("https://", no_retry_adapter)
-    session.mount("http://", no_retry_adapter)
-    return session
+    return build_http_client(
+        default_headers={"User-Agent": USER_AGENT},
+        robots_user_agent=USER_AGENT,
+        request_retry_attempts=1,
+    )
 
 
 def check_latest_scrapling_release(
@@ -116,8 +113,7 @@ def check_latest_scrapling_release(
             )
         except requests.RequestException as exc:
             raise ScraplingReleaseCheckError(
-                "Falló la única petición a la API oficial de GitHub; "
-                "no se reintentó."
+                "Falló la única petición a la API oficial de GitHub; no se reintentó."
             ) from exc
 
         payload = _validated_release_payload(response)
@@ -163,13 +159,10 @@ def _validated_release_payload(response: Any) -> dict[str, Any]:
 
     status_code = getattr(response, "status_code", None)
     if not isinstance(status_code, int) or isinstance(status_code, bool):
-        raise ScraplingReleaseCheckError(
-            "La API de GitHub no devolvió un estado HTTP válido."
-        )
+        raise ScraplingReleaseCheckError("La API de GitHub no devolvió un estado HTTP válido.")
     if status_code != 200:
         raise ScraplingReleaseCheckError(
-            "La API oficial de GitHub respondió con "
-            f"HTTP {status_code}; no se reintentó."
+            f"La API oficial de GitHub respondió con HTTP {status_code}; no se reintentó."
         )
 
     headers_value = getattr(response, "headers", {})
@@ -182,32 +175,23 @@ def _validated_release_payload(response: Any) -> dict[str, Any]:
     media_type = content_type.split(";", 1)[0].strip().lower()
     if media_type not in _ALLOWED_MEDIA_TYPES:
         raise ScraplingReleaseCheckError(
-            "La API de GitHub devolvió un Content-Type inesperado: "
-            f"{content_type!r}."
+            f"La API de GitHub devolvió un Content-Type inesperado: {content_type!r}."
         )
 
     try:
         payload_value = response.json()
     except (TypeError, ValueError) as exc:
-        raise ScraplingReleaseCheckError(
-            "La respuesta de GitHub no contiene JSON válido."
-        ) from exc
+        raise ScraplingReleaseCheckError("La respuesta de GitHub no contiene JSON válido.") from exc
     if not isinstance(payload_value, dict):
-        raise ScraplingReleaseCheckError(
-            "La respuesta de GitHub no es un objeto JSON."
-        )
+        raise ScraplingReleaseCheckError("La respuesta de GitHub no es un objeto JSON.")
     payload = dict(payload_value)
 
     tag_name = payload.get("tag_name")
     release_url = payload.get("html_url")
     if not isinstance(tag_name, str) or not tag_name.strip():
-        raise ScraplingReleaseCheckError(
-            "La release de GitHub no contiene un tag_name textual."
-        )
+        raise ScraplingReleaseCheckError("La release de GitHub no contiene un tag_name textual.")
     if not isinstance(release_url, str) or not release_url.strip():
-        raise ScraplingReleaseCheckError(
-            "La release de GitHub no contiene una html_url textual."
-        )
+        raise ScraplingReleaseCheckError("La release de GitHub no contiene una html_url textual.")
     if payload.get("draft") is not False:
         raise ScraplingReleaseCheckError(
             "La respuesta marcada como latest corresponde a un borrador."
@@ -231,9 +215,7 @@ def _normalise_stable_version(value: str, *, field_name: str) -> str:
         raise ScraplingReleaseCheckError(
             f"{field_name} no es una versión estable numérica: {value!r}."
         )
-    return ".".join(
-        str(int(component)) for component in match.group(1).split(".")
-    )
+    return ".".join(str(int(component)) for component in match.group(1).split("."))
 
 
 def _version_key(value: str) -> tuple[int, ...]:

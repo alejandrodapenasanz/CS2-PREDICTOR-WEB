@@ -1,204 +1,114 @@
 # Informe de la fase 6: features causales
 
-## Resultado reproducible
+> **El informe original queda sustituido por este cierre de fase 9.** El run
+> anterior (`tennis-features-v1`) usaba disponibilidad inmediata por
+> `tourney_date`. Tampoco debe usarse la antigua ruta plana
+> `data/processed/features`.
 
-La construcción completa terminó sobre el snapshot Sackmann verificado:
+## Contrato activo
 
-```text
-source_commit:
-83733587353df8a41f2fd4f516147d5aa83f5a8d
+- Esquema `tennis-features-v2`.
+- Publicación generacional e inmutable en
+  `data/processed/features_active/runs/<fingerprint>/`, con puntero atómico en
+  `data/processed/features_active/manifest.json`.
+- `result_available_date=match_date+21 días`; una fila solo puede alimentar un
+  estado, fold o reentreno cuando `result_available_date < as_of_date`.
+- `RET`, `DEF`, `ABD` y `ABN` se incluyen tras el embargo. `W/O`, `Walkover` y
+  `BYE` se excluyen por no acreditar un partido iniciado.
+- La cuarentena DOB es diagnóstica para inferencia actual y nunca selecciona
+  filas históricas.
+- La orientación A/B usa un hash estable con semilla `42`; `y=1` si gana A y
+  `y=0` si gana B. El rol original ganador/perdedor no es feature.
+- La BBDD operativa no se concatena ni alimenta automáticamente el dataset.
 
-feature_fingerprint:
-c08239fe01d4607f734bfecf33b8e17aae1d4f8194ad5b7ccd2e35b4a2cf1e59
+El detalle de las features, allowlist, ranking, mercado y fórmulas está en
+[`features.md`](features.md).
 
-schema:
-tennis-features-v1
-```
+## Artefacto publicado
 
-Se publicaron dos datasets independientes:
+| Campo | Resultado verificado |
+|---|---|
+| Commit Sackmann | `83733587353df8a41f2fd4f516147d5aa83f5a8d` |
+| Fingerprint v2 | `bfe639b5e0f818f3eb4bc58cae0167d2a95486c3211885719553df5d165b1f93` |
+| Creación UTC | 2026-08-09 13:29:10 |
+| Elo `M` | `elo-m-837d7bd8d6c48ae3f17f3e9c`; fingerprint `837d7bd8d6c48ae3f17f3e9c0beb953d79a4bd0da4c0568f7326261914e14fe9` |
+| Elo `F` | `elo-f-ec4cffd280c630cab1de03b8`; fingerprint `ec4cffd280c630cab1de03b8ed276a16b8a63b823111f1e7b6bfdfcb75bc2072` |
+| Filas `M`; `y=1` | 959.020; 478.892 (0,4993555922) |
+| Filas `F`; `y=1` | 769.835; 385.246 (0,5004267148) |
+| `match_date` `M` / `F` | 1967-12-28–2026-06-01 / 1967-12-25–2026-06-02 |
+| `result_available_date` `M` / `F` | 1968-01-18–2026-06-22 / 1968-01-15–2026-06-23 |
+| Exclusiones `M` | 4.188 por estado; 7 autopartidos |
+| Exclusiones `F` | 11.882 duplicados; 4.639 por estado; 289 por nivel; 12 autopartidos |
+| Conflictos de ranking | 1.650 observaciones en `ranking_conflicts.csv` |
+| Parquet `M` | 158.768.102 bytes; SHA-256 `228eaa15cd555d922ea1504e8910a45dc1a5b49a84b2be8b706181a28929b09b` |
+| Parquet `F` | 125.764.370 bytes; SHA-256 `9d1fe2312f0d7b3fafc42d60cde8c09038c0d8cacfc10ce6533dc18c3c39de66` |
+| Manifiesto inmutable | 35.896 bytes; SHA-256 `ef017c3e0fa5a64ea65cdb74378cba6dfc585f407d63fa5f0ed31a7993fb8538` |
 
-| Género | Filas fuente | Filas entrenamiento | Excluidas | Proporción `y=1` | Rango `tourney_date` | Tamaño (bytes) |
-|---|---:|---:|---:|---:|---|---:|
-| M | 963.215 | 929.149 | 34.066 | 0,499458 | 1967-12-28 a 2026-06-01 | 161.312.442 |
-| F | 786.657 | 751.126 | 35.531 | 0,500449 | 1967-12-25 a 2026-06-02 | 129.569.818 |
+### Distribución nivel × superficie
 
-Las 929.149 y 751.126 identidades `record_id` son únicas dentro de sus
-respectivos Parquet: el número de IDs distintos coincide exactamente con el
-número de filas.
+`—` identifica superficie ausente en la fuente; no se imputa.
 
-## Exclusiones reconciliadas
+| Género | Nivel | Carpet | Clay | Grass | Hard | — |
+|---|---|---:|---:|---:|---:|---:|
+| M | ATP Tour | 19.253 | 63.820 | 15.261 | 75.206 | 1.812 |
+| M | Challenger | 7.858 | 102.194 | 4.399 | 92.918 | 0 |
+| M | Grand Slam | 0 | 10.656 | 12.189 | 16.839 | 0 |
+| M | ITF | 20.382 | 269.880 | 3.678 | 227.475 | 0 |
+| M | Other | 0 | 63 | 0 | 0 | 0 |
+| M | Team | 1.601 | 6.074 | 639 | 5.675 | 1.148 |
+| F | Challenger | 4.268 | 33.035 | 2.313 | 26.939 | 1.111 |
+| F | Grand Slam | 0 | 10.673 | 12.352 | 18.157 | 0 |
+| F | ITF | 16.601 | 222.891 | 6.841 | 226.068 | 0 |
+| F | Other | 0 | 148 | 64 | 456 | 0 |
+| F | Team | 371 | 5.809 | 186 | 5.269 | 603 |
+| F | WTA Tour | 19.720 | 53.996 | 17.680 | 79.959 | 4.325 |
 
-Cada fila fuente se reconcilia como fila de entrenamiento o como una exclusión
-auditada:
+## Evidencia anti-fugas
 
-| Motivo | M | F |
-|---|---:|---:|
-| Estado no jugado/completo (`W/O`, `Walkover`, `BYE`, `RET`, `DEF`, `ABD`, `ABN`) | 34.059 | 23.507 |
-| Duplicado exacto | 0 | 11.724 |
-| Nivel excluido (`E` o `J`) | 0 | 289 |
-| Mismo ID como ganador y perdedor | 7 | 11 |
-| **Total** | **34.066** | **35.531** |
+Las consultas sobre ambos Parquet publicados confirmaron:
 
-Un marcador ausente no se excluye automáticamente: Elo solo requiere ganador y
-perdedor distintos si no existe una marca explícita de partido no válido.
+- `result_available_date-match_date` vale exactamente 21 días en las
+  1.728.855 filas;
+- no existe ninguna `ranking_date_a` ni `ranking_date_b` igual o posterior a
+  `match_date`;
+- las columnas de mercado y sus timestamps tienen cero valores no nulos, pues
+  Sackmann no aporta una observación causal de cuotas;
+- el manifiesto enlaza exactamente los dos runs Elo v5 activos y declara
+  `historical_identity_exclusion=disabled`;
+- ganador, perdedor, `y`, probabilidad de modelo y edge no forman parte de la
+  allowlist del modelo;
+- el hash de orientación no cambia al reordenar filas o añadir partidos futuros;
+  el balance observado es 49,9356 % de `y=1` en `M` y 50,0427 % en `F`;
+- la inferencia es antisimétrica: al intercambiar A/B, las probabilidades cruda
+  y calibrada suman 1 con precisión de 15 decimales.
 
-## Distribución por nivel canónico
+La invariancia de Elo/features ante futuro, el corte estricto de ranking, la
+orientación y el mercado incompleto están cubiertos por tests específicos. El
+resultado automatizado consolidado es `329/329 tests correctos`.
 
-Estas son las categorías exactas escritas en los Parquet:
+## Vector comentado real
 
-| Nivel | M | F |
-|---|---:|---:|
-| `ATP Tour` | 171.710 | 0 |
-| `WTA Tour` | 0 | 172.147 |
-| `Grand Slam` | 38.632 | 40.766 |
-| `Challenger` | 200.829 | 66.576 |
-| `ITF` | 503.130 | 458.881 |
-| `Team` | 14.785 | 12.101 |
-| `Other` | 63 | 655 |
-| **Total** | **929.149** | **751.126** |
+Fila `426e27b4...30e3`: Carlos Alcaraz (`A`, 207989) contra Jannik Sinner
+(`B`, 206173), ATP Tour, final sobre clay, `best_of=3`. La fecha fuente es
+2026-04-05 y el label solo queda disponible el 2026-04-26.
 
-El normalizador se auditó contra las 54 combinaciones reales de familia fuente
-y código crudo del snapshot. Cualquier combinación nueva provoca un error en
-vez de caer en una categoría genérica silenciosa. El inventario completo y sus
-decisiones están en `docs/features.md`.
+| Grupo | Valores as-of antes del partido | Lectura |
+|---|---|---|
+| Elo general | A 2783,42; B 2808,87; diferencia -25,46 | Ventaja general ligera para B |
+| Elo clay combinado | A 2710,65; B 2666,52; diferencia +44,13 | Ventaja de superficie para A |
+| Últimos 10 | A 0,9000; B 0,8667; diferencia +0,0333 | Forma corta favorable a A |
+| Últimos 3 meses | A 0,9412; B 0,8667; diferencia +0,0745 | Forma temporal favorable a A |
+| H2H global | balance A +0,2941 en 17 partidos | Historial global favorable a A |
+| H2H clay | balance A +0,6000 en 5 partidos | Historial de superficie favorable a A |
+| Descanso | 32 / 32 días; diferencia 0 | Sin ventaja observada |
+| Ranking | 1 / 2 a 2026-03-30; diferencia -1 | Snapshot estrictamente anterior |
+| Puntos | 13.590 / 12.400; diferencia +1.190 | Ventaja para A |
+| Edad | 22,9190 / 24,6357; diferencia -1,7167 | A es más joven |
+| Distancia a 30 | 7,0810 / 5,3643; diferencia +1,7167 | B está más cerca de 30 |
+| Mercado | nulo / nulo | No se inventa cuota histórica |
+| Etiqueta | `y=0` | Ganó B; no aparece entre predictors |
 
-## Rankings y cuarentena
+Este ejemplo ilustra una fila causal, no una recomendación de apuesta. La fecha
+fuente sigue siendo aproximada y está protegida por el embargo documentado.
 
-| Género | Filas fuente | Indexadas | Duplicados exactos | Claves conflictivas | Observaciones conflictivas |
-|---|---:|---:|---:|---:|---:|
-| M | 3.420.595 | 3.419.216 | 181 | 599 | 1.198 |
-| F | 2.154.318 | 2.153.811 | 55 | 226 | 452 |
-
-Las 825 claves conflictivas aportan 1.650 observaciones al inventario
-`data/processed/features/ranking_conflicts.csv`. Todas las observaciones de una
-clave `(player_id, ranking_date)` incompatible se ponen en cuarentena. La
-consulta retrocede al último snapshot limpio con `ranking_date < D`; no elige
-una fila arbitraria. El vector registra además la antigüedad del snapshot y el
-número de fechas conflictivas visibles que tuvo que saltar.
-
-El dataset contiene 150.489 lados masculinos y 333.850 lados femeninos sin
-ranking causal disponible. Permanecen nulos y están acompañados por flags de
-ausencia.
-
-Hubo 497 lados masculinos y 188 femeninos cuyo snapshot retrocedió sobre al
-menos una fecha conflictiva. El máximo observado de
-`ranking_conflict_dates_skipped` fue 210 en M y 62 en F; estos contadores
-permiten que la fase de modelado mida o filtre explícitamente esos fallbacks.
-
-La auditoría temporal encontró:
-
-```text
-filas con ranking_date_A >= match_date: 0
-filas con ranking_date_B >= match_date: 0
-```
-
-## Auditoría anti-fugas y de calidad
-
-| Comprobación | M | F | Resultado |
-|---|---:|---:|---|
-| `record_id` distintos | 929.149 | 751.126 | Igual al total de filas |
-| Rankings con fecha `>= D` | 0 | 0 | Correcto |
-| Descansos presentes `<= 0` | 0 | 0 | Correcto |
-| Lados con edad inválida para `D` | 632 | 25 | Degradados a nulo y marcados |
-| Valores no nulos de cuotas/mercado/modelo/edge | 0 | 0 | Correcto: no existen cuotas históricas Sackmann |
-| Discrepancias Elo en 100 filas aleatorias | 0 | 0 | General y combinado iguales a la base activa de fase 3 |
-
-En total hay 19.406 lados masculinos y 58.801 femeninos sin edad utilizable;
-los 632 y 25 casos con nacimiento incompatible con la fecha son un subconjunto
-explícitamente marcado. Se concentran en IDs históricos reutilizados o en
-maestros cuya fecha de nacimiento corresponde a una persona posterior al
-partido; por ejemplo, el ID ATP `103616` aparece en partidos de 1968 pero su
-DOB maestra es de 1980. Los 657 casos quedaron con edad nula y flag de
-invalidez; no se reasignaron IDs ni se corrigieron o imputaron fechas
-biográficas.
-
-La ausencia de cuotas históricas es visible: cuotas, probabilidades implícitas
-brutas, probabilidades de-vigadas, overround, margen, timestamps de mercado,
-probabilidad del modelo y `edge` permanecen nulos. Las fases posteriores solo
-podrán rellenarlos con observaciones recuperadas antes del instante de
-predicción.
-
-La comprobación Elo consultó, para 100 filas aleatorias de cada género, la base
-activa de la fase 3 mediante `get_elos()` con el mismo jugador, superficie y
-corte `D`. Tanto el rating general como el combinado por superficie coincidieron
-en las 200 comparaciones; hubo cero discrepancias.
-
-Una segunda invocación con las mismas fuentes y parámetros devolvió
-`skipped=True`. El constructor verificó el fingerprint, los tamaños y los
-SHA-256 publicados y reutilizó los artefactos sin reconstruirlos.
-
-La ejecución de cierre de la suite completa obtuvo:
-
-```text
-198/198 tests correctos
-```
-
-Las pruebas cubren, entre otros contratos, invariancia al añadir partidos
-posteriores, congelación de todos los partidos de una misma fecha, límites de
-meses naturales, orientación determinista y balanceada, H2H y descanso,
-rankings estrictamente anteriores con conflictos en cuarentena, edad, cuotas y
-timestamps, allowlist, esquema Arrow, fingerprint, idempotencia y CLI.
-
-## Vector comentado: Federer–Nadal, Wimbledon 2008
-
-El ejemplo se leyó directamente de `training_M.parquet`. Corresponde a Roger
-Federer como A (`103819`) y Rafael Nadal como B (`104745`), final de Wimbledon
-codificada con `tourney_date=2008-06-23`.
-
-| Grupo | A: Federer | B: Nadal | A−B / valor orientado |
-|---|---:|---:|---:|
-| Elo general | 2.646,880732 | 2.656,038663 | −9,157931 |
-| Elo puro en hierba | 2.323,332838 | 2.131,693777 | +191,639062 |
-| Elo efectivo 50/50 | 2.485,106785 | 2.393,866220 | +91,240565 |
-| Partidos Elo general | 775 | 462 | +313 |
-| Partidos Elo hierba | 89 | 29 | +60 |
-| Forma últimos N | 0,916667 (12) | 1,000000 (12) | −0,083333 |
-| Forma últimos 3 meses | 0,838710 (31) | 0,942857 (35) | −0,104147 |
-| Descanso | 14 días | 14 días | 0 |
-| Ranking causal | 1 | 2 | −1 |
-| Puntos de ranking | 6.900 | 5.755 | +1.145 |
-| Edad | 26,875295 | 22,056579 | +4,818716 |
-| Distancia a 30 | 3,124705 | 7,943421 | −4,818716 |
-
-Contexto y otras features:
-
-```text
-surface = Grass
-tour_level_raw = G
-tour_level = Grand Slam
-source_family = atp_main
-best_of = 5
-round = F
-
-h2h_global_balance = -0,294118  (17 partidos)
-h2h_surface_balance = 1,000000  (2 partidos en hierba)
-
-ranking_date_A = ranking_date_B = 2008-06-16
-ranking_age_days_A = ranking_age_days_B = 7
-ranking_conflict_dates_skipped_A = 0
-ranking_conflict_dates_skipped_B = 0
-
-odds_A = odds_B = null
-market_probability_A = market_probability_B = null
-model_probability_A = null
-edge = null
-y = 0
-```
-
-El H2H global negativo indica ventaja histórica de B desde la orientación A/B,
-mientras que el H2H de hierba favorecía a A en los dos precedentes disponibles.
-Los contadores de forma reciente son 12, no 10, porque el bloque completo de la
-fecha que cruza el límite se conserva para no inventar un orden intradía.
-
-`y=0` significa que A perdió y B ganó, coherente con la orientación aleatoria
-estable. Ninguna feature contiene ese resultado: todos los estados usados son
-anteriores a `2008-06-23`.
-
-## Limitación temporal conocida
-
-El dato Sackmann de esta final ilustra la principal cautela del dataset:
-`tourney_date=2008-06-23` es el inicio aproximado del torneo, no el 6 de julio,
-fecha real de la final. Las rondas anteriores de Wimbledon comparten el mismo
-corte y no alimentan Elo, forma, H2H ni descanso de la final. Esta decisión
-conservadora evita usar el resultado de una ronda posterior como si precediera
-a otra cuando la fuente no proporciona fechas reales por partido.
+El cierre de modelos y las limitaciones se consolidan en [`audit.md`](audit.md).
