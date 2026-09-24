@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Sequence
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -24,11 +25,11 @@ from cs2model.config import (
 from cs2model.retrain_policy import DEFAULT_NEW_LABELED_THRESHOLD, decide_retrain
 
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_REGISTRY = ROOT / "MODEL" / "artifacts" / "registry"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_REGISTRY = STATE_ROOT / "MODEL" / "artifacts" / "registry"
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"

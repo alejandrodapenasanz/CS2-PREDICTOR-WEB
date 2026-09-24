@@ -22,6 +22,7 @@ import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -31,8 +32,8 @@ from cs2model.features import FEATURE_COLUMNS, PLAYER_FEATURE_COLUMNS, build_tra
 from train import _fit_base, _matrix, _proba
 
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_RESULTS = ROOT / "MODEL" / "results"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_RESULTS = STATE_ROOT / "MODEL" / "results"
 
 
 def metrics(y: np.ndarray, probability: np.ndarray) -> dict[str, float]:
@@ -45,7 +46,9 @@ def metrics(y: np.ndarray, probability: np.ndarray) -> dict[str, float]:
     }
 
 
-def mcnemar_exact_pvalue(base_probability: np.ndarray, player_probability: np.ndarray, y: np.ndarray) -> dict[str, int | float]:
+def mcnemar_exact_pvalue(
+    base_probability: np.ndarray, player_probability: np.ndarray, y: np.ndarray
+) -> dict[str, int | float]:
     base_correct = (base_probability >= 0.5) == y
     player_correct = (player_probability >= 0.5) == y
     player_only = int(np.sum(player_correct & ~base_correct))
@@ -54,7 +57,7 @@ def mcnemar_exact_pvalue(base_probability: np.ndarray, player_probability: np.nd
     if not discordant:
         p_value = 1.0
     else:
-        tail = sum(math.comb(discordant, k) for k in range(min(player_only, base_only) + 1)) / (2 ** discordant)
+        tail = sum(math.comb(discordant, k) for k in range(min(player_only, base_only) + 1)) / (2**discordant)
         p_value = min(1.0, 2.0 * tail)
     return {
         "player_only_correct": player_only,
@@ -92,10 +95,7 @@ def paired_bootstrap(
 def run_ablation(db_path: Path, warmup: int, block_size: int, bootstrap_draws: int) -> dict[str, Any]:
     rows = dataio.load_training_rows_from_db(db_path, cs2_only=True)
     x_dicts, y_values, meta, _state = build_training_frame(rows)
-    eligible = [
-        idx for idx, values in enumerate(x_dicts)
-        if (values.get("player_snapshot_available") or 0.0) >= 0.5
-    ]
+    eligible = [idx for idx, values in enumerate(x_dicts) if (values.get("player_snapshot_available") or 0.0) >= 0.5]
     if len(eligible) <= warmup:
         raise ValueError(f"Solo hay {len(eligible)} partidos aptos; se necesitan mas de {warmup}.")
 

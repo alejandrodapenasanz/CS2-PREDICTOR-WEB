@@ -28,11 +28,13 @@ except ModuleNotFoundError:  # tests de parsers offline pueden correr sin venv d
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 SCRAPER_PROJECT = ROOT / "SCRAPER" / "hltv-scraper-api"
 SCRAPY_ROOT = SCRAPER_PROJECT / "hltv_scraper"
 PYTHON_EXE = Path(sys.executable).resolve()
 COMPARE_SCRIPT = SCRAPER_PROJECT / "scripts" / "collect_player_compare_stats.py"
-CF_SESSION = SCRAPY_ROOT / "cf_session.json"
+SCRAPER_STATE = STATE_ROOT / "SCRAPER" / "hltv-scraper-api"
+CF_SESSION = SCRAPER_STATE / "hltv_scraper" / "cf_session.json"
 
 if str(SCRAPY_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRAPY_ROOT))
@@ -46,13 +48,13 @@ try:
 except Exception:  # pragma: no cover - direct script execution
     from match_context import parse_match_context_meta
 
-DATA_ROOT = ROOT / "PIPELINE"
+DATA_ROOT = STATE_ROOT / "PIPELINE"
 RUNS_DIR = DATA_ROOT / "runs"
 MASTER_DIR = DATA_ROOT / "master"
 MASTER_MATCHES = MASTER_DIR / "matches.json"
 MASTER_MANIFEST = MASTER_DIR / "manifest.json"
 MASTER_ROSTERS = MASTER_DIR / "roster_history.json"
-BBDD_DB = ROOT / "BBDD" / "cs2.db"
+BBDD_DB = STATE_ROOT / "BBDD" / "cs2.db"
 
 BLOCK_HTTP_CODES = {403, 429, 500, 502, 503, 504, 522, 524}
 CHALLENGE_MARKERS = (
@@ -90,17 +92,16 @@ PREMATCH_NEAR_START_WINDOW_HOURS = float(os.environ.get("HLTV_PREMATCH_NEAR_STAR
 CLOSING_ODDS_MAX_AGE_HOURS = float(os.environ.get("HLTV_CLOSING_ODDS_MAX_AGE_HOURS", "6"))
 
 
-# --- Scrapling (curl_cffi TLS impersonation + stealth browser) -------------
-# Tier 1 = HTTP con fingerprint TLS/JA3 real (impersonate); Tier 2 = navegador
-# stealth que resuelve el challenge de Cloudflare y acuña cf_clearance. Ambos
-# son opcionales: si scrapling no esta instalado, el fetch cae a requests/
-# cloudscraper igual que antes. Ver LAST change.md.
+# --- Scrapling HTTP + renovacion visible de sesion ------------------------
+# El challenge abre directamente grab_cf.py; no hay que cerrar antes Stealth.
+# El navegador Stealth antiguo queda opt-in mediante HLTV_SOLVE_CLOUDFLARE=1.
+# Sin Scrapling HTTP, requests/cloudscraper conservan la misma renovacion visible.
 def _env_bool(name: str, default: str) -> bool:
     return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", ""}
 
 
 SCRAPLING_ENABLED = _env_bool("HLTV_USE_SCRAPLING", "1")
-SCRAPLING_STEALTH_ENABLED = _env_bool("HLTV_SOLVE_CLOUDFLARE", "1")
+SCRAPLING_STEALTH_ENABLED = _env_bool("HLTV_SOLVE_CLOUDFLARE", "0")
 SCRAPLING_IMPERSONATE = os.environ.get("HLTV_IMPERSONATE", "chrome").strip() or "chrome"
 SCRAPLING_PROXY = os.environ.get("HLTV_PROXY", "").strip() or None
 SCRAPLING_STEALTH_TIMEOUT_MS = int(os.environ.get("HLTV_STEALTH_TIMEOUT_MS", "90000"))
@@ -112,7 +113,7 @@ CF_REFRESH_TIMEOUT_SECONDS = int(os.environ.get("HLTV_CF_REFRESH_TIMEOUT_SECONDS
 
 # CA bundle para redes con inspeccion TLS (proxy corporativo con CA propia).
 # En un PC sin restricciones no hace falta: certifi funciona por defecto.
-_DEFAULT_CORP_BUNDLE = SCRAPER_PROJECT / "corp_ca_bundle.pem"
+_DEFAULT_CORP_BUNDLE = SCRAPER_STATE / "corp_ca_bundle.pem"
 HLTV_CA_BUNDLE = (
     os.environ.get("HLTV_CA_BUNDLE")
     or os.environ.get("CURL_CA_BUNDLE")
@@ -244,6 +245,17 @@ def db_entity_is_fresh(entity_type: str, entity_key: str, now: str | None = None
             "SELECT next_eligible_at_utc, last_status FROM fetch_state WHERE entity_type=? AND entity_key=?",
             (entity_type, str(entity_key)),
         ).fetchone()
+        # Recover from legacy cache hits that incorrectly renewed last_fetched.
+        # Failed/blocked attempts retain their existing cooldown without bypass.
+        if row and row[1] == "ok" and entity_type in {"ranking_hltv", "ranking_valve"}:
+            actual = conn.execute(
+                "SELECT MAX(captured_at_utc) FROM team_ranking_snapshots "
+                "WHERE ranking_type=? AND hltv_team_id IS NOT NULL AND hltv_team_id <> '' "
+                "AND position > 0 AND captured_at_utc <= ?",
+                (entity_type.removeprefix("ranking_"), now),
+            ).fetchone()
+            conn.close()
+            return bool(actual and actual[0] and db_fetch_next_eligible(entity_type, "ok", str(actual[0])) > now)
         conn.close()
     except sqlite3.DatabaseError:
         return False
@@ -1222,7 +1234,7 @@ def _retry_after_cf_refresh(url: str, timeout: int, interval: float) -> str | No
     return None
 
 
-def _refresh_blocked_stats_or_suppress(
+def _refresh_blocked_url_or_suppress(
     url: str,
     timeout: int,
     interval: float,
@@ -1230,20 +1242,20 @@ def _refresh_blocked_stats_or_suppress(
     source: str,
     reason: str,
 ) -> str:
-    """Renueva la sesión visible una vez y evita esperas de horas en `/stats/`."""
+    """Abre grab_cf una vez; un bloqueo persistente conserva la URL pendiente."""
 
     register_fetch_soft_block(source, url, reason)
     if CF_REFRESH_ENABLED and not _CF_SESSION_REFRESHED_THIS_RUN:
-        log("stats challenge persistente; abriendo navegador visible ahora", force=True)
+        log("HLTV challenge; abriendo comprobacion visible de recuperacion (grab_cf.py)", force=True)
     else:
-        log("stats challenge persistente; la renovacion visible ya se intento o esta desactivada", force=True)
+        log("HLTV challenge; la renovacion visible ya se intento o esta desactivada", force=True)
     if maybe_refresh_cf_session_once(f"{source}_{reason}", url):
         refreshed_html = _retry_after_cf_refresh(url, timeout, interval)
         if refreshed_html is not None:
             return refreshed_html
     quarantine_url(url, f"{source} {reason}; interactive_cf_refresh_unavailable_or_failed")
     raise FetchSuppressedError(
-        "HLTV /stats sigue bloqueado tras la renovacion interactiva; "
+        "HLTV sigue bloqueado tras la renovacion interactiva; "
         "se omite esta URL para que la pipeline pueda continuar."
     )
 
@@ -1256,11 +1268,12 @@ def _scrapling_fetch(
     max_wait: float,
     interval: float,
 ) -> str | None:
-    """Tiers 1 (impersonate) y 2 (stealth solve). Devuelve HTML o None (fall-through).
+    """HTTP Scrapling y renovacion visible directa; Stealth solo si se habilita.
 
     Reutiliza todas las guardas compartidas (presupuesto, cooldown, backoff,
     deteccion de bloqueo, cache). Si no obtiene HTML valido, devuelve None y el
-    fetch principal cae a requests/cloudscraper.
+    fetch principal cae a requests/cloudscraper. Un challenge sin recuperacion
+    se propaga como FetchSuppressedError, sin reabrir ventanas ni repetirlo.
     """
     if not SCRAPLING_ENABLED or _ScraplingFetcher is None:
         return None
@@ -1286,6 +1299,14 @@ def _scrapling_fetch(
                 return text
             if (status in BLOCK_HTTP_CODES) or challenge:
                 reason = "cloudflare_challenge" if challenge else f"HTTP {status}"
+                if not SCRAPLING_STEALTH_ENABLED and status != 429 and (challenge or status == 403):
+                    return _refresh_blocked_url_or_suppress(
+                        url,
+                        timeout,
+                        interval,
+                        source="scrapling",
+                        reason=reason,
+                    )
                 if "/stats/" in url and status != 429 and (challenge or status == 403):
                     register_fetch_soft_block("scrapling", url, reason)
                     if (
@@ -1311,7 +1332,7 @@ def _scrapling_fetch(
                 register_fetch_success("scrapling", url)
                 fetch_cache_put(url, text)
                 return text
-        except FetchBudgetExceeded:
+        except (FetchBudgetExceeded, FetchSuppressedError):
             raise
         except Exception as exc:
             register_fetch_error("scrapling", url, exc)
@@ -1357,7 +1378,7 @@ def _scrapling_fetch(
             stealth_problem = True
         if stealth_problem:
             if "/stats/" in url:
-                return _refresh_blocked_stats_or_suppress(
+                return _refresh_blocked_url_or_suppress(
                     url,
                     timeout,
                     interval,
@@ -1406,8 +1427,8 @@ def fetch_html(
     cookies = {"cf_clearance": cf_payload["cf_clearance"]} if cf_payload.get("cf_clearance") else None
     last_error: Exception | None = None
 
-    # Tiers 1/2: Scrapling (impersonate TLS -> navegador stealth). Si devuelve
-    # None, cae al camino clasico requests -> cloudscraper de mas abajo.
+    # Scrapling HTTP -> comprobacion visible directa (Stealth es opt-in).
+    # Si devuelve None, cae al camino clasico requests -> cloudscraper.
     prefer_requests = bool(cookies) and time.monotonic() < _REQUESTS_PREFERRED_UNTIL
     if prefer_requests:
         log(f"cf_session recently refreshed; trying requests before scrapling: {url}", force=True)
@@ -1415,7 +1436,7 @@ def fetch_html(
         scrapling_html = _scrapling_fetch(url, cookies, timeout, base, max_wait, interval)
         if scrapling_html is not None:
             return scrapling_html
-    # El navegador stealth pudo acuñar una cf_clearance nueva: reutilizala.
+    # Una renovacion de navegador pudo guardar una cf_clearance nueva: reutilizala.
     if not cookies:
         cf_payload = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
         if cf_payload.get("user_agent"):
@@ -1449,8 +1470,12 @@ def fetch_html(
                     source="requests",
                 )
                 reason = "cloudflare_challenge" if challenge else f"HTTP {response.status_code}"
-                if "/stats/" in url and response.status_code != 429 and (challenge or response.status_code == 403):
-                    return _refresh_blocked_stats_or_suppress(
+                if (
+                    (not SCRAPLING_STEALTH_ENABLED or "/stats/" in url)
+                    and response.status_code != 429
+                    and (challenge or response.status_code == 403)
+                ):
+                    return _refresh_blocked_url_or_suppress(
                         url,
                         timeout,
                         interval,
@@ -1524,8 +1549,12 @@ def fetch_html(
                     source="cloudscraper",
                 )
                 reason = "cloudflare_challenge" if challenge else f"HTTP {response.status_code}"
-                if "/stats/" in url and response.status_code != 429 and (challenge or response.status_code == 403):
-                    return _refresh_blocked_stats_or_suppress(
+                if (
+                    (not SCRAPLING_STEALTH_ENABLED or "/stats/" in url)
+                    and response.status_code != 429
+                    and (challenge or response.status_code == 403)
+                ):
+                    return _refresh_blocked_url_or_suppress(
                         url,
                         timeout,
                         interval,
@@ -3892,6 +3921,8 @@ def collect_rankings(run_dir: Path) -> dict[str, Any]:
             html = fetch_html(link)
             raw_html = save_raw_html(run_dir, "ranking", ranking_type, link, html)
             payload = parse_ranking_html(html, ranking_type)
+            if not payload.get("ranking"):
+                raise ValueError(f"Empty {ranking_type} ranking: capture is not a successful refresh")
             payload["raw_html"] = raw_html
             output = output_dir / f"{ranking_type}.json"
             write_json(output, payload)

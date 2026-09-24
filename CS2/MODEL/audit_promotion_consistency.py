@@ -36,9 +36,10 @@ from cs2model.reproducibility import dataset_fingerprint, set_global_determinism
 
 
 CS2_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_REGISTRY = CS2_ROOT / "MODEL" / "artifacts" / "registry"
-DEFAULT_DB = CS2_ROOT / "BBDD" / "cs2.db"
-DEFAULT_OUTPUT = CS2_ROOT / "MODEL" / "results" / "promotion_consistency_audit.json"
+STATE_ROOT = CS2_ROOT.parent / "VAULT" / "CS2"
+DEFAULT_REGISTRY = STATE_ROOT / "MODEL" / "artifacts" / "registry"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_OUTPUT = STATE_ROOT / "MODEL" / "results" / "promotion_consistency_audit.json"
 
 
 def _json(path: Path) -> dict[str, Any]:

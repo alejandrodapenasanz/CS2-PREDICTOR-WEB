@@ -7,6 +7,21 @@ on:
     branches: [main, dev, pre-dev]
 
 jobs:
+  vault-portability:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify file-only migration and public web boundary without private state
+        run: |
+          python scripts/test_vault.py
+          python scripts/test_vault_web.py
+
   model-tests:
     runs-on: ubuntu-latest
     defaults:

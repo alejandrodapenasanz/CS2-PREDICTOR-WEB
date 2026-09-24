@@ -1,12 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["TESTS"]
 pythonpath = ["."]
-cache_dir = "TESTS/.cache/pytest"
+cache_dir = "../VAULT/CS2/TESTS/.cache/pytest"
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-cache-dir = "TESTS/.cache/ruff"
+cache-dir = "../VAULT/CS2/TESTS/.cache/ruff"
 exclude = ["SCRAPER/Scrapling", "**/.venv", "**/site-packages"]
 
 [tool.ruff.lint]
@@ -19,6 +19,9 @@ ignore = ["F401"]
 [tool.mypy]
 python_version = "3.13"
 files = [
+    "MODEL/cs2model/match_rankings.py",
+    "BBDD/ranking_store.py",
+    "PIPELINE/ranking_badges.py",
     "MODEL/cs2model/pistol_opponents.py",
     "BBDD/round_history_store.py",
     "PIPELINE/round_history.py",
@@ -44,7 +47,7 @@ files = [
     "MODEL/run_segment_interaction_ablation.py",
     "MODEL/smoke_pipeline.py",
 ]
-cache_dir = "TESTS/.cache/mypy"
+cache_dir = "../VAULT/CS2/TESTS/.cache/mypy"
 ignore_missing_imports = true
 follow_imports = "skip"
 check_untyped_defs = true

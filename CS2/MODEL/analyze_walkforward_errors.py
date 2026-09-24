@@ -31,6 +31,7 @@ from sklearn.preprocessing import StandardScaler
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_ROOT = ROOT / "MODEL"
 if str(MODEL_ROOT) not in sys.path:
     sys.path.insert(0, str(MODEL_ROOT))
@@ -44,10 +45,10 @@ from cs2model.features import (
 )
 
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_PREDICTIONS = MODEL_ROOT / "results" / "predictions_walkforward.csv"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_PREDICTIONS = STATE_ROOT / "MODEL" / "results" / "predictions_walkforward.csv"
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -56,7 +57,7 @@ DEFAULT_RAW = (
     / "history_10000_2026-06-28"
     / "results_all.json"
 )
-DEFAULT_OUTPUT = MODEL_ROOT / "results"
+DEFAULT_OUTPUT = STATE_ROOT / "MODEL" / "results"
 
 
 def clean(value: Any) -> str:
@@ -107,7 +108,9 @@ def wilson_interval(successes: int, n: int, z: float = 1.959963984540054) -> tup
 
 def benjamini_hochberg(p_values: Iterable[float | None]) -> list[float | None]:
     values = list(p_values)
-    valid = [(index, float(value)) for index, value in enumerate(values) if value is not None and math.isfinite(float(value))]
+    valid = [
+        (index, float(value)) for index, value in enumerate(values) if value is not None and math.isfinite(float(value))
+    ]
     if not valid:
         return [None for _ in values]
     ordered = sorted(valid, key=lambda item: item[1])
@@ -144,7 +147,9 @@ def historical_identity_map(raw_path: Path) -> dict[tuple[Any, ...], dict[str, A
     return mapping
 
 
-def hltv_identity(row: dict[str, Any], historical: dict[tuple[Any, ...], dict[str, Any]]) -> tuple[str | None, str | None]:
+def hltv_identity(
+    row: dict[str, Any], historical: dict[tuple[Any, ...], dict[str, Any]]
+) -> tuple[str | None, str | None]:
     match_id = str(row.get("id") or "")
     source = row if match_id.isdigit() and int(match_id) >= 1_000_000 else historical.get(logical_match_key(row), {})
     hltv_id = str(source.get("id") or "") or None
@@ -259,8 +264,7 @@ def numeric_associations(frame: pd.DataFrame, features: list[str]) -> list[dict[
         if len(errors) < 20 or len(correct) < 20:
             continue
         pooled_var = (
-            (len(errors) - 1) * float(errors.var(ddof=1))
-            + (len(correct) - 1) * float(correct.var(ddof=1))
+            (len(errors) - 1) * float(errors.var(ddof=1)) + (len(correct) - 1) * float(correct.var(ddof=1))
         ) / max(1, len(errors) + len(correct) - 2)
         pooled_sd = math.sqrt(max(0.0, pooled_var))
         cohen_d = (float(errors.mean()) - float(correct.mean())) / pooled_sd if pooled_sd else 0.0
@@ -355,7 +359,9 @@ def group_stat(frame: pd.DataFrame, segment: str, group: str, mask: pd.Series) -
     }
 
 
-def add_groups(rows: list[dict[str, Any]], frame: pd.DataFrame, segment: str, values: pd.Series, min_n: int = 1) -> None:
+def add_groups(
+    rows: list[dict[str, Any]], frame: pd.DataFrame, segment: str, values: pd.Series, min_n: int = 1
+) -> None:
     for group in sorted(values.dropna().astype(str).unique()):
         result = group_stat(frame, segment, group, values.astype(str) == group)
         if result and result["n"] >= min_n:
@@ -559,13 +565,17 @@ def plot_confidence_errors(frame: pd.DataFrame, path: Path) -> None:
     labels = ["50-60%", "60-70%", "70-80%", "80-90%", "90-100%"]
     groups = pd.cut(frame["confidence"], [0.5, 0.6, 0.7, 0.8, 0.9, 1.01], right=False, labels=labels)
     observed = frame.groupby(groups, observed=True)["error"].mean().reindex(labels)
-    expected = frame.assign(group=groups).groupby("group", observed=True)["expected_error_probability"].mean().reindex(labels)
+    expected = (
+        frame.assign(group=groups).groupby("group", observed=True)["expected_error_probability"].mean().reindex(labels)
+    )
     counts = frame.groupby(groups, observed=True)["error"].size().reindex(labels).fillna(0).astype(int)
     x = np.arange(len(labels))
     width = 0.36
     fig, ax = plt.subplots(figsize=(10.5, 6.2))
     bars = ax.bar(x - width / 2, observed * 100.0, width, color="#dc2626", label="Error observado")
-    expected_bars = ax.bar(x + width / 2, expected * 100.0, width, color="#2563eb", label="Error esperado por confianza")
+    expected_bars = ax.bar(
+        x + width / 2, expected * 100.0, width, color="#2563eb", label="Error esperado por confianza"
+    )
     for bar, n in zip(bars, counts):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1.0, f"n={n}", ha="center", fontsize=9)
     for observed_bar, expected_bar, n in zip(bars, expected_bars, counts):
@@ -615,9 +625,7 @@ def markdown_report(analysis: dict[str, Any]) -> str:
     risk_segments.sort(key=lambda row: row["lift_percentage_points"], reverse=True)
     format_rows = [row for row in segments if row["segment"] == "format"]
     availability_rows = [
-        row
-        for row in segments
-        if row["segment"].endswith("_available") or row["segment"] == "opening_odds_available"
+        row for row in segments if row["segment"].endswith("_available") or row["segment"] == "opening_odds_available"
     ]
     month_rows = [row for row in segments if row["segment"] == "month"]
     confidence_rows = [row for row in segments if row["segment"] == "confidence"]

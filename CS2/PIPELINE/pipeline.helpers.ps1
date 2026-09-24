@@ -1,3 +1,4 @@
+. (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "scripts\vault_bootstrap.ps1")
 <#
   Helpers de la pipeline (dot-sourced por start.ps1).
 
@@ -85,8 +86,9 @@ function Invoke-Native {
     $started = Get-Date
     Write-Log ("ejecutar: {0} {1}" -f $FilePath, ($Arguments -join ' ')) -Level DEBUG -Stage $label
 
-    $stderrFile = New-TemporaryFile
     $oldErrorActionPreference = $ErrorActionPreference
+    $oldOutputEncoding = [Console]::OutputEncoding
+    $oldPythonEncoding = $env:PYTHONIOENCODING
     $oldNativeErrorPreference = $null
     $exit = $null
     if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
@@ -95,17 +97,19 @@ function Invoke-Native {
     }
     $ErrorActionPreference = "Continue"
     try {
-        & $FilePath @Arguments 2> $stderrFile.FullName | ForEach-Object { Write-Host $_ }
+        # PowerShell 5 wraps native stderr in ErrorRecord. Render its message,
+        # not a synthetic exception, and retain warnings even on successful runs.
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $env:PYTHONIOENCODING = 'utf-8'
+        & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Host ([string]$_) }
         $exit = $LASTEXITCODE
-        if (($exit -ne 0) -and (Test-Path $stderrFile.FullName)) {
-            Get-Content -LiteralPath $stderrFile.FullName -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
-        }
     } finally {
         $ErrorActionPreference = $oldErrorActionPreference
+        [Console]::OutputEncoding = $oldOutputEncoding
+        $env:PYTHONIOENCODING = $oldPythonEncoding
         if ($null -ne $oldNativeErrorPreference) {
             $PSNativeCommandUseErrorActionPreference = $oldNativeErrorPreference
         }
-        Remove-Item -LiteralPath $stderrFile.FullName -Force -ErrorAction SilentlyContinue
     }
     $elapsed = [math]::Round(((Get-Date) - $started).TotalSeconds, 1)
     if ($exit -ne 0) {
@@ -136,7 +140,7 @@ function Ensure-CaBundle {
     # requests fallan la verificacion. Exportamos el trust store de Windows a un
     # bundle. Si el probe TLS pasa, no se genera nada.
     param([string]$ScraperDir, [switch]$DryRun)
-    $bundle = Join-Path $ScraperDir "corp_ca_bundle.pem"
+    $bundle = Join-Path (Get-VaultEnvironmentRoot -ComponentRoot $ScraperDir) "corp_ca_bundle.pem"
     if (Test-Path $bundle) {
         Set-Item -Path "Env:HLTV_CA_BUNDLE" -Value $bundle
         Set-Item -Path "Env:CURL_CA_BUNDLE" -Value $bundle
@@ -463,11 +467,13 @@ function Ensure-ModelPython {
         [switch]$DryRun
     )
     $resolvedRoot = [System.IO.Path]::GetFullPath($ProjectRoot).TrimEnd('\', '/')
-    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv'))
-    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv.build'))
-    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedRoot '.venv.previous'))
+    $environmentRoot = Get-VaultEnvironmentRoot -ComponentRoot $resolvedRoot
+    New-Item -ItemType Directory -Path $environmentRoot -Force | Out-Null
+    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv'))
+    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv.build'))
+    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv.previous'))
     foreach ($managedDir in @($venvDir, $buildDir, $previousDir)) {
-        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $resolvedRoot) {
+        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $environmentRoot) {
             throw "Ruta de venv fuera del proyecto: $managedDir"
         }
     }
@@ -587,11 +593,13 @@ function Ensure-ScraperPython {
         [switch]$DryRun
     )
     $resolvedScraperDir = [System.IO.Path]::GetFullPath($ScraperDir).TrimEnd('\', '/')
-    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv'))
-    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv.build'))
-    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $resolvedScraperDir '.venv.previous'))
+    $environmentRoot = Get-VaultEnvironmentRoot -ComponentRoot $resolvedScraperDir
+    New-Item -ItemType Directory -Path $environmentRoot -Force | Out-Null
+    $venvDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv'))
+    $buildDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv.build'))
+    $previousDir = [System.IO.Path]::GetFullPath((Join-Path $environmentRoot '.venv.previous'))
     foreach ($managedDir in @($venvDir, $buildDir, $previousDir)) {
-        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $resolvedScraperDir) {
+        if ([System.IO.Directory]::GetParent($managedDir).FullName.TrimEnd('\', '/') -ne $environmentRoot) {
             throw "Ruta de venv del scraper fuera de su componente: $managedDir"
         }
     }

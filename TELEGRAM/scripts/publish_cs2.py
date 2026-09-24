@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 
 TELEGRAM_ROOT = Path(__file__).resolve().parents[1]
 PROJECT_ROOT = TELEGRAM_ROOT.parent
+STATE_ROOT = PROJECT_ROOT / "VAULT" / "TELEGRAM"
 SRC_ROOT = TELEGRAM_ROOT / "src"
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -134,21 +135,21 @@ def _print_outcome(outcome: object) -> None:
 def run(target_date: date, *, dry_run: bool) -> int:
     """Publish one date and export unseen current/future opportunities."""
 
-    daily = load_latest_daily_picks(PROJECT_ROOT, target_date)
-    report_run_id, upcoming = load_upcoming_opportunities(PROJECT_ROOT, target_date)
+    daily = load_latest_daily_picks(PROJECT_ROOT / "VAULT", target_date)
+    report_run_id, upcoming = load_upcoming_opportunities(PROJECT_ROOT / "VAULT", target_date)
     best_message, others_message = render_messages(daily)
 
     if dry_run:
         _print_preview(best_message, others_message, render_daily_report(upcoming))
         return 0
 
-    settings = load_settings(TELEGRAM_ROOT / ".env", require_token=True)
+    settings = load_settings(STATE_ROOT / ".env", require_token=True)
     client = TelegramClient(
         settings.bot_token,
         timeout_seconds=settings.timeout_seconds,
     )
     store = PublishStateStore(settings.state_db_path)
-    for existing_id in existing_report_match_ids(TELEGRAM_ROOT):
+    for existing_id in existing_report_match_ids(STATE_ROOT):
         store.mark_reported(match_id=existing_id, source_run_id="legacy-daily-report")
     reported_ids = store.reported_match_ids()
     new_opportunities = tuple(pick for pick in upcoming if pick.match_id not in reported_ids)
@@ -162,7 +163,7 @@ def run(target_date: date, *, dry_run: bool) -> int:
         others_message=others_message,
     )
     _print_outcome(outcome)
-    report_path = write_daily_report(new_opportunities, TELEGRAM_ROOT)
+    report_path = write_daily_report(new_opportunities, STATE_ROOT)
     for pick in new_opportunities:
         store.mark_reported(
             match_id=pick.match_id,

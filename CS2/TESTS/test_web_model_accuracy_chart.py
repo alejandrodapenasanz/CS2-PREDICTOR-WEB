@@ -6,9 +6,11 @@ import json
 import sqlite3
 from pathlib import Path
 
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RESULT_PATH = REPO_ROOT / "CS2" / "MODEL" / "results" / "favorite_accuracy_bands.json"
+RESULT_PATH = REPO_ROOT / "VAULT" / "CS2" / "MODEL" / "results" / "favorite_accuracy_bands.json"
 WEB_PATH = REPO_ROOT / "WEB" / "index.html"
 BUILD_WEB_PATH = REPO_ROOT / "WEB" / "build_web.py"
 
@@ -21,6 +23,7 @@ def _load_build_web():
     return module
 
 
+@pytest.mark.skipif(not RESULT_PATH.is_file(), reason="Private walk-forward report not installed in CI")
 def test_favorite_accuracy_bands_are_consistent_walk_forward_results() -> None:
     payload = json.loads(RESULT_PATH.read_text(encoding="utf-8"))
     bands = payload["bands"]
@@ -78,8 +81,9 @@ def test_accuracy_timeline_deduplicates_and_builds_all_requested_windows(
     assert timeline["windows"]["1y"]["n"] == 10
 
 
+@pytest.mark.skipif(not RESULT_PATH.is_file(), reason="Private walk-forward report not installed in CI")
 def test_current_timeline_uses_all_causal_policy_predictions() -> None:
-    predictions_path = REPO_ROOT / "CS2" / "MODEL" / "results" / "predictions_walkforward.csv"
+    predictions_path = REPO_ROOT / "VAULT" / "CS2" / "MODEL" / "results" / "predictions_walkforward.csv"
     module = _load_build_web()
     timeline = module.build_favorite_accuracy_timeline(
         predictions_path,

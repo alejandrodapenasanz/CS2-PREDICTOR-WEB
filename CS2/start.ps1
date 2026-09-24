@@ -84,7 +84,14 @@ if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyCo
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot = Split-Path -Parent $Root
 $WebRoot = Join-Path $RepoRoot "WEB"
-$LogDir = Join-Path $Root "PIPELINE\logs"
+$StateRoot = Join-Path (Split-Path -Parent $Root) "VAULT\CS2"
+. (Join-Path (Split-Path -Parent $Root) "scripts\vault_bootstrap.ps1")
+Initialize-ProjectVault -RepositoryRoot (Split-Path -Parent $Root) -DryRun:($DryRun -or $WhatIfPreference)
+$LogDir = Join-Path $StateRoot "PIPELINE\logs"
+if ($DryRun -or $WhatIfPreference) {
+    # Preview logs must never occupy the previous real run's retention slot.
+    $LogDir = Join-Path $LogDir "preview"
+}
 $LogRetentionKeep = 2
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -245,11 +252,11 @@ $RepairIntegrity = Join-Path $Root "BBDD\repair_integrity.py"
 $ExportMaster = Join-Path $Root "BBDD\export_master_json.py"
 $HealthGates = Join-Path $Root "MODEL\health_gates.py"
 $EvaluateLiveLedger = Join-Path $Root "MODEL\evaluate_live_ledger.py"
-$Artifact = Join-Path $Root "MODEL\artifacts\model.pkl"
-$MasterMani = Join-Path $Root "PIPELINE\master\manifest.json"
+$Artifact = Join-Path $StateRoot "MODEL\artifacts\model.pkl"
+$MasterMani = Join-Path $StateRoot "PIPELINE\master\manifest.json"
 $Blackbox = Join-Path $Root "BBDD\blackbox.py"
-$BlackboxDir = Join-Path $Root "BBDD\BLACKBOX"
-$DbPath = Join-Path $Root "BBDD\cs2.db"
+$BlackboxDir = Join-Path $StateRoot "BBDD\BLACKBOX"
+$DbPath = Join-Path $StateRoot "BBDD\cs2.db"
 
 # --- Gestion exclusiva del modelo: rollback y salida temprana ----------------
 if ($RollbackModel) {
@@ -362,13 +369,13 @@ $RunDir = $null
 if (-not (Test-Path $MasterMani)) {
     if ($script:DryRun) {
         Write-Log "DRY-RUN: no hay master manifest; se usaria el ultimo run publicado." -Level WARN
-        $RunDir = Join-Path $Root "PIPELINE\runs\<RUN_ID>"
+        $RunDir = Join-Path $StateRoot "PIPELINE\runs\<RUN_ID>"
     } else {
         throw "No hay master manifest. Ejecuta un scrape online valido primero."
     }
 } else {
     $Manifest = Get-Content -LiteralPath $MasterMani -Raw | ConvertFrom-Json
-    $RunDir = Join-Path $Root ("PIPELINE\runs\" + $Manifest.last_run_id)
+    $RunDir = Join-Path $StateRoot ("PIPELINE\runs\" + $Manifest.last_run_id)
     if ((-not (Test-Path $RunDir)) -and (-not $script:DryRun)) {
         throw "El run $($Manifest.last_run_id) no existe en disco."
     }
@@ -571,7 +578,7 @@ Write-Host ("  Tiempos por etapa (total {0}s):" -f [math]::Round([double]$totalS
 $script:StageTimings | Format-Table -AutoSize | Out-String | ForEach-Object { Write-Host $_ }
 Write-Host ("  Run:       " + $RunDir)
 Write-Host ("  Dashboard: " + (Join-Path $WebRoot "index.html"))
-Write-Host ("  Contexto:  " + (Join-Path $Root "MODEL\results\CONTEXT_CALIBRATION.md"))
+Write-Host ("  Contexto:  " + (Join-Path $StateRoot "MODEL\results\CONTEXT_CALIBRATION.md"))
 $FreshnessPath = Join-Path $RunDir 'freshness.json'
 if ((-not $script:DryRun) -and (Test-Path -LiteralPath $FreshnessPath -PathType Leaf)) {
     $FreshnessReport = Get-Content -LiteralPath $FreshnessPath -Raw | ConvertFrom-Json

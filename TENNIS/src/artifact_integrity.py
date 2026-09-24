@@ -158,6 +158,22 @@ def verify_code_inventory(
         cast(Iterable[Mapping[str, object]], persisted_inventory)
     )
     current = build_code_inventory(project_root, relative_paths)
+    # Git checkouts may change CRLF/LF, but never Python tokens. Accept only
+    # byte-exact line-ending variants of this same source, retaining its proof.
+    current_by_path = {str(entry["path"]): entry for entry in current}
+    normalized: list[dict[str, object]] = []
+    for entry in persisted:
+        candidate = current_by_path.get(str(entry["path"]))
+        if candidate is not None and candidate != entry:
+            data = (project_root / str(entry["path"])).read_bytes().replace(b"\r\n", b"\n")
+            if any(
+                len(variant) == entry["size"]
+                and hashlib.sha256(variant).hexdigest() == entry["sha256"]
+                for variant in (data, data.replace(b"\n", b"\r\n"))
+            ):
+                entry = candidate
+        normalized.append(entry)
+    persisted = tuple(normalized)
     if persisted != current:
         persisted_by_path = {
             str(entry["path"]): entry for entry in persisted

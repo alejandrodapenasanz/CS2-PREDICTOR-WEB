@@ -26,16 +26,17 @@ import pandas
 import pyarrow
 import sklearn
 
-from ..config import PHASE7_MODELS_DIR, PROJECT_ROOT
+from ..config import STATE_ROOT, PHASE7_MODELS_DIR, PROJECT_ROOT
 from ..artifact_integrity import (
     CodeInventoryError,
     build_code_inventory,
     verify_code_inventory,
 )
 from .data import sha256_file
+from .vault_compatibility import relocated_service_entry
 
 
-_MATPLOTLIB_CACHE = PROJECT_ROOT / ".cache" / "matplotlib"
+_MATPLOTLIB_CACHE = STATE_ROOT / ".cache" / "matplotlib"
 _MATPLOTLIB_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MATPLOTLIB_CACHE))
 
@@ -111,7 +112,7 @@ def _ensure_project_path(path: Path, field_name: str) -> Path:
     """Resuelve una ruta y la restringe al árbol ``TENNIS/``."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
         raise ArtifactError(f"{field_name} debe permanecer dentro de TENNIS/: {resolved}.")
     return resolved
 
@@ -200,7 +201,10 @@ def verify_model_code_inventory(
         raise ArtifactError(
             "El run no acredita todo el contrato de inferencia: " + ", ".join(missing)
         )
-    inference_inventory = [by_path[path] for path in sorted(MODEL_INFERENCE_CODE_PATHS)]
+    inference_inventory = [
+        relocated_service_entry(PROJECT_ROOT, by_path[path])
+        for path in sorted(MODEL_INFERENCE_CODE_PATHS)
+    ]
     try:
         return verify_code_inventory(
             PROJECT_ROOT,

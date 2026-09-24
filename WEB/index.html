@@ -12,7 +12,8 @@
   <link rel="apple-touch-icon" href="./media/logo.png">
   <link rel="manifest" href="./manifest.webmanifest">
   <script>
-    document.write('<script src="./data.js?ts=' + Date.now() + '"><\/script>');
+    const dataSource = location.protocol === 'file:' ? '../VAULT/WEB/data.js?ts=' : './data.js?ts=';
+    document.write('<script src="' + dataSource + Date.now() + '"><\/script>');
   </script>
   <style>
     :root {

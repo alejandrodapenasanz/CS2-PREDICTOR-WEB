@@ -40,6 +40,7 @@ from .kalman_rating import KalmanRating, KalmanTeamRating
 from .compositional_bo3 import compositional_bo3_features
 from .config import get_runtime_config
 from .pistols import OPPONENT_DIFF_COLUMNS, PISTOL_COLUMNS, PISTOL_DIFF_COLUMNS
+from .match_rankings import MATCH_RANKING_COLUMNS, MATCH_RANKING_DIFF_COLUMNS
 from .roster_rating import (
     ObservedLineup,
     RosterAdjustment,
@@ -422,6 +423,7 @@ EXTENDED_DIFF_COLUMNS = (
     + ANNOUNCED_LINEUP_DIFF_COLUMNS
     + PLAYER_DIFF_COLUMNS
     + RANKING_DIFF_COLUMNS
+    + MATCH_RANKING_DIFF_COLUMNS
     + ROSTER_DIFF_COLUMNS
     + TRUESKILL_DIFF_COLUMNS
     + MOV_DIFF_COLUMNS
@@ -868,6 +870,7 @@ def external_snapshot_features(match: dict[str, Any]) -> dict[str, float]:
     for payload_key, columns in (
         ("pistol_snapshot_features", PISTOL_COLUMNS),
         ("ranking_snapshot_features", RANKING_FEATURE_COLUMNS),
+        ("match_ranking_features", MATCH_RANKING_COLUMNS),
         ("roster_snapshot_features", ROSTER_FEATURE_COLUMNS),
     ):
         payload = match.get(payload_key)

@@ -7,10 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
-from ..config import PROJECT_ROOT
+from ..config import STATE_ROOT, PROJECT_ROOT
 
 
-_MATPLOTLIB_CACHE = PROJECT_ROOT / ".cache" / "matplotlib"
+_MATPLOTLIB_CACHE = STATE_ROOT / ".cache" / "matplotlib"
 _MATPLOTLIB_CACHE.mkdir(parents=True, exist_ok=True)
 os.environ.setdefault("MPLCONFIGDIR", str(_MATPLOTLIB_CACHE))
 
@@ -29,7 +29,7 @@ def _ensure_project_path(path: Path) -> Path:
     """Restringe la salida gráfica al proyecto ``TENNIS/``."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
         raise PlotError(f"La figura debe quedar dentro de TENNIS/: {resolved}.")
     return resolved
 
@@ -69,9 +69,7 @@ def save_reliability_plot(
         ("Regresión logística", "logistic_raw", "logistic_platt"),
         ("LightGBM", "lightgbm_raw", "lightgbm_platt"),
     )
-    for axis, (title, raw_name, calibrated_name) in zip(
-        axes, specifications
-    ):
+    for axis, (title, raw_name, calibrated_name) in zip(axes, specifications):
         axis.plot(
             [0.0, 1.0],
             [0.0, 1.0],
@@ -103,10 +101,7 @@ def save_reliability_plot(
         axis.set_ylim(0.0, 1.0)
     axes[0].set_ylabel("Frecuencia observada de victoria de A")
     axes[1].legend(loc="upper left", fontsize=9)
-    fig.suptitle(
-        "Curvas de fiabilidad temporales — "
-        + ("hombres" if gender == "M" else "mujeres")
-    )
+    fig.suptitle("Curvas de fiabilidad temporales — " + ("hombres" if gender == "M" else "mujeres"))
     fig.tight_layout()
     try:
         fig.savefig(output, dpi=170, bbox_inches="tight")

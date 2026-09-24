@@ -7,7 +7,7 @@ import scrapy
 from .parsers import ParsersFactory as PF
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SESSION_FILE = PROJECT_ROOT / "cf_session.json"
+DEFAULT_SESSION_FILE = PROJECT_ROOT.parents[3] / "VAULT/CS2/SCRAPER/hltv-scraper-api/hltv_scraper/cf_session.json"
 
 
 class HltvPlayerStatsOverviewSpider(scrapy.Spider):

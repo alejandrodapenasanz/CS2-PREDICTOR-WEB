@@ -29,6 +29,7 @@ from ..config import (
     OPERATIONS_DATABASE_PATH,
     PREDICTIONS_PROCESSED_DIR,
     PROJECT_ROOT,
+    STATE_ROOT,
     SURFACE_CATALOG_PATH,
 )
 from ..elo import Gender
@@ -1564,7 +1565,9 @@ def publish_predictions_csv(
     if tuple(predictions.columns) != PREDICTION_OUTPUT_COLUMNS:
         raise DailyPredictionError("El DataFrame no cumple PREDICTION_OUTPUT_COLUMNS.")
     resolved_output = Path(output_dir).resolve()
-    if not resolved_output.is_relative_to(PROJECT_ROOT.resolve()):
+    if not any(
+        resolved_output.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)
+    ):
         raise DailyPredictionError("output_dir debe permanecer dentro de TENNIS/.")
     if prediction_as_of_utc.tzinfo is None or prediction_as_of_utc.utcoffset() is None:
         raise DailyPredictionError("prediction_as_of_utc debe incluir zona horaria.")

@@ -1,5 +1,10 @@
 # CS2 Predictor
 
+Estado privado portable: BBDD, modelos, runs, sesiones y entornos viven en
+`../VAULT/CS2/`. El código sigue aquí. `start.ps1` prepara las rutas y entornos
+automáticamente; las instrucciones antiguas de rutas de datos se interpretan
+bajo VAULT. Véase [contexto técnico y contrato VAULT](../DOCS/contexto.md).
+
 Sistema de **predicción pre-partido** de Counter-Strike 2 a partir de datos de
 HLTV, orientado a **probabilidades bien calibradas** (no solo "quién gana"):
 cuando el modelo dice 70%, el favorito debe ganar ~70% de las veces. Proyecto
@@ -323,8 +328,9 @@ SQLite va incluido en Python.
 
 **Scraper por tiers (anti-bloqueo Cloudflare).** El scraper usa
 [Scrapling](https://scrapling.readthedocs.io): Tier 1 HTTP con impersonation TLS/JA3
-(`curl_cffi`) y Tier 2 navegador stealth que resuelve el challenge, con
-`requests`/`cloudscraper` como transporte HTTP incluido en el lock. `start.ps1`
+(`curl_cffi`) y, ante challenge/403, renovación visible directa con `grab_cf.py`,
+sin abrir primero la ventana Stealth. `requests`/`cloudscraper` permanecen como
+transporte HTTP incluido en el lock. `start.ps1`
 exige **CPython 3.13 exacto**, instala `scrapling[fetchers]` desde el lock y
 aprovisiona sus navegadores. Si el entorno no se puede validar, falla de forma
 explícita: no degrada a otra versión de Python ni instala dependencias sueltas.
@@ -362,9 +368,17 @@ producción. `-RollbackModel` restaura el
 Cada ejecución de `start.ps1` crea un transcript completo en `PIPELINE/logs/start_*.log`
 y muestra cada comando con hora, exit code y duración. Al cerrarse, rota como
 una unidad el transcript, JSONL, tiempos y decisiones, y conserva solo la
-ejecución actual y la anterior. Si Cloudflare bloquea el
-navegador stealth durante demasiado tiempo, el pipeline lanza automáticamente
-`grab_cf.py` para abrir una ventana visible y renovar `cf_clearance`.
+ejecución actual y la anterior. Ante un challenge/403, el pipeline lanza
+directamente `grab_cf.py` sobre la URL bloqueada, sin esperar a que se cierre o
+falle Stealth. Es la ventana visible de comprobación de Cloudflare; si el sitio
+pide intervención, debe completarla el operador. Se mantiene un solo intento de
+renovación por run; si no se consigue HTML válido, la URL queda pendiente.
+Los 429 y errores de servidor sin challenge conservan su backoff, no abren esa
+ventana por defecto. `HLTV_USE_SCRAPLING=1` mantiene HTTP Scrapling y
+`HLTV_AUTO_REFRESH_CF_ON_BLOCK=1` la renovación. `HLTV_SOLVE_CLOUDFLARE=0` es
+ahora el default tanto en Python como en `pipeline.config.psd1`; ponerlo a `1`
+explícitamente vuelve al navegador Stealth legado. Un proceso que ya está en
+marcha conserva su configuración hasta el siguiente arranque.
 Con `-Retrain`, el trainer también recibe `--verbose` y muestra folds, estudios
 Optuna y pesos; `-Quiet` conserva la salida resumida.
 

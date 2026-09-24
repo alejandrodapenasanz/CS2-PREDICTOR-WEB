@@ -20,7 +20,9 @@ class HltvMatchSpider(scrapy.Spider):
         super().__init__(**kwargs)
 
     def _fetch_with_cf_session(self, url: str):
-        session_file = Path(__file__).resolve().parents[2] / "cf_session.json"
+        session_file = (
+            Path(__file__).resolve().parents[6] / "VAULT/CS2/SCRAPER/hltv-scraper-api/hltv_scraper/cf_session.json"
+        )
         if not session_file.exists():
             return None
         try:

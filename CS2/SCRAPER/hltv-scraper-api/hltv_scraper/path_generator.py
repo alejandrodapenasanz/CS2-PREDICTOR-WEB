@@ -1,5 +1,6 @@
 import os
 from abc import ABC, abstractmethod
+from pathlib import Path
 
 
 class FilePathGenerator(ABC):
@@ -15,7 +16,13 @@ class FilePathGenerator(ABC):
 class JsonFilePathGenerator(FilePathGenerator):
     def __init__(self, base_path: str) -> None:
         self.base_path = base_path
-        self.data_dir = os.path.join(base_path, "data")
+        source = Path(__file__).resolve().parent
+        if Path(base_path).resolve() == source:
+            self.data_dir = str(
+                source.parents[3] / "VAULT" / "CS2" / "SCRAPER" / "hltv-scraper-api" / "hltv_scraper" / "data"
+            )
+        else:
+            self.data_dir = os.path.join(base_path, "data")
         os.makedirs(self.data_dir, exist_ok=True)
 
     def generate(self, filename: str) -> str:

@@ -38,6 +38,7 @@ from src.config import (  # noqa: E402
     RAW_DATA_DIR,
     SACKMANN_MANIFEST_PATH,
     SURFACE_CATALOG_PATH,
+    STATE_ROOT,
 )
 from src.data_loaders import load_players  # noqa: E402
 from src.elo.build import (  # noqa: E402
@@ -250,7 +251,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not args.disable_operational_overlay:
         handoff = load_elo_handoff_config(
             args.handoff_config,
-            project_root=PROJECT_ROOT,
+            project_root=STATE_ROOT,
         )
         if args.manifest.resolve() != handoff.base_manifest_path.resolve():
             raise ValueError(

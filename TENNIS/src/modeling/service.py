@@ -21,6 +21,7 @@ import pandas as pd
 from ..config import (
     PHASE7_ACTIVE_MANIFEST_PATH,
     PROJECT_ROOT,
+    STATE_ROOT,
 )
 from .artifacts import (
     ArtifactError,
@@ -73,9 +74,7 @@ class LoadedDeploymentModel:
         if isinstance(as_of_date, datetime) or not isinstance(as_of_date, date):
             raise ModelServiceError("as_of_date debe ser datetime.date estricto.")
         try:
-            training_cutoff = date.fromisoformat(
-                self.training_available_max_date
-            )
+            training_cutoff = date.fromisoformat(self.training_available_max_date)
         except ValueError as exc:
             raise ModelServiceError(
                 "training_available_max_date del bundle no es YYYY-MM-DD."
@@ -87,10 +86,7 @@ class LoadedDeploymentModel:
             )
 
         raw = predict_symmetric_raw(self.estimator, frame)
-        calibrated = predict_symmetric_calibrated(
-            self.calibrator,
-            raw.to_numpy(dtype=float)
-        )
+        calibrated = predict_symmetric_calibrated(self.calibrator, raw.to_numpy(dtype=float))
         output = pd.DataFrame(
             {
                 "model_probability_raw_a": raw.to_numpy(dtype=float),
@@ -105,30 +101,18 @@ class LoadedDeploymentModel:
         }
         present_columns = market_columns.intersection(frame.columns)
         if present_columns and present_columns != market_columns:
-            raise ModelServiceError(
-                "El mercado requiere probabilidades A y B conjuntamente."
-            )
+            raise ModelServiceError("El mercado requiere probabilidades A y B conjuntamente.")
         if present_columns:
-            numeric = pd.to_numeric(
-                frame["market_probability_a"], errors="coerce"
-            )
-            numeric_b = pd.to_numeric(
-                frame["market_probability_b"], errors="coerce"
-            )
-            invalid = (
-                numeric.notna() & ~numeric.between(0.0, 1.0)
-            ) | (
+            numeric = pd.to_numeric(frame["market_probability_a"], errors="coerce")
+            numeric_b = pd.to_numeric(frame["market_probability_b"], errors="coerce")
+            invalid = (numeric.notna() & ~numeric.between(0.0, 1.0)) | (
                 numeric_b.notna() & ~numeric_b.between(0.0, 1.0)
             )
             if invalid.any():
-                raise ModelServiceError(
-                    "Las probabilidades de mercado salen de [0, 1]."
-                )
+                raise ModelServiceError("Las probabilidades de mercado salen de [0, 1].")
             mismatched_missing = numeric.isna() ^ numeric_b.isna()
             if mismatched_missing.any():
-                raise ModelServiceError(
-                    "Las probabilidades de mercado A/B deben faltar juntas."
-                )
+                raise ModelServiceError("Las probabilidades de mercado A/B deben faltar juntas.")
             present = numeric.notna() & numeric_b.notna()
             non_complementary = present & ~np.isclose(
                 numeric + numeric_b,
@@ -137,14 +121,10 @@ class LoadedDeploymentModel:
                 atol=1e-9,
             )
             if non_complementary.any():
-                raise ModelServiceError(
-                    "Las probabilidades de-vigadas A/B deben sumar uno."
-                )
+                raise ModelServiceError("Las probabilidades de-vigadas A/B deben sumar uno.")
             if present.any():
                 if "market_retrieved_at_utc" not in frame.columns:
-                    raise ModelServiceError(
-                        "El mercado requiere market_retrieved_at_utc."
-                    )
+                    raise ModelServiceError("El mercado requiere market_retrieved_at_utc.")
                 try:
                     retrieved = pd.to_datetime(
                         frame["market_retrieved_at_utc"],
@@ -159,9 +139,7 @@ class LoadedDeploymentModel:
                     lambda value: value >= as_of_date
                 )
                 if (present & invalid_time).any():
-                    raise ModelServiceError(
-                        "El mercado no cumple retrieved_date < as_of_date."
-                    )
+                    raise ModelServiceError("El mercado no cumple retrieved_date < as_of_date.")
                 market.loc[present] = numeric.loc[present]
         output["market_probability_a"] = market
         output["edge"] = output["model_probability_a"] - market
@@ -172,10 +150,8 @@ def _ensure_project_path(path: Path, field_name: str) -> Path:
     """Resuelve una ruta y exige que permanezca dentro de ``TENNIS/``."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
-        raise ModelServiceError(
-            f"{field_name} debe permanecer dentro de TENNIS/: {resolved}."
-        )
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
+        raise ModelServiceError(f"{field_name} debe permanecer dentro de TENNIS/: {resolved}.")
     return resolved
 
 
@@ -185,13 +161,9 @@ def _load_active_payload(path: Path) -> Mapping[str, object]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ModelServiceError(
-            f"No se pudo leer el manifiesto activo {path}."
-        ) from exc
+        raise ModelServiceError(f"No se pudo leer el manifiesto activo {path}.") from exc
     if not isinstance(payload, Mapping):
-        raise ModelServiceError(
-            "El manifiesto activo debe ser un objeto JSON."
-        )
+        raise ModelServiceError("El manifiesto activo debe ser un objeto JSON.")
     return payload
 
 
@@ -205,14 +177,11 @@ def _model_entry(
     if not isinstance(models, list):
         raise ModelServiceError("El manifiesto activo carece de models.")
     entries = [
-        item
-        for item in models
-        if isinstance(item, Mapping) and item.get("gender") == gender
+        item for item in models if isinstance(item, Mapping) and item.get("gender") == gender
     ]
     if len(entries) != 1:
         raise ModelServiceError(
-            f"Se esperaba un modelo activo para {gender}; "
-            f"encontrados {len(entries)}."
+            f"Se esperaba un modelo activo para {gender}; encontrados {len(entries)}."
         )
     return entries[0]
 
@@ -236,15 +205,12 @@ def load_active_deployment_model(
         raise ModelServiceError("active_run sale del directorio de modelos.")
     verified = verify_published_run(run_dir)
     if verified.get("fingerprint") != active.get("fingerprint"):
-        raise ModelServiceError(
-            "El fingerprint activo no coincide con el run verificado."
-        )
+        raise ModelServiceError("El fingerprint activo no coincide con el run verificado.")
     try:
         verify_model_code_inventory(verified.get("code_inventory"))
     except ArtifactError as exc:
         raise ModelServiceError(
-            "El modelo activo fue producido por código distinto; "
-            "reentrene antes de deserializarlo."
+            "El modelo activo fue producido por código distinto; reentrene antes de deserializarlo."
         ) from exc
     entry = _model_entry(verified, gender)
     paths = entry.get("paths")
@@ -266,9 +232,7 @@ def load_active_deployment_model(
             )
             bundle = joblib.load(bundle_path)
     except Exception as exc:
-        raise ModelServiceError(
-            f"No se pudo cargar el bundle verificado {bundle_path}."
-        ) from exc
+        raise ModelServiceError(f"No se pudo cargar el bundle verificado {bundle_path}.") from exc
     if not isinstance(bundle, Mapping):
         raise ModelServiceError("El bundle no es un mapping compatible.")
     if (
@@ -277,17 +241,13 @@ def load_active_deployment_model(
         or not isinstance(bundle.get("estimator"), FittedGenderEstimator)
         or not isinstance(bundle.get("calibrator"), PlattCalibrator)
     ):
-        raise ModelServiceError(
-            "El bundle activo no cumple versión, género o tipos esperados."
-        )
+        raise ModelServiceError("El bundle activo no cumple versión, género o tipos esperados.")
     training_rows = bundle.get("training_rows")
     training_source_rows = bundle.get("training_source_rows")
     training_excluded = bundle.get("training_excluded_unavailable")
     calibration_rows = bundle.get("calibration_rows")
     training_max_date = bundle.get("training_max_date")
-    training_available_max_date = bundle.get(
-        "training_available_max_date"
-    )
+    training_available_max_date = bundle.get("training_available_max_date")
     training_as_of_date = bundle.get("training_as_of_date")
     raw_date_policy = bundle.get("source_date_policy")
     if (
@@ -315,17 +275,11 @@ def load_active_deployment_model(
         training_cutoff = date.fromisoformat(training_as_of_date)
         policy = SourceDatePolicy.from_mapping(raw_date_policy)
     except (ValueError, SourceDatePolicyError) as exc:
-        raise ModelServiceError(
-            "Fechas o source_date_policy del bundle no son válidas."
-        ) from exc
+        raise ModelServiceError("Fechas o source_date_policy del bundle no son válidas.") from exc
     if policy.availability_date(source_max) != available_max:
-        raise ModelServiceError(
-            "training_available_max_date no deriva de training_max_date."
-        )
+        raise ModelServiceError("training_available_max_date no deriva de training_max_date.")
     if available_max >= training_cutoff:
-        raise ModelServiceError(
-            "El bundle incorporó un resultado no disponible en su corte."
-        )
+        raise ModelServiceError("El bundle incorporó un resultado no disponible en su corte.")
     fingerprint = verified.get("fingerprint")
     assert isinstance(fingerprint, str)
     return LoadedDeploymentModel(

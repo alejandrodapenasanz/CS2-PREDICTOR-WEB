@@ -31,14 +31,14 @@ from zoneinfo import ZoneInfo
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ROOT = REPO_ROOT / "CS2"
+ROOT = REPO_ROOT / "VAULT" / "CS2"
 DAILY_ROOT = ROOT / "PIPELINE"
 MODEL_ROOT = ROOT / "MODEL"
-WEB_ROOT = REPO_ROOT / "WEB"
+WEB_ROOT = REPO_ROOT / "VAULT" / "WEB"
 BBDD_ROOT = ROOT / "BBDD"
 DB_PATH = BBDD_ROOT / "cs2.db"
-TENNIS_DB_PATH = REPO_ROOT / "TENNIS" / "BBDD" / "tennis.sqlite3"
-TENNIS_FRESHNESS_PATH = REPO_ROOT / "TENNIS" / "freshness.json"
+TENNIS_DB_PATH = REPO_ROOT / "VAULT" / "TENNIS" / "BBDD" / "tennis.sqlite3"
+TENNIS_FRESHNESS_PATH = REPO_ROOT / "VAULT" / "TENNIS" / "freshness.json"
 CS2_CALIBRATION_BIN_COUNT = 10
 CS2_ROLLING_WINDOW_SIZE = 50
 TENNIS_CALIBRATION_BIN_COUNT = 10
@@ -56,7 +56,8 @@ TENNIS_PROBABILITY_FILTERS = (
 def configure_sport_root(sport_root: Path) -> None:
     """Select the sport domain while keeping the web output repository-wide."""
     global ROOT, DAILY_ROOT, MODEL_ROOT, BBDD_ROOT, DB_PATH
-    ROOT = sport_root.resolve()
+    supplied = sport_root.resolve()
+    ROOT = REPO_ROOT / "VAULT" / "CS2" if supplied == REPO_ROOT / "CS2" else supplied
     DAILY_ROOT = ROOT / "PIPELINE"
     MODEL_ROOT = ROOT / "MODEL"
     BBDD_ROOT = ROOT / "BBDD"

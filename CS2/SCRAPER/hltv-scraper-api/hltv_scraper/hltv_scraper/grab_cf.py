@@ -8,7 +8,15 @@ from urllib.parse import urlsplit
 import nodriver as uc
 
 CF_TARGET_URL = "https://www.hltv.org/stats"
-CF_SESSION_FILE = Path(__file__).resolve().parents[1] / "cf_session.json"
+CF_SESSION_FILE = (
+    Path(__file__).resolve().parents[5]
+    / "VAULT"
+    / "CS2"
+    / "SCRAPER"
+    / "hltv-scraper-api"
+    / "hltv_scraper"
+    / "cf_session.json"
+)
 
 
 def hltv_target_url(value: str) -> str:

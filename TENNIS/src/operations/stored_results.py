@@ -18,7 +18,7 @@ import pandas as pd
 from ..config import (
     OPERATIONS_DATABASE_PATH,
     PLAYER_MAPPING_DATABASE_PATH,
-    PROJECT_ROOT,
+    resolve_state_reference,
 )
 from ..tennis_explorer import TennisExplorerResultSnapshot
 from .result_sources import (
@@ -56,9 +56,8 @@ def _project_path(value: object, field: str) -> Path:
 
     if not isinstance(value, str) or not value.strip():
         raise OperationsSchemaError(f"{field} falta en la metadata del run crudo.")
-    path = (PROJECT_ROOT / value).resolve(strict=False)
     try:
-        path.relative_to(PROJECT_ROOT.resolve())
+        path = resolve_state_reference(value)
     except ValueError as exc:
         raise OperationsSchemaError(f"{field} escapa de TENNIS/.") from exc
     return path

@@ -29,6 +29,7 @@ import pandas as pd
 import requests
 from unidecode import unidecode
 
+from ..config import STATE_ROOT, relocated_data_path
 from .client import TennisRatioClient
 from .parser import (
     parse_agenda_html,
@@ -63,9 +64,9 @@ from .types import (
 
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-DEFAULT_RAW_DIR: Final[Path] = PROJECT_ROOT / "data" / "raw" / "tennisratio"
-DEFAULT_DB_PATH: Final[Path] = PROJECT_ROOT / "data" / "processed" / "tennisratio.sqlite3"
-DEFAULT_SACKMANN_RAW_DIR: Final[Path] = PROJECT_ROOT / "data" / "raw"
+DEFAULT_RAW_DIR: Final[Path] = STATE_ROOT / "data" / "raw" / "tennisratio"
+DEFAULT_DB_PATH: Final[Path] = STATE_ROOT / "data" / "processed" / "tennisratio.sqlite3"
+DEFAULT_SACKMANN_RAW_DIR: Final[Path] = STATE_ROOT / "data" / "raw"
 LAST_GOOD_FILENAME: Final[str] = "last_good.json"
 RAW_RETENTION: Final[int] = 2
 
@@ -893,7 +894,7 @@ def _last_good_protected_paths(raw_dir: Path, resource_dir: Path) -> set[Path]:
             continue
         if not isinstance(raw_path, str):
             raise TennisRatioStoreError("last_good compressed_path must be text or null.")
-        resolved = Path(raw_path).resolve()
+        resolved = relocated_data_path(raw_path)
         if snapshot_root not in resolved.parents:
             raise TennisRatioStoreError("last_good compressed_path escaped the snapshot root.")
         if resolved.parent == target_directory:
@@ -1144,7 +1145,7 @@ def _reconcile_last_good(store: TennisRatioStore, raw_dir: Path) -> None:
     row = store.latest_published_manifest_row()
     if row is None:
         return
-    immutable = Path(str(row["manifest_path"])).resolve()
+    immutable = relocated_data_path(str(row["manifest_path"]))
     manifests_dir = (raw_dir / "manifests").resolve()
     if immutable.parent != manifests_dir or not immutable.is_file():
         raise TennisRatioStoreError(

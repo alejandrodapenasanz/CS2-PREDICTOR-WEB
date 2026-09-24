@@ -42,10 +42,14 @@ $ErrorActionPreference = 'Stop'
 $ExpectedPythonMajor = 3
 $ExpectedPythonMinor = 13
 $TennisRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $TennisRoot 'scripts\launcher.helpers.ps1')
 $RepositoryRoot = Split-Path -Parent $TennisRoot
-$VenvRoot = Join-Path $TennisRoot '.venv'
-$VenvBuildRoot = Join-Path $TennisRoot '.venv.build'
-$VenvPreviousRoot = Join-Path $TennisRoot '.venv.previous'
+. (Join-Path $RepositoryRoot 'scripts\vault_bootstrap.ps1')
+Initialize-ProjectVault -RepositoryRoot $RepositoryRoot
+$TennisStateRoot = Join-Path $RepositoryRoot 'VAULT\TENNIS'
+$VenvRoot = Join-Path $TennisStateRoot '.venv'
+$VenvBuildRoot = Join-Path $TennisStateRoot '.venv.build'
+$VenvPreviousRoot = Join-Path $TennisStateRoot '.venv.previous'
 $PythonExecutable = Join-Path $VenvRoot 'Scripts\python.exe'
 $VenvConfig = Join-Path $VenvRoot 'pyvenv.cfg'
 $EnvironmentStamp = Join-Path $VenvRoot '.tennis-lock.sha256'
@@ -55,7 +59,7 @@ $TennisRatioUpdateScript = Join-Path $TennisRoot 'scripts\update_tennisratio.py'
 $TennisAbstractUpdateScript = Join-Path $TennisRoot 'scripts\update_tennis_abstract.py'
 $DailyScript = Join-Path $TennisRoot 'scripts\daily_predictions.py'
 $WebBuildScript = Join-Path $RepositoryRoot 'WEB\build_web.py'
-$TennisLogsRoot = Join-Path $TennisRoot 'logs'
+$TennisLogsRoot = Join-Path $TennisStateRoot 'logs'
 $LogRetentionKeep = 2
 $script:TennisRunStartedAtUtc = [DateTime]::UtcNow
 $TennisLogToken = '{0}_{1}' -f (
@@ -66,6 +70,7 @@ $script:TennisLogPath = Join-Path $TennisLogsRoot (
     "run_tennis_$TennisLogToken.log"
 )
 $script:TennisTranscriptStarted = $false
+$script:TennisRunMutex = $null
 
 function Remove-OldTennisLogs {
     <# Conserva unicamente el log de la ejecucion actual y el de la anterior. #>
@@ -127,6 +132,11 @@ function Complete-TennisLauncher {
         $script:TennisTranscriptStarted = $false
     }
     Remove-OldTennisLogs
+    if ($null -ne $script:TennisRunMutex) {
+        $script:TennisRunMutex.ReleaseMutex()
+        $script:TennisRunMutex.Dispose()
+        $script:TennisRunMutex = $null
+    }
     exit $ExitCode
 }
 
@@ -143,6 +153,7 @@ trap {
     Complete-TennisLauncher -ExitCode 1 -Outcome 'exception'
 }
 
+$script:TennisRunMutex = Enter-TennisRun -StateRoot $TennisStateRoot
 New-Item -ItemType Directory -Path $TennisLogsRoot -Force | Out-Null
 Start-Transcript -Path $script:TennisLogPath -Force | Out-Null
 $script:TennisTranscriptStarted = $true
@@ -414,7 +425,7 @@ function Remove-TennisManagedDirectory {
         [Parameter(Mandatory = $true)][string]$Path
     )
     if (-not (Test-Path -LiteralPath $Path)) { return }
-    $root = [IO.Path]::GetFullPath($TennisRoot).TrimEnd('\', '/')
+    $root = [IO.Path]::GetFullPath($TennisStateRoot).TrimEnd('\', '/')
     $resolved = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
     $name = [IO.Path]::GetFileName($resolved)
     $allowedExact = @('.venv', '.venv.build', '.venv.previous')
@@ -440,7 +451,7 @@ function New-TennisVenv {
         [string]$TargetRoot
     )
 
-    $resolvedTennisRoot = [IO.Path]::GetFullPath($TennisRoot).TrimEnd('\', '/')
+    $resolvedTennisRoot = [IO.Path]::GetFullPath($TennisStateRoot).TrimEnd('\', '/')
     $resolvedVenvRoot = [IO.Path]::GetFullPath($TargetRoot).TrimEnd('\', '/')
     if (
         [IO.Path]::GetFileName($resolvedVenvRoot) -ine '.venv.build' -or
@@ -661,9 +672,8 @@ if (-not $EnvironmentOnly) {
     Write-Host '[TENNIS TRAIN] scripts\update_sources.py --skip-sackmann'
     $SourceArguments = @('--skip-sackmann')
     if ($UpdateOnly) { $SourceArguments += '--skip-match-charting' }
-    & $PythonExecutable $UpdateSourcesScript @SourceArguments
-    if ($LASTEXITCODE -ne 0) {
-        $TrainingExitCode = [int]$LASTEXITCODE
+    $TrainingExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments (@($UpdateSourcesScript) + $SourceArguments)
+    if ($TrainingExitCode -ne 0) {
         Write-Error (
             'Fallo scripts\update_sources.py con codigo ' +
             "$TrainingExitCode."
@@ -678,8 +688,7 @@ Write-Host ''
 Write-Host '[TENNIS] Actualizando TennisRatio con Scrapling (control automatico diario)'
 $TennisRatioAttemptedAtUtc = [DateTime]::UtcNow.ToString('o')
 $TennisRatioAttemptStatus = 'success'
-& $PythonExecutable $TennisRatioUpdateScript
-$TennisRatioUpdateExitCode = [int]$LASTEXITCODE
+$TennisRatioUpdateExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments @($TennisRatioUpdateScript)
 if ($TennisRatioUpdateExitCode -ne 0) {
     $TennisRatioAttemptStatus = 'failed'
     Write-Error (
@@ -701,8 +710,7 @@ Write-Host ''
 Write-Host '[TENNIS] Tennis Abstract: solo jugadores de la cartelera (Scrapling; adquisicion, no modelo)'
 $TennisAbstractArguments = @()
 if ($Date) { $TennisAbstractArguments += @('--date', $Date) }
-& $PythonExecutable $TennisAbstractUpdateScript @TennisAbstractArguments
-$TennisAbstractUpdateExitCode = [int]$LASTEXITCODE
+$TennisAbstractUpdateExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments (@($TennisAbstractUpdateScript) + $TennisAbstractArguments)
 if ($TennisAbstractUpdateExitCode -ne 0) {
     Write-Warning (
         '[TENNIS] Adquisicion Tennis Abstract incompleta/diferida. Se conserva el progreso ' +
@@ -740,9 +748,8 @@ if ($RunTraining) {
         if ($RelativeScript -eq 'scripts\retrain_models.py' -and $Date) {
             $ScriptArguments += @('--training-as-of-date', $Date)
         }
-        & $PythonExecutable $ScriptPath @ScriptArguments
-        if ($LASTEXITCODE -ne 0) {
-            $TrainingExitCode = [int]$LASTEXITCODE
+        $TrainingExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments (@($ScriptPath) + $ScriptArguments)
+        if ($TrainingExitCode -ne 0) {
             Write-Error (
                 "Fallo $RelativeScript con codigo $TrainingExitCode."
             ) -ErrorAction Continue
@@ -765,8 +772,7 @@ $DailyArguments += @(
     '--tennisratio-attempted-at-utc', $TennisRatioAttemptedAtUtc
 )
 
-& $PythonExecutable $DailyScript @DailyArguments
-$DailyExitCode = $LASTEXITCODE
+$DailyExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments (@($DailyScript) + $DailyArguments)
 if ($DailyExitCode -ne 0) {
     Complete-TennisLauncher `
         -ExitCode ([int]$DailyExitCode) `
@@ -775,8 +781,7 @@ if ($DailyExitCode -ne 0) {
 
 Write-Host ''
 Write-Host '[TENNIS] Actualizando WEB/data.js'
-& $PythonExecutable $WebBuildScript
-$WebExitCode = $LASTEXITCODE
+$WebExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments @($WebBuildScript)
 if ($WebExitCode -ne 0) {
     Write-Error (
         "Fallo WEB/build_web.py con codigo $WebExitCode."

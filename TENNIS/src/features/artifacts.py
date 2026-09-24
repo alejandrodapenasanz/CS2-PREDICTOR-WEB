@@ -19,7 +19,7 @@ import shutil
 import tempfile
 from typing import Final, Mapping, cast
 
-from ..config import FEATURES_PROCESSED_DIR, PROJECT_ROOT
+from ..config import STATE_ROOT, FEATURES_PROCESSED_DIR, PROJECT_ROOT
 
 
 ACTIVE_POINTER_SCHEMA: Final[str] = "tennis-features-active-v1"
@@ -85,7 +85,7 @@ def _ensure_project_path(path: Path, field_name: str) -> Path:
     """Resuelve una ruta y exige que permanezca dentro de ``TENNIS/``."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
         raise FeatureArtifactError(f"{field_name} debe permanecer dentro de TENNIS/: {resolved}.")
     return resolved
 

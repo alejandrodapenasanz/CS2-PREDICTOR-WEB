@@ -4,6 +4,8 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+from contextlib import closing
 import importlib.util
 import json
 from pathlib import Path
@@ -26,6 +28,41 @@ def load_daily_start_module():
 
 
 class LiveDatabasePipelineTests(unittest.TestCase):
+    def test_ranking_cache_hit_does_not_renew_capture(self) -> None:
+        """Skipped downloads must not keep July rankings fresh indefinitely."""
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        run = Path(tmp.name) / "run"
+        run.mkdir()
+        (run / "manifest.json").write_text(json.dumps({"started_at": "2026-09-12T08:00:00Z"}))
+        (run / "rankings_index.json").write_text(json.dumps({
+            "hltv": {"ok": True, "skipped_by_freshness": True, "count": 0},
+            "valve": {"ok": True, "skipped_by_freshness": True, "count": 0},
+        }))
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            ingest.upsert_fetch_state(conn, "ranking_hltv", "global", "ok", fetched_at="2026-07-13T10:00:00Z")
+            before = conn.execute("SELECT * FROM fetch_state WHERE entity_type='ranking_hltv'").fetchone()
+            ingest.update_fetch_state_from_run(conn, run)
+            assert conn.execute("SELECT * FROM fetch_state WHERE entity_type='ranking_hltv'").fetchone() == before
+
+    def test_ranking_freshness_requires_a_real_capture_but_preserves_waf_cooldown(self) -> None:
+        """Recover corrupt freshness markers without bypassing blocked attempts."""
+        tmp, db_path = self.make_db()
+        self.addCleanup(tmp.cleanup)
+        with closing(sqlite3.connect(db_path)) as conn, conn:
+            ingest.upsert_fetch_state(conn, "ranking_hltv", "global", "ok", fetched_at="2026-09-12T10:00:00Z")
+            conn.execute(
+                "INSERT INTO team_ranking_snapshots (hltv_team_id,ranking_type,position,run_id,"
+                "captured_at_utc,source_file,payload_json) VALUES ('1','hltv',40,'old',"
+                "'2026-07-13T10:00:00Z','fixture','{}')"
+            )
+        daily = load_daily_start_module()
+        with patch.object(daily, "BBDD_DB", db_path):
+            assert not daily.db_entity_is_fresh("ranking_hltv", "global", now="2026-09-12T10:01:00Z")
+            with closing(sqlite3.connect(db_path)) as conn, conn:
+                ingest.upsert_fetch_state(conn, "ranking_hltv", "global", "blocked", fetched_at="2026-09-12T10:00:00Z")
+            assert daily.db_entity_is_fresh("ranking_hltv", "global", now="2026-09-12T10:01:00Z")
+
     def make_db(self) -> tuple[tempfile.TemporaryDirectory, Path]:
         tmp = tempfile.TemporaryDirectory()
         db_path = Path(tmp.name) / "cs2.db"

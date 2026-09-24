@@ -1,5 +1,10 @@
 # CS2 Predictor — Telegram publisher
 
+Private state now lives in `VAULT/TELEGRAM/`, including `.env`, `data/`,
+`daily_report.txt` and the automatically managed Python environment. Copy VAULT
+beside the current source checkout and run the normal root `start.ps1`.
+See [the technical context and portability contract](../DOCS/contexto.md).
+
 This component publishes the daily CS2 predictions to the read-only Telegram
 channel [@cs2DailyPicks](https://t.me/cs2DailyPicks) through
 `@CS2PredictorPublisherBot`. It produces exactly two English posts for each
@@ -8,7 +13,7 @@ date:
 1. **BEST OPPORTUNITIES**, containing every qualified prediction for the date.
 2. **TODAY'S OTHER PICKS**, containing all remaining daily predictions.
 
-After a successful publication, it atomically replaces `TELEGRAM/daily_report.txt`
+After a successful publication, it atomically replaces `VAULT/TELEGRAM/daily_report.txt`
 with all newly detected qualified opportunities from the requested date onward.
 Exported match IDs are retained in SQLite, so a match never appears in the report
 twice even after the text file has been replaced.
@@ -194,7 +199,7 @@ preventing the independent tennis workflow.
 Tests are local and do not contact Telegram:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pytest tests
+..\VAULT\TELEGRAM\.venv\Scripts\python.exe -m pytest tests
 ```
 
 They cover source validation, formatting, report URL/content and atomic

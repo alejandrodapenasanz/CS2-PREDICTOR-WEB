@@ -7,6 +7,14 @@ pregunta antes de editar.
 
 ## Arquitectura y límites
 
+- Contrato VAULT autorizado por el usuario: el código permanece en sus
+  componentes versionados; el estado privado se ubica en `VAULT/<componente>/`.
+  Los componentes conservan la propiedad de sus datos aunque cambie su ruta.
+  Los launchers pueden preparar automáticamente entornos regenerables en
+  VAULT. La migración es exclusivamente de archivos, con inventario y hashes;
+  nunca reescribe BBDD, historiales sagrados ni probabilidades históricas.
+  VAULT nunca se publica en Git y debe copiarse con los procesos detenidos.
+
 - `CS2/` y `TENNIS/` son dominios independientes: cada uno es dueño de sus
   datos, modelos, código, pruebas, entorno y manifiestos de dependencias. No se
   importan módulos ni se consultan bases de datos del otro dominio.

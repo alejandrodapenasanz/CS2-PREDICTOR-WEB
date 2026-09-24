@@ -17,6 +17,7 @@ from typing import cast
 
 import pandas as pd
 
+from ..config import relocated_data_path
 from .parser import SCHEDULE_CONTEXT_COLUMNS, parse_agenda_html
 from .types import Gender, TennisRatioSchemaError
 
@@ -44,7 +45,7 @@ def restore_agenda_context(frame: pd.DataFrame, database_path: Path) -> pd.DataF
                 (str(sha),),
             ).fetchone()
             if row is not None:
-                paths[str(sha)] = Path(row[0])
+                paths[str(sha)] = relocated_data_path(row[0])
     recovered = recover_agenda_context(frame.to_dict(orient="records"), paths)
     result = frame.copy()
     for column in CONTEXT_COLUMNS:

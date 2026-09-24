@@ -1,12 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
-cache_dir = ".cache/pytest"
+cache_dir = "../VAULT/TENNIS/.cache/pytest"
 
 [tool.ruff]
 target-version = "py313"
 line-length = 100
-cache-dir = ".cache/ruff"
+cache-dir = "../VAULT/TENNIS/.cache/ruff"
 
 [tool.ruff.lint]
 # Inicio deliberadamente gradual: errores de sintaxis, nombres indefinidos y
@@ -45,7 +45,7 @@ files = [
     "src/temporal.py",
     "src/tennis_explorer/types.py",
 ]
-cache_dir = ".cache/mypy"
+cache_dir = "../VAULT/TENNIS/.cache/mypy"
 ignore_missing_imports = true
 follow_imports = "skip"
 check_untyped_defs = true

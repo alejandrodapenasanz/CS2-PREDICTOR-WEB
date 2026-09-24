@@ -30,7 +30,12 @@ def test_ci_covers_direct_startup_locked_install_and_every_component_gate() -> N
         "tennis-tests": "python scripts/run_quality_gates.py",
     }
 
-    assert set(jobs) == set(expected_commands)
+    assert set(jobs) == set(expected_commands) | {"vault-portability"}
+    vault_job = jobs["vault-portability"]
+    assert set(vault_job["strategy"]["matrix"]["os"]) == {"ubuntu-latest", "windows-latest"}
+    vault_commands = "\n".join(_run_commands(vault_job))
+    assert "python scripts/test_vault.py" in vault_commands
+    assert "python scripts/test_vault_web.py" in vault_commands
     for job_name, gate_command in expected_commands.items():
         job = jobs[job_name]
         setup_python = next(step for step in job["steps"] if step.get("uses") == "actions/setup-python@v5")

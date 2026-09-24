@@ -9,6 +9,8 @@ desafíos. Scrapling se usa únicamente como transporte HTTP estático.
 
 from __future__ import annotations
 
+from .config import relocated_data_path
+
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1179,7 +1181,7 @@ def _read_json(path: Path) -> Mapping[str, Any] | None:
 def _validated_cached_object(value: object, *, expected_parent: Path) -> Path:
     """Impide que metadata manipulada haga leer fuera de la caché asignada."""
 
-    candidate = Path(str(value)).resolve()
+    candidate = relocated_data_path(str(value))
     parent = expected_parent.resolve()
     if candidate.parent != parent or candidate.suffix != ".bin":
         raise HttpCacheError(f"Ruta de objeto HTTP fuera de caché: {candidate}")

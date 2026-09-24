@@ -7,7 +7,7 @@ Runs TELEGRAM/scripts/publish_cs2.py from any current working directory. After
 a successful or idempotent publication, the Python workflow atomically replaces
 daily_report.txt with unseen qualified opportunities from that date onward and
 records their match IDs in SQLite. The launcher prefers
-TELEGRAM/.venv and otherwise falls back to py -3 or python.
+VAULT/TELEGRAM/.venv; the launcher reconstructs its declared environment.
 
 .PARAMETER Date
 Optional prediction date in YYYY-MM-DD format. When omitted, Python uses the
@@ -31,8 +31,41 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $TelegramRoot = $PSScriptRoot
+. (Join-Path (Split-Path -Parent $TelegramRoot) 'scripts\vault_bootstrap.ps1')
+Initialize-ProjectVault -RepositoryRoot (Split-Path -Parent $TelegramRoot) -DryRun:$DryRun
+$TelegramStateRoot = Get-VaultEnvironmentRoot -ComponentRoot $TelegramRoot
 $PublisherScript = Join-Path $TelegramRoot 'scripts\publish_cs2.py'
-$VenvPython = Join-Path $TelegramRoot '.venv\Scripts\python.exe'
+$VenvRoot = Join-Path $TelegramStateRoot '.venv'
+$VenvPython = Join-Path $VenvRoot 'Scripts\python.exe'
+$RequirementsPath = Join-Path $TelegramRoot 'requirements.txt'
+$RequirementsHash = (Get-FileHash -LiteralPath $RequirementsPath -Algorithm SHA256).Hash
+$RequirementsStamp = Join-Path $VenvRoot '.requirements.sha256'
+$BasePython = Get-VaultBasePython
+$EnvironmentOk = $false
+if (Test-Path -LiteralPath $VenvPython) {
+    & $VenvPython -c "import sys, zoneinfo; zoneinfo.ZoneInfo('Europe/Madrid'); raise SystemExit(0 if sys.version_info[:2] == (3,13) else 1)" *> $null
+    $EnvironmentOk = ($LASTEXITCODE -eq 0)
+}
+if (-not $EnvironmentOk) {
+    if ($DryRun) { throw 'DryRun no instala dependencias: prepara primero el entorno con un arranque normal.' }
+    New-Item -ItemType Directory -Path $TelegramStateRoot -Force | Out-Null
+    & $BasePython -m venv $VenvRoot
+    if ($LASTEXITCODE -ne 0) { throw '[VAULT] No se pudo preparar el entorno de Telegram.' }
+    & $VenvPython -m pip install --disable-pip-version-check -r $RequirementsPath
+    if ($LASTEXITCODE -ne 0) { throw '[VAULT] No se pudieron instalar las dependencias de Telegram.' }
+    & $VenvPython -m pip check
+    if ($LASTEXITCODE -ne 0) { throw '[VAULT] El entorno de Telegram tiene dependencias incompatibles.' }
+}
+if (-not $DryRun) {
+    $installedHash = if (Test-Path -LiteralPath $RequirementsStamp) { (Get-Content -LiteralPath $RequirementsStamp -Raw).Trim() } else { '' }
+    if ($installedHash -ne $RequirementsHash) {
+        & $VenvPython -m pip install --disable-pip-version-check -r $RequirementsPath
+        if ($LASTEXITCODE -ne 0) { throw '[VAULT] No se pudieron sincronizar las dependencias de Telegram.' }
+        [IO.File]::WriteAllText($RequirementsStamp, $RequirementsHash)
+    }
+    & $VenvPython -m pip check
+    if ($LASTEXITCODE -ne 0) { throw '[VAULT] pip check de Telegram ha fallado.' }
+}
 
 if (-not (Test-Path -LiteralPath $PublisherScript -PathType Leaf)) {
     throw "Telegram publisher not found: $PublisherScript"
@@ -48,18 +81,7 @@ if ($DryRun.IsPresent) {
 
 Push-Location -LiteralPath $TelegramRoot
 try {
-    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
-        & $VenvPython @PublisherArguments
-    }
-    elseif (Get-Command py -ErrorAction SilentlyContinue) {
-        & py -3 @PublisherArguments
-    }
-    elseif (Get-Command python -ErrorAction SilentlyContinue) {
-        & python @PublisherArguments
-    }
-    else {
-        throw 'Python was not found. Create TELEGRAM/.venv or install Python 3.'
-    }
+    & $VenvPython @PublisherArguments
 
     if ($LASTEXITCODE -ne 0) {
         throw "Telegram publisher exited with code $LASTEXITCODE."

@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "MODEL"
@@ -44,10 +45,10 @@ from PIPELINE.opportunity import (
 )
 
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_RUNS = ROOT / "PIPELINE" / "runs"
-DEFAULT_BACKUP_DIR = ROOT / "BBDD" / "backups"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_RUNS = STATE_ROOT / "PIPELINE" / "runs"
+DEFAULT_BACKUP_DIR = STATE_ROOT / "BBDD" / "backups"
 DEFAULT_MIRROR_BACKUP_DIR = build_db.DEFAULT_MIRROR_BACKUP_DIR
 
 TTL_DAYS = {
@@ -178,7 +179,7 @@ def context_from_record(record: dict[str, Any]) -> dict[str, Any] | None:
     if isinstance(context, dict) and context:
         return context
     detail = record.get("detail") or {}
-    meta = ((detail.get("match") or {}).get("maps_box_meta") or detail.get("maps_box_meta"))
+    meta = (detail.get("match") or {}).get("maps_box_meta") or detail.get("maps_box_meta")
     if meta:
         try:
             return parse_match_context_meta(meta)
@@ -341,13 +342,9 @@ def _prediction_estimate_values(prediction: dict[str, Any]) -> dict[str, float |
     level = str(prediction.get("estimate_confidence_level") or "").strip().lower()
     return {
         "ensemble_disagreement": _bounded_estimate_float(disagreement, 0.5),
-        "estimate_band_half_width": _bounded_estimate_float(
-            prediction.get("estimate_band_half_width"), 0.5
-        ),
+        "estimate_band_half_width": _bounded_estimate_float(prediction.get("estimate_band_half_width"), 0.5),
         "estimate_confidence_level": level if level in {"low", "medium", "high"} else None,
-        "estimate_history_coverage": _bounded_estimate_float(
-            prediction.get("estimate_history_coverage"), 1.0
-        ),
+        "estimate_history_coverage": _bounded_estimate_float(prediction.get("estimate_history_coverage"), 1.0),
     }
 
 
@@ -377,9 +374,7 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             (match_id,),
         ).fetchone()
         model_trace = row.get("model_trace") or {}
-        version = str(
-            model_trace.get("model_version") or f"untraced_model@{run_dir.name}"
-        )
+        version = str(model_trace.get("model_version") or f"untraced_model@{run_dir.name}")
         decision_prob = pred.get("decision_prob_team1")
         if decision_prob is None:
             decision_prob = pred.get("risk_adjusted_prob_team1")
@@ -392,14 +387,12 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             else max(decision_prob, 1.0 - decision_prob)
         )
         reliability = float(pred.get("reliability_score") or 0.0)
-        favorite_side = pred.get("decision_favorite_side") or (
-            "team1" if decision_prob >= 0.5 else "team2"
-        )
+        favorite_side = pred.get("decision_favorite_side") or ("team1" if decision_prob >= 0.5 else "team2")
         favorite_team_id = None
         if match_row is not None:
             favorite_team_id = match_row[0] if favorite_side == "team1" else match_row[1]
-        context = ((row.get("controls") or {}).get("tournament_context") or {})
-        policy = ((row.get("controls") or {}).get("decision_policy") or {})
+        context = (row.get("controls") or {}).get("tournament_context") or {}
+        policy = (row.get("controls") or {}).get("decision_policy") or {}
         context_environment = str(context.get("environment") or "unknown").lower()
         if context_environment not in {"lan", "online", "unknown"}:
             context_environment = "unknown"
@@ -434,32 +427,20 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             "decision_policy_json": json.dumps(policy, ensure_ascii=False),
             "reliability_score": reliability,
             "prediction_regime": (
-                pred.get("prediction_regime")
-                if pred.get("prediction_regime") in {"odds", "no_odds"}
-                else "no_odds"
+                pred.get("prediction_regime") if pred.get("prediction_regime") in {"odds", "no_odds"} else "no_odds"
             ),
             "prediction_architecture": pred.get("prediction_architecture"),
-            "opening_odds_recovered": int(
-                bool(pred.get("opening_odds_recovered"))
-            ),
-            "opening_odds_captured_at_utc": pred.get(
-                "opening_odds_captured_at_utc"
-            ),
+            "opening_odds_recovered": int(bool(pred.get("opening_odds_recovered"))),
+            "opening_odds_captured_at_utc": pred.get("opening_odds_captured_at_utc"),
             **_prediction_estimate_values(pred),
             "opportunity_score": opp_score,
             "opportunity_eligible": int(bool(opp_eligible)),
             "opportunity_rank": pred.get("opportunity_rank"),
             "opportunity_rank_day": pred.get("opportunity_rank_day"),
             "is_best_opportunity": int(bool(pred.get("is_best_opportunity"))),
-            "opportunity_policy_version": (
-                pred.get("opportunity_policy_version") or OPPORTUNITY_POLICY_VERSION
-            ),
-            "opportunity_min_confidence": (
-                pred.get("opportunity_min_confidence") or MIN_DECISION_CONFIDENCE
-            ),
-            "opportunity_min_reliability": (
-                pred.get("opportunity_min_reliability") or MIN_RELIABILITY
-            ),
+            "opportunity_policy_version": (pred.get("opportunity_policy_version") or OPPORTUNITY_POLICY_VERSION),
+            "opportunity_min_confidence": (pred.get("opportunity_min_confidence") or MIN_DECISION_CONFIDENCE),
+            "opportunity_min_reliability": (pred.get("opportunity_min_reliability") or MIN_RELIABILITY),
             "decision_edge_team1_vs_market": pred.get("decision_edge_team1_vs_market"),
             "favorite_team_id": favorite_team_id,
             "favorite_name": pred.get("decision_favorite"),
@@ -488,11 +469,7 @@ def insert_predictions(conn: sqlite3.Connection, run_dir: Path) -> int:
             "rosters_json": json.dumps(row.get("rosters"), ensure_ascii=False),
         }
         columns = list(values)
-        update_columns = [
-            column
-            for column in columns
-            if column not in {"match_id", "hltv_match_id", "model_version"}
-        ]
+        update_columns = [column for column in columns if column not in {"match_id", "hltv_match_id", "model_version"}]
         conn.execute(
             f"""
             INSERT INTO predictions({", ".join(columns)})
@@ -607,11 +584,7 @@ def upsert_prediction_ledger(
             probability,
             build_db.safe_float(pred.get("decision_prob_team1")),
             build_db.safe_float(pred.get("reliability_score")),
-            (
-                pred.get("prediction_regime")
-                if pred.get("prediction_regime") in {"odds", "no_odds"}
-                else "no_odds"
-            ),
+            (pred.get("prediction_regime") if pred.get("prediction_regime") in {"odds", "no_odds"} else "no_odds"),
             pred.get("prediction_architecture"),
             int(bool(pred.get("opening_odds_recovered"))),
             pred.get("opening_odds_captured_at_utc"),
@@ -681,10 +654,7 @@ def finalize_prediction_ledger(conn: sqlite3.Connection, now: str | None = None)
         actual = int(int(ledger[6]) == int(ledger[1]))
         probability = min(max(float(ledger[3]), 1e-9), 1.0 - 1e-9)
         predicted = int(probability >= 0.5)
-        log_loss = -(
-            actual * math.log(probability)
-            + (1 - actual) * math.log(1.0 - probability)
-        )
+        log_loss = -(actual * math.log(probability) + (1 - actual) * math.log(1.0 - probability))
         conn.execute(
             """
             UPDATE prediction_ledger
@@ -719,7 +689,7 @@ def _prediction_has_player_snapshot(row: dict[str, Any]) -> bool:
 
     rosters = row.get("rosters") or {}
     for side in ("team1", "team2"):
-        players = ((rosters.get(side) or {}).get("players") or [])
+        players = (rosters.get(side) or {}).get("players") or []
         if not any((player.get("stats") or {}).get("stats") for player in players):
             return False
     return True
@@ -783,19 +753,38 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
     rankings = read_json(run_dir / "rankings_index.json", {})
     for key, entity_type in {"hltv": "ranking_hltv", "valve": "ranking_valve"}.items():
         state = rankings.get(key) or {}
+        # A cache hit is not a new capture. Never extend its freshness forever.
+        if not state or state.get("skipped_by_freshness"):
+            continue
         status = "ok" if state.get("ok") else "error" if state else "partial"
-        touched += upsert_fetch_state(conn, entity_type, "global", status, fetched_at=state.get("captured_at") or captured_at)
+        touched += upsert_fetch_state(
+            conn, entity_type, "global", status, fetched_at=state.get("captured_at") or captured_at
+        )
     assets = read_json(run_dir / "match_assets_index.json", {})
     for item in assets.get("index") or []:
         status = "ok" if item.get("status") == "ok" else "partial" if item.get("status") == "partial" else "error"
-        touched += upsert_fetch_state(conn, "match_assets", str(item.get("id") or ""), status, fetched_at=item.get("captured_at") or captured_at)
+        touched += upsert_fetch_state(
+            conn, "match_assets", str(item.get("id") or ""), status, fetched_at=item.get("captured_at") or captured_at
+        )
     for path in sorted((run_dir / "analytics").glob("*.json")):
         payload = read_json(path, {})
         status = "ok" if payload.get("available") else "partial"
-        touched += upsert_fetch_state(conn, "match_analytics", str(payload.get("match_id") or path.stem), status, fetched_at=payload.get("captured_at") or captured_at)
+        touched += upsert_fetch_state(
+            conn,
+            "match_analytics",
+            str(payload.get("match_id") or path.stem),
+            status,
+            fetched_at=payload.get("captured_at") or captured_at,
+        )
     for path in sorted((run_dir / "match_snapshots").glob("*.json")):
         payload = read_json(path, {})
-        touched += upsert_fetch_state(conn, "match_detail", str(payload.get("id") or path.stem), "ok", fetched_at=payload.get("captured_at") or captured_at)
+        touched += upsert_fetch_state(
+            conn,
+            "match_detail",
+            str(payload.get("id") or path.stem),
+            "ok",
+            fetched_at=payload.get("captured_at") or captured_at,
+        )
     return touched
 
 
@@ -882,11 +871,12 @@ def ingest_run(
 
         match_id_map = {
             str(hltv_id): int(match_id)
-            for match_id, hltv_id in conn.execute("SELECT match_id, hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL")
+            for match_id, hltv_id in conn.execute(
+                "SELECT match_id, hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL"
+            )
         }
         team_ids = {
-            dataio.clean_team(name): int(team_id)
-            for team_id, name in conn.execute("SELECT team_id, name FROM teams")
+            dataio.clean_team(name): int(team_id) for team_id, name in conn.execute("SELECT team_id, name FROM teams")
         }
         team_ids_by_hltv = {
             str(hltv_id): int(team_id)
@@ -933,6 +923,12 @@ def ingest_run(
         if round_report["quarantine_reasons"]:
             print("[round-history] quarantine=" + json.dumps(round_report["quarantine_reasons"]))
         counts["team_ranking_snapshots_rows"] += build_db.insert_team_rankings(conn.cursor(), team_ids_by_hltv)
+        from BBDD.ranking_store import ingest_rankings
+
+        badge_report = ingest_rankings(conn, run_dir, apply=True)
+        counts["match_ranking_observations_rows"] += badge_report["counts"].get("inserted", 0)
+        if badge_report["quarantine_reasons"]:
+            print("[rankings] quarantine=" + json.dumps(badge_report["quarantine_reasons"]))
         conn.execute(
             """
             UPDATE matches
@@ -977,7 +973,11 @@ def ingest_run(
         try:
             diag = read_json(run_dir / "fetch_diagnostics.json", {})
             req_made = requests_made if requests_made is not None else int(diag.get("http_attempts") or 0)
-            req_skip = requests_skipped_by_freshness if requests_skipped_by_freshness is not None else int(diag.get("freshness_skipped") or 0)
+            req_skip = (
+                requests_skipped_by_freshness
+                if requests_skipped_by_freshness is not None
+                else int(diag.get("freshness_skipped") or 0)
+            )
             conn.execute(
                 "INSERT INTO ingest_runs(run_id, started_at_utc, finished_at_utc, status, rows_upserted_json, "
                 "requests_made, requests_skipped_by_freshness, note) VALUES (?,?,?,?,?,?,?,?)",
@@ -1008,7 +1008,7 @@ def ingest_run(
 
 
 def latest_run_dir() -> Path:
-    manifest = read_json(ROOT / "PIPELINE" / "master" / "manifest.json", {})
+    manifest = read_json(STATE_ROOT / "PIPELINE" / "master" / "manifest.json", {})
     run_id = manifest.get("last_run_id")
     if run_id:
         path = DEFAULT_RUNS / run_id
@@ -1039,9 +1039,7 @@ def main() -> int:
     run_dir = Path(args.run_dir) if args.run_dir else latest_run_dir()
     backup_dir = None if args.no_backup else Path(args.backup_dir)
     mirror = (
-        None
-        if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir
-        else Path(args.mirror_backup_dir)
+        None if args.no_backup or args.no_mirror_backup or not args.mirror_backup_dir else Path(args.mirror_backup_dir)
     )
     result = ingest_run(
         run_dir,

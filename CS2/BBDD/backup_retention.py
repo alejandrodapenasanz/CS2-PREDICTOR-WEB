@@ -25,8 +25,8 @@ from typing import Any, Iterator, Literal, Sequence
 POLICY_VERSION = 1
 CONFIG_SCHEMA_VERSION = 1
 APPROVAL_MARKER_VERSION = 1
-DEFAULT_BBDD_DIR = Path(__file__).resolve().parent
-DEFAULT_CONFIG = DEFAULT_BBDD_DIR / "backup_retention.json"
+DEFAULT_BBDD_DIR = Path(__file__).resolve().parents[2] / "VAULT" / "CS2" / "BBDD"
+DEFAULT_CONFIG = Path(__file__).with_name("backup_retention.json")
 LIVE_PROTECTED_NAMES = ("cs2.db", "cs2.db-wal", "cs2.db-shm", "cs2.db-journal")
 HARD_CODED_CLEANUP_TARGETS = ("cs2_dump.sql", "cs2_integrity_test.db")
 RETENTION_LOCK_NAME = ".backup-retention.lock"

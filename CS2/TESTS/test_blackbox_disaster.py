@@ -87,6 +87,14 @@ def _make_synthetic_db(db_path: Path) -> None:
             "INSERT INTO raw_snapshots(raw_snapshot_id,kind,run_id,source_file,payload_json) "
             "VALUES (1,'match_snapshot','R1','runs/R1/x.json','{\"a\":1}')"
         )
+        conn.execute(
+            "INSERT INTO match_team_ranking_observations(match_id,team_id,hltv_match_id,"
+            "hltv_team_id,ranking_type,position,ranking_date,captured_at_utc,ranking_url,"
+            "match_url,source_file,source_sha256) VALUES (1,1,'1000001','101','hltv',40,"
+            "'2025-05-26','2025-05-31T10:00:00+00:00',"
+            "'https://www.hltv.org/ranking/teams/2025/may/26/101',"
+            "'https://www.hltv.org/matches/1000001/a-vs-b','fixture.html.gz','fixture-sha')"
+        )
         # DERIVADA: debe quedar FUERA de la caja negra.
         conn.execute(
             "INSERT INTO ratings_history(rating_row_id,entity_type,entity_id,before_match_id,as_of_date,rating,rd) "
@@ -151,6 +159,7 @@ class BlackboxDisasterTests(unittest.TestCase):
         for t in bb.SOURCE_OF_TRUTH_TABLES:
             self.assertEqual(before[t], after[t], f"la tabla fuente '{t}' difiere tras restaurar")
         self.assertEqual(_count(self.db, "prediction_ledger"), 1)
+        self.assertEqual(_count(self.db, "match_team_ranking_observations"), 1)
 
         # 6) la tabla DERIVADA no se guardo y queda vacia.
         self.assertGreater(_count(aside, "ratings_history"), 0, "el original tenia una fila derivada")

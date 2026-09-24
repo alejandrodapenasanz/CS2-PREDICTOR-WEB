@@ -22,9 +22,11 @@
         HLTV_URL_QUARANTINE_SECONDS      = '900.0'
         HLTV_MAX_HTTP_REQUESTS_PER_RUN   = '2500'
         HLTV_USE_SCRAPLING               = '1'
-        HLTV_SOLVE_CLOUDFLARE            = '1'
+        # HTTP Scrapling sigue activo; los challenges abren directamente grab_cf.py.
+        # El navegador Stealth queda solo como alternativa opt-in, no como paso previo.
+        HLTV_SOLVE_CLOUDFLARE            = '0'
         HLTV_IMPERSONATE                 = 'chrome'
-        # Si Cloudflare exige interaccion, la ventana debe ser visible al operador.
+        # Si se habilita Stealth expresamente, su ventana tambien sera visible.
         HLTV_STEALTH_HEADLESS            = '0'
         HLTV_STEALTH_TIMEOUT_MS          = '45000'
         HLTV_STEALTH_MAX_SOLVES_PER_RUN  = '6'

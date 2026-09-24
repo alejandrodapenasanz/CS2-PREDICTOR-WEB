@@ -40,9 +40,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent  # .../CS2/BBDD
 CS2_ROOT = ROOT.parent  # .../CS2
-DEFAULT_DB = ROOT / "cs2.db"
-DEFAULT_BLACKBOX = ROOT / "BLACKBOX"
-DEFAULT_BACKUP_DIR = ROOT / "backups"
+STATE_ROOT = CS2_ROOT.parent / "VAULT" / "CS2" / "BBDD"
+DEFAULT_DB = STATE_ROOT / "cs2.db"
+DEFAULT_BLACKBOX = STATE_ROOT / "BLACKBOX"
+DEFAULT_BACKUP_DIR = STATE_ROOT / "backups"
 SCHEMA_SQL = ROOT / "cs2_prediction_schema.sql"
 BUILD_DB = ROOT / "build_db.py"
 
@@ -78,6 +79,7 @@ SOURCE_OF_TRUTH_TABLES: tuple[str, ...] = (
     "raw_snapshots",
     "player_stat_snapshots",
     "team_ranking_snapshots",
+    "match_team_ranking_observations",
     "match_analytics_snapshots",
     "match_analytics_map_stats",
     "match_analytics_map_handicap",

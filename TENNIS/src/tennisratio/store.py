@@ -9,6 +9,8 @@ written afterward and can be repaired from that published manifest.
 
 from __future__ import annotations
 
+from ..config import relocated_data_path
+
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from contextlib import contextmanager
@@ -273,7 +275,7 @@ class TennisRatioStore:
         return GoodProfileSnapshot(
             source_player_key=str(row["source_player_key"]),
             source_sha256=str(row["source_sha256"]),
-            compressed_path=Path(str(row["compressed_path"])).resolve(),
+            compressed_path=relocated_data_path(str(row["compressed_path"])),
         )
 
     def record_profile(

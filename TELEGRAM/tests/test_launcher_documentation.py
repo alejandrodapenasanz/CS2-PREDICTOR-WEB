@@ -32,7 +32,8 @@ def test_launcher_is_independent_of_the_calling_directory() -> None:
 
     assert "$PSScriptRoot" in launcher
     assert "scripts\\publish_cs2.py" in launcher
-    assert ".venv\\Scripts\\python.exe" in launcher
+    assert "$VenvRoot = Join-Path $TelegramStateRoot '.venv'" in launcher
+    assert "$VenvPython = Join-Path $VenvRoot 'Scripts\\python.exe'" in launcher
     assert "[switch]$DryRun" in launcher
     assert "--dry-run" in launcher
     assert "daily_report.txt" in launcher

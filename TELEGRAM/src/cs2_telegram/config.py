@@ -14,7 +14,7 @@ import re
 from typing import Mapping
 
 
-TELEGRAM_ROOT = Path(__file__).resolve().parents[2]
+TELEGRAM_ROOT = Path(__file__).resolve().parents[3] / "VAULT" / "TELEGRAM"
 DEFAULT_ENV_FILE = TELEGRAM_ROOT / ".env"
 DEFAULT_STATE_DB = TELEGRAM_ROOT / "data" / "telegram_publish_state.sqlite3"
 DEFAULT_CHANNEL_ID = "@cs2DailyPicks"

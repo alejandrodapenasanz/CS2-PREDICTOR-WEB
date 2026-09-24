@@ -79,12 +79,13 @@ else:
     )
 
 CS2_ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = CS2_ROOT.parent / "VAULT" / "CS2"
 DEFAULT_CONFIG = CS2_ROOT / "MODEL" / "config.yaml"
-DEFAULT_REGISTRY = CS2_ROOT / "MODEL" / "artifacts" / "registry"
-DEFAULT_PRODUCTION = CS2_ROOT / "MODEL" / "artifacts" / "model.pkl"
-DEFAULT_RUNS = CS2_ROOT / "PIPELINE" / "runs"
-DEFAULT_MASTER_MANIFEST = CS2_ROOT / "PIPELINE" / "master" / "manifest.json"
-DEFAULT_DB = CS2_ROOT / "BBDD" / "cs2.db"
+DEFAULT_REGISTRY = STATE_ROOT / "MODEL" / "artifacts" / "registry"
+DEFAULT_PRODUCTION = STATE_ROOT / "MODEL" / "artifacts" / "model.pkl"
+DEFAULT_RUNS = STATE_ROOT / "PIPELINE" / "runs"
+DEFAULT_MASTER_MANIFEST = STATE_ROOT / "PIPELINE" / "master" / "manifest.json"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
 
 _RUN_ID_PATTERN = re.compile(r"(?<![0-9A-Za-z_-])(\d{4}-\d{2}-\d{2}_\d{6}Z)(?![0-9A-Za-z_-])")
 _CONFIRM_TOKEN_PATTERN = re.compile(r"^[0-9a-f]{64}$")

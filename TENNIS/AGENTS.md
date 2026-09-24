@@ -12,6 +12,13 @@ Estas reglas se aplican en todas las fases y sesiones del proyecto.
 
 ### Excepciones explícitas y limitadas autorizadas por el usuario
 
+- El usuario autorizó la migración plug-and-play a `VAULT/TENNIS/`, fuera
+  del código versionado. Esta excepción permite cambiar rutas y trasladar
+  archivos privados íntegros, no modificar el triplete sagrado. Código,
+  fixtures y configuración declarativa permanecen en `TENNIS/`; el estado y
+  los entornos regenerables se guardan en VAULT. La orquestación compartida
+  puede preparar y verificar esta separación sin duplicar lógica de dominio.
+
 - El usuario autorizó expresamente que la fase 9 adapte de forma mínima
   `WEB/build_web.py`, `WEB/index.html` y el `WEB/data.js` generado para mostrar
   los partidos de tenis, su ganador previsto, probabilidad y fiabilidad.

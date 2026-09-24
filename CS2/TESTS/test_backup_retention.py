@@ -616,6 +616,22 @@ def test_backup_database_first_run_preserves_every_backup_without_marker(tmp_pat
     assert not (backups / APPROVAL_MARKER_NAME).exists()
 
 
+def test_vault_backup_keeps_retention_configuration_in_code(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A migrated database must not look for versioned policy inside VAULT."""
+    bbdd, backups, live, config = _managed_sqlite_layout(tmp_path)
+    source_config = tmp_path / "source-policy.json"
+    config.rename(source_config)
+    monkeypatch.setattr(build_db, "STATE_ROOT", bbdd.parent)
+    monkeypatch.setattr(build_db, "BACKUP_RETENTION_CONFIG", source_config)
+    result = build_db.backup_database(live, backups)
+    assert Path(result["backup"]).is_file()
+    assert result["backup_retention"]["mode"] == "preview"
+    assert not config.exists()
+
+
 def test_two_backups_in_the_same_second_have_distinct_microsecond_names(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

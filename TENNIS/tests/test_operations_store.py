@@ -149,7 +149,7 @@ def test_schema_is_versioned_and_default_path_is_inside_tennis() -> None:
     """El esquema y la ruta productiva quedan versionados dentro del proyecto."""
 
     assert OPERATIONS_DATABASE_PATH == (
-        PROJECT_ROOT / "BBDD" / "tennis.sqlite3"
+        PROJECT_ROOT.parent / "VAULT" / "TENNIS" / "BBDD" / "tennis.sqlite3"
     )
     with temporary_store() as store:
         version = store.connection.execute(

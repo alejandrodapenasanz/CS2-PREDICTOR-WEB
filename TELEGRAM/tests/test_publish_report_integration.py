@@ -132,7 +132,7 @@ def test_success_or_idempotent_noop_writes_report_after_publication(
         """Capture report ordering without touching the real daily report."""
 
         assert received == ()
-        assert root == script.TELEGRAM_ROOT
+        assert root == script.STATE_ROOT
         calls.append("report")
         return tmp_path / "daily_report.txt"
 

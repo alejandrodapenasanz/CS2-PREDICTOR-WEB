@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "MODEL"
@@ -29,7 +30,7 @@ from cs2model.identity import is_provisional_team_name
 from cs2model.metrics import metric_dict
 
 
-DEFAULT_REPORT = ROOT / "MODEL" / "results" / "health_gate.json"
+DEFAULT_REPORT = STATE_ROOT / "MODEL" / "results" / "health_gate.json"
 
 
 def utcnow() -> str:
@@ -103,11 +104,7 @@ def _provisional_teams(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 def _prediction_reference_errors(conn: sqlite3.Connection) -> dict[str, int]:
     return {
-        "missing_match": int(
-            conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE match_id IS NULL"
-            ).fetchone()[0]
-        ),
+        "missing_match": int(conn.execute("SELECT COUNT(*) FROM predictions WHERE match_id IS NULL").fetchone()[0]),
         "favorite_mismatch": int(
             conn.execute(
                 """
@@ -129,17 +126,14 @@ def _prediction_reference_errors(conn: sqlite3.Connection) -> dict[str, int]:
 
 def _mergeable_identity_duplicates(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     grouped: dict[str, list[tuple[int, str, Any]]] = defaultdict(list)
-    for team_id, name, hltv_id in conn.execute(
-        "SELECT team_id, name, hltv_id FROM teams"
-    ):
+    for team_id, name, hltv_id in conn.execute("SELECT team_id, name, hltv_id FROM teams"):
         key = dataio.clean_team(name)
         if key:
             grouped[key].append((int(team_id), str(name), hltv_id))
     return [
         {"key": key, "rows": values}
         for key, values in grouped.items()
-        if len(values) > 1
-        and len({str(value[2]) for value in values if value[2] is not None}) <= 1
+        if len(values) > 1 and len({str(value[2]) for value in values if value[2] is not None}) <= 1
     ]
 
 
@@ -154,8 +148,13 @@ def _coverage_degradation(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     if not max_date:
         return []
     columns = (
-        "has_prematch_odds", "has_player_snapshot", "has_ranking_snapshot",
-        "has_analytics", "has_context", "has_box_score", "has_veto",
+        "has_prematch_odds",
+        "has_player_snapshot",
+        "has_ranking_snapshot",
+        "has_analytics",
+        "has_context",
+        "has_box_score",
+        "has_veto",
     )
     cfg = get_runtime_config().health_gates
     output: list[dict[str, Any]] = []
@@ -208,11 +207,7 @@ def validate_data(db_path: Path) -> dict[str, Any]:
     unconfirmed_live = _unconfirmed_live_matches(conn)
     provisional_teams = _provisional_teams(conn)
     prediction_errors = _prediction_reference_errors(conn)
-    missing_match_ids = int(
-        conn.execute(
-            "SELECT COUNT(*) FROM matches WHERE hltv_match_id IS NULL"
-        ).fetchone()[0]
-    )
+    missing_match_ids = int(conn.execute("SELECT COUNT(*) FROM matches WHERE hltv_match_id IS NULL").fetchone()[0])
     physical_duplicates = deduplicate_matches.duplicate_pairs(conn)
     impossible_formats = int(
         conn.execute(
@@ -324,10 +319,7 @@ def validate_candidate(
     ]
     if artifact is not None and metrics_path.exists() and predictions_path.exists():
         metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
-        evaluation_model = str(
-            artifact.metadata.get("evaluation_policy")
-            or artifact.metadata.get("production_model")
-        )
+        evaluation_model = str(artifact.metadata.get("evaluation_policy") or artifact.metadata.get("production_model"))
         expected = metrics.get(evaluation_model) or {}
         recalculated = _prediction_metrics(predictions_path, evaluation_model)
         metric_delta = max(
@@ -366,8 +358,7 @@ def validate_candidate(
             name
             for name in ("player_snapshots", "rankings", "analytics", "analytics_extended")
             if (policies.get(name) or {}).get("enabled")
-            and (policies.get(name) or {}).get("activation")
-            != "fold_local_temporal_log_loss"
+            and (policies.get(name) or {}).get("activation") != "fold_local_temporal_log_loss"
         ]
         checks.append(
             _check(
@@ -410,11 +401,8 @@ def validate_live_ledger(db_path: Path) -> dict[str, Any]:
         probability = float(row["prob_team1"])
         actual = int(row["actual_team1_win"])
         correct = int((probability >= 0.5) == bool(actual))
-        loss = -(actual * math.log(probability) + (1-actual) * math.log(1-probability))
-        if (
-            correct != int(row["prediction_correct"])
-            or abs(loss - float(row["realized_log_loss"])) > 1e-10
-        ):
+        loss = -(actual * math.log(probability) + (1 - actual) * math.log(1 - probability))
+        if correct != int(row["prediction_correct"]) or abs(loss - float(row["realized_log_loss"])) > 1e-10:
             inconsistent += 1
     late_evaluated = conn.execute(
         """
@@ -465,12 +453,13 @@ def main() -> int:
     parser.add_argument("--phase", choices=("data", "candidate", "live"), required=True)
     parser.add_argument("--db", default=str(build_db.DEFAULT_DB))
     parser.add_argument("--artifact")
-    parser.add_argument("--results", default=str(ROOT / "MODEL" / "results"))
+    parser.add_argument("--results", default=str(STATE_ROOT / "MODEL" / "results"))
     parser.add_argument("--config", default=None)
     parser.add_argument("--report", default=str(DEFAULT_REPORT))
     args = parser.parse_args()
     if args.config:
         from cs2model.config import set_runtime_config
+
         set_runtime_config(load_config(args.config))
     db_path = Path(args.db)
     if args.phase == "data":
@@ -482,9 +471,7 @@ def main() -> int:
     else:
         report = validate_live_ledger(db_path)
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.report).write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    Path(args.report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     store_report(db_path, report)
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["status"] == "pass" else 2

@@ -1,12 +1,12 @@
 [tool.pytest.ini_options]
 testpaths = ["CS2/TESTS"]
 pythonpath = ["CS2"]
-cache_dir = "CS2/TESTS/.cache/pytest"
+cache_dir = "VAULT/CS2/TESTS/.cache/pytest"
 
 [tool.ruff]
 line-length = 120
 target-version = "py313"
-cache-dir = "CS2/TESTS/.cache/ruff"
+cache-dir = "VAULT/CS2/TESTS/.cache/ruff"
 exclude = ["CS2/SCRAPER/Scrapling", "**/.venv", "**/site-packages"]
 
 [tool.ruff.lint]
@@ -26,7 +26,7 @@ files = [
     "CS2/MODEL/monitor_drift.py",
     "CS2/MODEL/smoke_pipeline.py",
 ]
-cache_dir = "CS2/TESTS/.cache/mypy"
+cache_dir = "VAULT/CS2/TESTS/.cache/mypy"
 ignore_missing_imports = true
 follow_imports = "skip"
 check_untyped_defs = true

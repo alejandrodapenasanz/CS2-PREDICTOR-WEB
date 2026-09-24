@@ -19,7 +19,7 @@ from typing import Any
 
 import pandas as pd
 
-from ..config import OPERATIONS_DATABASE_PATH, PROJECT_ROOT
+from ..config import OPERATIONS_DATABASE_PATH, PROJECT_ROOT, STATE_ROOT
 
 from .identifiers import (
     canonical_date,
@@ -143,17 +143,12 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         """Impide que una configuración accidental escriba fuera de TENNIS."""
 
         path = Path(database_path).expanduser().resolve(strict=False)
-        project_root = PROJECT_ROOT.resolve(strict=False)
-        try:
-            path.relative_to(project_root)
-        except ValueError as exc:
+        if not any(path.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
             raise OperationsValidationError(
-                "La base operativa debe vivir dentro de TENNIS/."
-            ) from exc
-        if path.exists() and path.is_dir():
-            raise OperationsValidationError(
-                "database_path debe apuntar a un archivo SQLite."
+                "La base operativa debe vivir dentro de TENNIS/ o VAULT/TENNIS/."
             )
+        if path.exists() and path.is_dir():
+            raise OperationsValidationError("database_path debe apuntar a un archivo SQLite.")
         return path
 
     def __enter__(self) -> "OperationsStore":
@@ -191,9 +186,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
     def _initialize_schema(self) -> None:
         """Aplica el esquema y migra v1 a v2 de forma atómica y sin pérdida."""
 
-        current_version = int(
-            self.connection.execute("PRAGMA user_version").fetchone()[0]
-        )
+        current_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if current_version > SCHEMA_VERSION:
             self.connection.close()
             raise OperationsSchemaError(
@@ -203,9 +196,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         escaped_now = self._now().replace("'", "''")
         prediction_columns = {
             str(row[1])
-            for row in self.connection.execute(
-                "PRAGMA table_info(predictions)"
-            ).fetchall()
+            for row in self.connection.execute("PRAGMA table_info(predictions)").fetchall()
         }
         upgrade_sql = ""
         if (
@@ -214,8 +205,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             and "model_training_available_max_date" not in prediction_columns
         ):
             upgrade_sql = (
-                "ALTER TABLE predictions ADD COLUMN "
-                "model_training_available_max_date TEXT;\n"
+                "ALTER TABLE predictions ADD COLUMN model_training_available_max_date TEXT;\n"
             )
         migration = (
             "BEGIN IMMEDIATE;\n"
@@ -233,9 +223,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         except sqlite3.DatabaseError as exc:
             if self.connection.in_transaction:
                 self.connection.rollback()
-            raise OperationsSchemaError(
-                "No se pudo inicializar el esquema operativo."
-            ) from exc
+            raise OperationsSchemaError("No se pudo inicializar el esquema operativo.") from exc
 
     def _begin(self) -> None:
         """Inicia una transacción de escritura que serializa la selección oficial."""
@@ -270,9 +258,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             existing_run_type=str(existing["run_type"]),
             incoming_run_type=run_type,
         )
-        raise OperationsConflictError(
-            f"run_id '{run_id}' ya existe con un payload distinto."
-        )
+        raise OperationsConflictError(f"run_id '{run_id}' ya existe con un payload distinto.")
 
     def _record_divergent_run_conflict(
         self,
@@ -427,9 +413,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                 "retrieved_at_utc": retrieved_at_utc,
             },
         )
-        snapshot_date_value = optional_scalar(
-            row.get("prediction_date", row.get("match_date"))
-        )
+        snapshot_date_value = optional_scalar(row.get("prediction_date", row.get("match_date")))
         snapshot_date = (
             canonical_date(snapshot_date_value, "snapshot_date")
             if snapshot_date_value is not None
@@ -818,8 +802,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                             incoming_reference=row_payload_hash,
                             details={
                                 "message": (
-                                    "Dos filas distintas comparten "
-                                    "source_match_id en la ejecución."
+                                    "Dos filas distintas comparten source_match_id en la ejecución."
                                 )
                             },
                             now=now,
@@ -860,9 +843,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                     """,
                     (source_match_id,),
                 ).fetchone()
-                prediction_is_valid = (
-                    validity.is_valid and prior_observation is None
-                )
+                prediction_is_valid = validity.is_valid and prior_observation is None
                 invalid_reason = validity.invalid_reason
                 if prior_observation is not None:
                     invalid_reason = "|".join(
@@ -1048,9 +1029,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             matches_inserted=int(matches),
             predictions_inserted=int(row["predictions_inserted"]),
             valid_predictions=int(row["valid_predictions"]),
-            official_predictions_selected=int(
-                row["official_predictions_selected"]
-            ),
+            official_predictions_selected=int(row["official_predictions_selected"]),
             settlements_inserted=int(row["settlements_inserted"]),
             queued_rows=int(run["queued_rows"]),
             reused=True,
@@ -1147,9 +1126,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                     )
                     continue
                 validity = validate_observation_row(row)
-                observed_value = optional_scalar(
-                    row.get("observed_at_utc")
-                )
+                observed_value = optional_scalar(row.get("observed_at_utc"))
                 observed_at = (
                     canonical_utc_datetime(
                         observed_value,
@@ -1238,9 +1215,9 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                     )
                     continue
                 if not validity.is_valid:
-                    if validity.status == "finished" or (
-                        validity.invalid_reason or ""
-                    ).startswith("winner_present"):
+                    if validity.status == "finished" or (validity.invalid_reason or "").startswith(
+                        "winner_present"
+                    ):
                         queued_rows += int(
                             self._queue_issue(
                                 issue_type="invalid_terminal_observation",
@@ -1528,39 +1505,29 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                     ).fetchone()
                     if match is None:
                         raise OperationsValidationError(
-                            "source_match_id de estadística no existe: "
-                            f"{source_match_id}."
+                            f"source_match_id de estadística no existe: {source_match_id}."
                         )
                 player_slug = canonical_slug(
                     row.get("player_slug"),
                     "player_slug",
                 )
                 if player_slug is None:
-                    raise OperationsValidationError(
-                        "player_slug de estadística no puede ser nulo."
-                    )
+                    raise OperationsValidationError("player_slug de estadística no puede ser nulo.")
                 if (
                     match is not None
                     and match["player_1_slug"] is not None
                     and match["player_2_slug"] is not None
-                    and player_slug
-                    not in {match["player_1_slug"], match["player_2_slug"]}
+                    and player_slug not in {match["player_1_slug"], match["player_2_slug"]}
                 ):
-                    raise OperationsValidationError(
-                        "player_slug no pertenece al partido indicado."
-                    )
+                    raise OperationsValidationError("player_slug no pertenece al partido indicado.")
                 gender = required_text(row.get("gender"), "gender")
                 if gender not in {"M", "F"}:
-                    raise OperationsValidationError(
-                        "gender debe ser 'M' o 'F'."
-                    )
+                    raise OperationsValidationError("gender debe ser 'M' o 'F'.")
                 as_of_date = canonical_date(
                     row.get("as_of_date"),
                     "as_of_date",
                 )
-                statistic_name = validate_statistic_name(
-                    row.get("statistic_name")
-                )
+                statistic_name = validate_statistic_name(row.get("statistic_name"))
                 source_kind = validate_source_kind(row.get("source_kind"))
                 statistic_value = optional_float(
                     row.get("statistic_value"),
@@ -1738,9 +1705,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         try:
             return date.fromisoformat(str(row["match_date"]))
         except ValueError as exc:
-            raise OperationsSchemaError(
-                "La base contiene un match_date no canónico."
-            ) from exc
+            raise OperationsSchemaError("La base contiene un match_date no canónico.") from exc
 
     def load_review_queue(
         self,
@@ -1759,9 +1724,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
             )
         status_value = required_text(status, "status")
         if status_value not in {"open", "resolved"}:
-            raise OperationsValidationError(
-                "status de cola debe ser 'open' o 'resolved'."
-            )
+            raise OperationsValidationError("status de cola debe ser 'open' o 'resolved'.")
         return pd.read_sql_query(
             """
             SELECT * FROM review_queue

@@ -16,7 +16,7 @@ import time
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from .config import PROJECT_ROOT
+from .config import STATE_ROOT, PROJECT_ROOT
 from .responsible_http import (
     HttpResponse,
     ResponsibleHttpError,
@@ -24,7 +24,7 @@ from .responsible_http import (
     _retry_after_seconds,
 )
 
-PROFILE_ROOT = PROJECT_ROOT / "data" / "raw" / "_browser_profiles" / "tennis_abstract"
+PROFILE_ROOT = STATE_ROOT / "data" / "raw" / "_browser_profiles" / "tennis_abstract"
 _PAGE_ASSETS = {
     "/blue/style.css",
     "/style.css",

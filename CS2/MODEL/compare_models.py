@@ -27,7 +27,8 @@ from cs2model.model_zoo import available_models
 import evaluate as ev  # reutiliza carga de datos, config, manifest, _fmt
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = ROOT / "MODEL" / "results"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+OUTPUT_DIR = STATE_ROOT / "MODEL" / "results"
 
 
 def _expanding_sliding_equivalent(rows: list[dict[str, Any]], cfg: EvalConfig) -> bool:
@@ -44,24 +45,27 @@ def _expanding_sliding_equivalent(rows: list[dict[str, Any]], cfg: EvalConfig) -
 
 
 def _table(res: dict[str, Any]) -> list[str]:
-    lines = ["| combo | N | log_loss | Brier | ECE | ROC-AUC | Accuracy |\n",
-             "|---|---:|---:|---:|---:|---:|---:|\n"]
+    lines = ["| combo | N | log_loss | Brier | ECE | ROC-AUC | Accuracy |\n", "|---|---:|---:|---:|---:|---:|---:|\n"]
     names = [n for n in res["models"] if res["models"][n].get("n")]
     names.sort(key=lambda n: res["models"][n]["log_loss"])
     for n in names:
         m = res["models"][n]
         tag = " **(BEST)**" if n == res.get("best_combo") else (" _(baseline)_" if n in ("elo", "market") else "")
-        lines.append(f"| {n}{tag} | {m['n']} | {ev._fmt(m['log_loss'])} | {ev._fmt(m['brier'])} | "
-                     f"{ev._fmt(m['ece_10'])} | {ev._fmt(m['roc_auc'])} | {ev._fmt(m['accuracy'])} |\n")
+        lines.append(
+            f"| {n}{tag} | {m['n']} | {ev._fmt(m['log_loss'])} | {ev._fmt(m['brier'])} | "
+            f"{ev._fmt(m['ece_10'])} | {ev._fmt(m['roc_auc'])} | {ev._fmt(m['accuracy'])} |\n"
+        )
     return lines
 
 
 def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
-    out = ["# MODEL_COMPARISON — zoo x block-wise bajo walk-forward anidado\n\n",
-           f"Generado: {manifest['ts_utc']} · commit {manifest.get('git_commit')} · "
-           f"dataset {manifest['dataset_rows']} filas (sha {manifest['dataset_sha256'][:12]}) · seed {manifest['seed']}\n\n",
-           f"Modelos disponibles en el entorno: {', '.join(available_models())}\n\n",
-           "> log loss es la metrica PRIMARIA (objetivo: calibracion y CLV, no accuracy bruta).\n"]
+    out = [
+        "# MODEL_COMPARISON — zoo x block-wise bajo walk-forward anidado\n\n",
+        f"Generado: {manifest['ts_utc']} · commit {manifest.get('git_commit')} · "
+        f"dataset {manifest['dataset_rows']} filas (sha {manifest['dataset_sha256'][:12]}) · seed {manifest['seed']}\n\n",
+        f"Modelos disponibles en el entorno: {', '.join(available_models())}\n\n",
+        "> log loss es la metrica PRIMARIA (objetivo: calibracion y CLV, no accuracy bruta).\n",
+    ]
     for window, res in results.items():
         out.append(f"\n## Ventana {window} (n_eval={res['n_eval']}, folds={res['n_folds']})\n\n")
         if res.get("reused_equivalent_window"):
@@ -70,9 +74,7 @@ def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
                 "los conjuntos train/test de todos los folds son exactamente iguales.\n\n"
             )
         out += _table(res)
-        out.append(
-            f"\n**Estimacion primaria sin sesgo de seleccion: `{res.get('best_combo')}`**\n"
-        )
+        out.append(f"\n**Estimacion primaria sin sesgo de seleccion: `{res.get('best_combo')}`**\n")
         out.append(
             "\nMejor combo fijo retrospectivo (solo diagnostico, no promocionable con "
             f"este mismo outer test): `{res.get('diagnostic_best_combo')}`.\n"
@@ -82,8 +84,10 @@ def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
             out.append(f"\nCalibrador elegido en el mejor combo: {cc[res['best_combo']]}\n")
         b = res.get("betting", {})
         if b:
-            out.append(f"\nApuestas (mejor combo): bets={b.get('bets')}, ROI={ev._fmt(b.get('roi_on_stake'))}, "
-                       f"CLV vs cierre={ev._fmt(b.get('clv_vs_closing_mean'))} (n={b.get('clv_vs_closing_n')}).\n")
+            out.append(
+                f"\nApuestas (mejor combo): bets={b.get('bets')}, ROI={ev._fmt(b.get('roi_on_stake'))}, "
+                f"CLV vs cierre={ev._fmt(b.get('clv_vs_closing_mean'))} (n={b.get('clv_vs_closing_n')}).\n"
+            )
         selected_counts: dict[str, int] = {}
         for decision in res.get("decisions", []):
             selected = decision.get("selected_combo")
@@ -101,14 +105,16 @@ def write_report(results: dict[str, dict], manifest: dict, path: Path) -> None:
             out.append("\nActivacion data-driven (familias que entraron por log loss OOS, no por umbral fijo):\n")
             for m, s in fams.items():
                 out.append(f"- {m}: {sorted(s) or 'ninguna'}\n")
-    out.append("\n---\n*Bucle externo insesgado; familias/hiperparametros/calibrador decididos en el "
-               "bucle interno con datos pasados. Model A sin odds; el mercado es baseline.*\n")
+    out.append(
+        "\n---\n*Bucle externo insesgado; familias/hiperparametros/calibrador decididos en el "
+        "bucle interno con datos pasados. Model A sin odds; el mercado es baseline.*\n"
+    )
     path.write_text("".join(out), encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Comparativa zoo x block-wise (walk-forward anidado).")
-    p.add_argument("--db", type=Path, default=ROOT / "BBDD" / "cs2.db")
+    p.add_argument("--db", type=Path, default=STATE_ROOT / "BBDD" / "cs2.db")
     p.add_argument("--config", type=Path, default=ROOT / "MODEL" / "config.yaml")
     p.add_argument("--synthetic", action="store_true")
     p.add_argument("--window", choices=["expanding", "sliding", "both"], default="expanding")
@@ -154,17 +160,12 @@ def main(argv: list[str] | None = None) -> int:
     windows = ["expanding", "sliding"] if args.window == "both" else [args.window]
     results: dict[str, Any] = {}
     for w in windows:
-        if (
-            w == "sliding"
-            and "expanding" in results
-            and _expanding_sliding_equivalent(rows, cfg)
-        ):
+        if w == "sliding" and "expanding" in results and _expanding_sliding_equivalent(rows, cfg):
             results[w] = copy.deepcopy(results["expanding"])
             results[w]["window"] = "sliding"
             results[w]["reused_equivalent_window"] = "expanding"
             print(
-                "[compare] sliding: mismos bloques train/test que expanding; "
-                "reutilizando resultado exacto.",
+                "[compare] sliding: mismos bloques train/test que expanding; reutilizando resultado exacto.",
                 flush=True,
             )
             continue
@@ -172,9 +173,13 @@ def main(argv: list[str] | None = None) -> int:
         results[w] = run_comparison(rows, base_cols, families, dataclasses.replace(cfg, window=w), comp)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    manifest = ev.run_manifest(rows, cfg, vars(args) | {"models": list(models), "assemblies": list(assemblies)}, results)
+    manifest = ev.run_manifest(
+        rows, cfg, vars(args) | {"models": list(models), "assemblies": list(assemblies)}, results
+    )
     (args.output_dir / "model_comparison.json").write_text(
-        json.dumps({"manifest": manifest, "results": results}, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+        json.dumps({"manifest": manifest, "results": results}, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
     write_report(results, manifest, args.output_dir / "MODEL_COMPARISON.md")
     with (args.output_dir / "experiments.jsonl").open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(manifest, ensure_ascii=False, default=str) + "\n")

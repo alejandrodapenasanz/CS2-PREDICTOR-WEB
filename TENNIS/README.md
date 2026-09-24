@@ -1,5 +1,12 @@
 # Predictor profesional de partidos de tenis
 
+Estado privado portable: datos, BBDD, modelos y entornos viven en
+`../VAULT/TENNIS/`; código, configuración y fixtures siguen aquí.
+`run_tennis.ps1` prepara automáticamente ese estado y el entorno Python 3.13.
+Las rutas de datos históricas de esta documentación se interpretan bajo VAULT.
+Las referencias históricas se resuelven al leerlas, sin reescribir la BBDD ni
+los artefactos. Véase [contexto técnico y contrato VAULT](../DOCS/contexto.md).
+
 ## Objetivo
 
 Construir por fases un sistema profesional, modular y testeable para estimar probabilidades de resultados de partidos de tenis. El diseño debe preservar el orden temporal de la información: para predecir un partido con fecha `D`, únicamente se podrá usar información anterior a `D`.
@@ -1173,3 +1180,18 @@ La descarga con Scrapling distingue el script pasivo JSD de un bloqueo real:
 una cartelera HTTP 200 válida ya no se rechaza solo por incluir ese script.
 Se mantienen robots, pausas y los cortacircuitos WAF. Detalles y pruebas en
 [adquisición HTTP](docs/http_acquisition.md#corrección-del-falso-positivo-jsd-2026-09-05).
+## Corrección de arranque VAULT (13–14/09/2026)
+
+El reentreno identifica el manifiesto de features respecto a `VAULT/TENNIS`,
+sin exigir que esté dentro del código `TENNIS/`. Conserva la referencia relativa,
+los hashes y la puerta champion/challenger. El launcher canaliza stdout y stderr
+de todos los pasos operativos de Python al transcript persistente: una advertencia
+no se convierte en fallo, y un fallo conserva tanto el traceback como su código
+de salida. Las cachés de las puertas locales también residen en VAULT.
+
+Los launchers de tenis comparten un mutex de Windows ligado a la ruta exacta
+de `VAULT/TENNIS`. Si coinciden el arranque raíz y el de tenis, el segundo espera
+con un mensaje visible; no duplica la adquisición ni el entrenamiento. El mutex
+se libera al terminar o al morir el proceso; una interrupción exige verificar los
+artefactos, nunca activar un staging incompleto. El bloqueo no sustituye las
+comprobaciones de integridad ni la puerta de promoción.

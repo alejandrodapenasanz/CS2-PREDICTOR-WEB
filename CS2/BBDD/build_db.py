@@ -38,11 +38,12 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "MODEL"
 sys.path.insert(0, str(MODEL_DIR))
-DAILY_ROOT = ROOT / "PIPELINE"
+DAILY_ROOT = STATE_ROOT / "PIPELINE"
 
 from cs2model import dataio
 from cs2model.features import ChronologicalState, _period_index
@@ -53,6 +54,7 @@ from PIPELINE.opportunity import (
     POLICY_VERSION as OPPORTUNITY_POLICY_VERSION,
 )
 from BBDD.backup_retention import (
+    DEFAULT_CONFIG as BACKUP_RETENTION_CONFIG,
     BackupAutomaticResult,
     FileState,
     backup_operation_lock,
@@ -62,7 +64,7 @@ from BBDD.backup_retention import (
 
 SCHEMA = ROOT / "BBDD" / "cs2_prediction_schema.sql"
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -71,10 +73,10 @@ DEFAULT_RAW = (
     / "history_10000_2026-06-28"
     / "results_all.json"
 )
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_ROSTER_HISTORY = ROOT / "PIPELINE" / "master" / "roster_history.json"
-DEFAULT_BACKUP_DIR = ROOT / "BBDD" / "backups"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_ROSTER_HISTORY = STATE_ROOT / "PIPELINE" / "master" / "roster_history.json"
+DEFAULT_BACKUP_DIR = STATE_ROOT / "BBDD" / "backups"
 _MIRROR_BACKUP_ENV = os.environ.get("CS2_BACKUP_MIRROR_DIR", "").strip()
 DEFAULT_MIRROR_BACKUP_DIR: Path | None = Path(_MIRROR_BACKUP_ENV).expanduser() if _MIRROR_BACKUP_ENV else None
 
@@ -123,9 +125,7 @@ ODDS_LIVE_COLUMNS: dict[str, str] = {
 PREDICTION_LIVE_COLUMNS: dict[str, str] = {
     "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
     "prediction_architecture": "TEXT",
-    "opening_odds_recovered": (
-        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
-    ),
+    "opening_odds_recovered": ("INTEGER CHECK (opening_odds_recovered IN (0,1))"),
     "opening_odds_captured_at_utc": "TEXT",
     "ensemble_disagreement": (
         "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
@@ -152,9 +152,7 @@ PREDICTION_LIVE_COLUMNS: dict[str, str] = {
 PREDICTION_LEDGER_LIVE_COLUMNS: dict[str, str] = {
     "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
     "prediction_architecture": "TEXT",
-    "opening_odds_recovered": (
-        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
-    ),
+    "opening_odds_recovered": ("INTEGER CHECK (opening_odds_recovered IN (0,1))"),
     "opening_odds_captured_at_utc": "TEXT",
     "ensemble_disagreement": (
         "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
@@ -737,7 +735,7 @@ def insert_roster_history(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int])
     roster_history = json.loads(DEFAULT_ROSTER_HISTORY.read_text(encoding="utf-8"))
     player_cache: dict[str, int] = {}
     inserted = 0
-    source_file = str(DEFAULT_ROSTER_HISTORY.relative_to(ROOT))
+    source_file = source_name(DEFAULT_ROSTER_HISTORY)
 
     for team_hltv_id, entry in roster_history.items():
         team_hltv_id = str(entry.get("team_id") or team_hltv_id or "").strip()
@@ -1305,6 +1303,8 @@ def insert_team_rankings(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int]) 
 
 
 def source_name(path: Path) -> str:
+    if path.is_relative_to(STATE_ROOT):
+        return str(path.relative_to(STATE_ROOT))
     try:
         return str(path.relative_to(ROOT))
     except ValueError:
@@ -1342,7 +1342,7 @@ def insert_raw_snapshot(
 
 
 def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
-    runs_dir = ROOT / "PIPELINE" / "runs"
+    runs_dir = STATE_ROOT / "PIPELINE" / "runs"
     if not runs_dir.exists():
         return {"raw_snapshots_rows": 0, "player_stat_snapshots_rows": 0}
 
@@ -1640,8 +1640,8 @@ def _backup_database_once(
         shutil.copy2(target, mirror_target)
         for source in [
             DEFAULT_MASTER,
-            ROOT / "PIPELINE" / "master" / "manifest.json",
-            ROOT / "PIPELINE" / "master" / "roster_history.json",
+            STATE_ROOT / "PIPELINE" / "master" / "manifest.json",
+            STATE_ROOT / "PIPELINE" / "master" / "roster_history.json",
         ]:
             if source.exists():
                 shutil.copy2(source, mirror_dir / source.name)
@@ -1651,7 +1651,11 @@ def _backup_database_once(
         decision = run_automatic_backup_retention(
             bbdd_dir,
             required_keep=target,
-            config_path=bbdd_dir / "backup_retention.json",
+            config_path=(
+                BACKUP_RETENTION_CONFIG
+                if bbdd_dir.resolve() == (STATE_ROOT / "BBDD").resolve()
+                else bbdd_dir / "backup_retention.json"
+            ),
             _held_lock=held_lock,
         )
         result["backup_retention"] = _automatic_retention_summary(decision)

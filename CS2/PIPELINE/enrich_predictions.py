@@ -19,6 +19,7 @@ from parsel import Selector
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 
 # ---------------------------------------------------------------------------
 # Motor de modelo entrenado (MODEL/cs2model). Carga perezosa y tolerante a
@@ -52,8 +53,12 @@ try:
     )
     from cs2model.artifacts import load_artifact as cs2_load_artifact
     from cs2model.pistols import PISTOL_COLUMNS, PISTOL_DIFF_COLUMNS, load_pistol_store
+    from cs2model.match_rankings import MATCH_RANKING_DIFF_COLUMNS, MATCH_RANKING_SYM_COLUMNS
     from cs2model.pistol_opponents import (
-        OPPONENT_COLUMNS, OPPONENT_DIFF_COLUMNS, PistolOpponentHistory, state_before_day,
+        OPPONENT_COLUMNS,
+        OPPONENT_DIFF_COLUMNS,
+        PistolOpponentHistory,
+        state_before_day,
     )
     from cs2model.odds import (
         ODDS_FEATURE_COLUMNS as CS2_ODDS_FEATURE_COLUMNS,
@@ -88,6 +93,7 @@ except Exception:  # pragma: no cover - entorno sin librería
     CS2_PLAYER_SYM_COLUMNS = []
     CS2_RANKING_DIFF_COLUMNS = []
     CS2_RANKING_SYM_COLUMNS = []
+    MATCH_RANKING_DIFF_COLUMNS = MATCH_RANKING_SYM_COLUMNS = []
     CS2_ROSTER_DIFF_COLUMNS = []
     CS2_ROSTER_SYM_COLUMNS = []
     CS2_ODDS_FEATURE_COLUMNS = ()
@@ -98,13 +104,13 @@ except Exception:  # pragma: no cover - entorno sin librería
         return {}
 
 
-DAILY_ROOT = ROOT / "PIPELINE"
+DAILY_ROOT = STATE_ROOT / "PIPELINE"
 RUNS_DIR = DAILY_ROOT / "runs"
 MASTER_MANIFEST = DAILY_ROOT / "master" / "manifest.json"
 MASTER_MATCHES = DAILY_ROOT / "master" / "matches.json"
 MASTER_ROSTERS = DAILY_ROOT / "master" / "roster_history.json"
 MASTER_CALIBRATION = DAILY_ROOT / "master" / "calibration.json"
-LIVE_DB = ROOT / "BBDD" / "cs2.db"
+LIVE_DB = STATE_ROOT / "BBDD" / "cs2.db"
 ROSTER_CHANGE_WINDOW_DAYS = 90
 COMPLETE_LINEUP_SIZE = 5
 
@@ -115,7 +121,7 @@ except Exception:  # pragma: no cover - direct script execution
     from match_context import parse_match_context_meta
     from opportunity import annotate_opportunities, roster_confirmation
 DEFAULT_HISTORY = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -846,8 +852,13 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
                 raise ValueError("Opponent-pistol model requires canonical history")
             with sqlite3.connect(LIVE_DB.resolve().as_uri() + "?mode=ro", uri=True) as connection:
                 pistol_history = PistolOpponentHistory(rows, load_pistol_store(connection))
-            return {"artifact": artifact, "state": None, "history_rows": rows,
-                    "states_by_day": {}, "pistol_opponents": pistol_history}
+            return {
+                "artifact": artifact,
+                "state": None,
+                "history_rows": rows,
+                "states_by_day": {},
+                "pistol_opponents": pistol_history,
+            }
         rows = cs2_dataio.load_training_rows(
             history_path,
             MASTER_MATCHES if MASTER_MATCHES.exists() else None,
@@ -865,8 +876,8 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
 
 def model_external_features_for_order(features: dict[str, Any], reverse: bool = False) -> dict[str, float]:
     out: dict[str, float] = {}
-    diff_columns = CS2_PLAYER_DIFF_COLUMNS + CS2_RANKING_DIFF_COLUMNS + CS2_ROSTER_DIFF_COLUMNS
-    sym_columns = CS2_PLAYER_SYM_COLUMNS + CS2_RANKING_SYM_COLUMNS + CS2_ROSTER_SYM_COLUMNS
+    diff_columns = CS2_PLAYER_DIFF_COLUMNS + CS2_RANKING_DIFF_COLUMNS + CS2_ROSTER_DIFF_COLUMNS + MATCH_RANKING_DIFF_COLUMNS
+    sym_columns = CS2_PLAYER_SYM_COLUMNS + CS2_RANKING_SYM_COLUMNS + CS2_ROSTER_SYM_COLUMNS + MATCH_RANKING_SYM_COLUMNS
     for col in diff_columns:
         try:
             value = float(features.get(col) or 0.0)
@@ -3007,7 +3018,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         if engine
         else "logistic_fallback"
     )
-    artifact_path = ROOT / "MODEL" / "artifacts" / "model.pkl"
+    artifact_path = STATE_ROOT / "MODEL" / "artifacts" / "model.pkl"
     model_trace = {
         "model_version": (
             f"{model_metadata.get('production_model', 'model')}@{model_metadata.get('trained_at', 'unknown')}"
@@ -3293,13 +3304,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                 match_dt,
             )
             ranking_features = external.get("ranking_snapshot_features") or {}
+            features.update(external.get("match_ranking_features") or {})
             features.update(external.get("pistol_snapshot_features") or {})
             if engine and engine.get("pistol_opponents") and match_dt is not None:
-                features.update(engine["pistol_opponents"].features(
-                    str(team1.get("id")), str(team2.get("id")),
-                    cs2_dataio.clean_team(team1.get("name")), cs2_dataio.clean_team(team2.get("name")),
-                    match_dt.date(),
-                ))
+                features.update(
+                    engine["pistol_opponents"].features(
+                        str(team1.get("id")),
+                        str(team2.get("id")),
+                        cs2_dataio.clean_team(team1.get("name")),
+                        cs2_dataio.clean_team(team2.get("name")),
+                        match_dt.date(),
+                    )
+                )
             ranking_snapshot_evidence = external.get("ranking_snapshot_evidence") or {}
             roster_features = external.get("roster_snapshot_features") or {}
             features.update(ranking_features)

@@ -142,7 +142,7 @@ class PowerShellBootstrapTests(unittest.TestCase):
         """Keep TENNIS stdout/stderr observable beyond the CS2 transcript."""
 
         for fragment in (
-            "$TennisLogsRoot = Join-Path $TennisRoot 'logs'",
+            "$TennisLogsRoot = Join-Path $TennisStateRoot 'logs'",
             "$LogRetentionKeep = 2",
             '"run_tennis_$TennisLogToken.log"',
             "Start-Transcript -Path $script:TennisLogPath -Force",
@@ -180,7 +180,9 @@ class PowerShellBootstrapTests(unittest.TestCase):
         assignment = (
             "$TennisRatioUpdateScript = Join-Path $TennisRoot 'scripts\\update_tennisratio.py'"
         )
-        invocation = "& $PythonExecutable $TennisRatioUpdateScript"
+        invocation = (
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments @($TennisRatioUpdateScript)"
+        )
         required_paths = """$RequiredPaths = @(
     $RequirementsSource,
     $RequirementsLock,
@@ -192,7 +194,7 @@ class PowerShellBootstrapTests(unittest.TestCase):
             required_paths,
             "[TENNIS] Actualizando TennisRatio con Scrapling (control automatico diario)",
             invocation,
-            "$TennisRatioUpdateExitCode = [int]$LASTEXITCODE",
+            "$TennisRatioUpdateExitCode = Invoke-TennisPython",
             "-Outcome 'tennisratio_update_failed'",
         ):
             with self.subTest(fragment=fragment):
@@ -203,18 +205,20 @@ class PowerShellBootstrapTests(unittest.TestCase):
             self.launcher.index("if ($EnvironmentOnly)"),
             self.launcher.index(invocation),
         )
-        source_invocation = "& $PythonExecutable $UpdateSourcesScript"
+        source_invocation = (
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($UpdateSourcesScript)"
+        )
         self.assertIn(source_invocation, self.launcher)
         self.assertLess(self.launcher.index(source_invocation), self.launcher.index(invocation))
-        abstract_invocation = (
-            "& $PythonExecutable $TennisAbstractUpdateScript @TennisAbstractArguments"
-        )
+        abstract_invocation = "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($TennisAbstractUpdateScript) + $TennisAbstractArguments)"
         self.assertLess(self.launcher.index(invocation), self.launcher.index(abstract_invocation))
         self.assertIn("$TennisAbstractArguments += @('--date', $Date)", self.launcher)
         self.assertNotIn("--full-inventory", self.launcher)
         self.assertLess(
             self.launcher.index(invocation),
-            self.launcher.index("& $PythonExecutable $DailyScript"),
+            self.launcher.index(
+                "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($DailyScript)"
+            ),
         )
         training_block = self.launcher.split("$TrainingScripts = @(", 1)[1].split(
             "$DailyArguments = @()", 1
@@ -226,7 +230,9 @@ class PowerShellBootstrapTests(unittest.TestCase):
     def test_update_only_stops_after_one_daily_refresh(self) -> None:
         """Keep the scheduler route isolated from retraining, daily DB and WEB."""
 
-        invocation = "& $PythonExecutable $TennisRatioUpdateScript"
+        invocation = (
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments @($TennisRatioUpdateScript)"
+        )
         update_only_block = self.launcher.rsplit("if ($UpdateOnly) {", 1)[-1].split(
             "$TrainingScripts = @(", 1
         )[0]
@@ -235,7 +241,7 @@ class PowerShellBootstrapTests(unittest.TestCase):
             "$UpdateOnly -and ($Retrain -or $EnvironmentOnly -or $Date)",
             "-Outcome 'sources_update_only'",
             "--skip-match-charting",
-            "& $PythonExecutable $TennisAbstractUpdateScript",
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($TennisAbstractUpdateScript)",
             "-Outcome 'tennis_abstract_update_incomplete'",
         ):
             with self.subTest(fragment=fragment):
@@ -261,17 +267,19 @@ class PowerShellBootstrapTests(unittest.TestCase):
             "scripts\\build_elo.py",
             "scripts\\build_features.py",
             "scripts\\retrain_models.py",
-            "& $PythonExecutable $ScriptPath @ScriptArguments",
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($ScriptPath) + $ScriptArguments)",
         ):
             with self.subTest(fragment=fragment):
                 self.assertIn(fragment, training_block)
         self.assertNotIn("if ($Retrain)", training_block)
         self.assertLess(
             self.launcher.index("$TrainingScripts = @("),
-            self.launcher.index("& $PythonExecutable $DailyScript"),
+            self.launcher.index(
+                "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($DailyScript)"
+            ),
         )
         daily_arguments = self.launcher.split("$DailyArguments = @()", 1)[1].split(
-            "& $PythonExecutable $DailyScript", 1
+            "Invoke-TennisPython -Python $PythonExecutable -Arguments (@($DailyScript)", 1
         )[0]
         self.assertIn("if ($RunTraining)", daily_arguments)
 

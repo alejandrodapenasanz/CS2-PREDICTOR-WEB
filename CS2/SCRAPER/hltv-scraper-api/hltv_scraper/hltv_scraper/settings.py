@@ -7,6 +7,8 @@
 #     https://docs.scrapy.org/en/latest/topics/downloader-middleware.html
 #     https://docs.scrapy.org/en/latest/topics/spider-middleware.html
 
+from pathlib import Path
+
 BOT_NAME = "hltv_scraper"
 
 SPIDER_MODULES = ["hltv_scraper.spiders"]
@@ -95,7 +97,16 @@ AUTOTHROTTLE_DEBUG = False
 # re-run no vuelve a pedir páginas ya bajadas. PROJECT.md §4.5.3.
 HTTPCACHE_ENABLED = True
 HTTPCACHE_EXPIRATION_SECS = 0  # 0 = nunca expira (histórico inmutable)
-HTTPCACHE_DIR = "httpcache"
+HTTPCACHE_DIR = str(
+    Path(__file__).resolve().parents[5]
+    / "VAULT"
+    / "CS2"
+    / "SCRAPER"
+    / "hltv-scraper-api"
+    / "hltv_scraper"
+    / ".scrapy"
+    / "httpcache"
+)
 HTTPCACHE_IGNORE_HTTP_CODES = [403, 429, 500, 502, 503, 504]  # no cachear bloqueos/errores
 HTTPCACHE_STORAGE = "scrapy.extensions.httpcache.FilesystemCacheStorage"
 HTTPCACHE_POLICY = "scrapy.extensions.httpcache.DummyPolicy"  # sirve de caché siempre que exista
