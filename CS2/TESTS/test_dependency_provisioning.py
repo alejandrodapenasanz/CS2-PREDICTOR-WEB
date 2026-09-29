@@ -122,6 +122,15 @@ def test_sklearn_manifest_preserves_serialized_production_compatibility() -> Non
     assert re.search(r"^scikit-learn==1\.8\.0\s*\\", lock, flags=re.MULTILINE)
 
 
+def test_lightgbm_pin_preserves_verified_windows_runtime() -> None:
+    """Do not silently reinstall the 4.7 DLL denied on the production host."""
+    requirements = (CS2_ROOT / "requirements.txt").read_text(encoding="utf-8")
+    lock = (CS2_ROOT / "requirements.lock.txt").read_text(encoding="utf-8")
+    assert "lightgbm==4.6.0" in requirements.splitlines()
+    assert re.search(r"^lightgbm==4\.6\.0\s*\\", lock, flags=re.MULTILINE)
+    assert "37089ee95664b6550a7189d887dbf098e3eadab03537e411f52c63c121e3ba4b" in lock
+
+
 def test_python_and_ci_target_exact_313_and_locked_install() -> None:
     """Pin interpreter policy consistently in tooling, training, and CI."""
     pyproject = (CS2_ROOT / "pyproject.toml").read_text(encoding="utf-8")

@@ -1,5 +1,9 @@
 # Predictor profesional de partidos de tenis
 
+Recuperación automática de resultados y sets, también para partidos ya
+liquidados con detalle incompleto:
+[contrato, presupuestos y auditoría](../DOCS/recuperacion_resultados.md).
+
 Estado privado portable: datos, BBDD, modelos y entornos viven en
 `../VAULT/TENNIS/`; código, configuración y fixtures siguen aquí.
 `run_tennis.ps1` prepara automáticamente ese estado y el entorno Python 3.13.
@@ -148,6 +152,12 @@ y la cola de no resueltos se ignoran en Git. Sus `.gitkeep`, la tabla manual
 `data/overrides.csv`, el código, los tests y la documentación sí se versionan.
 
 ## Entorno reproducible (CPython 3.13)
+
+LightGBM está fijado a **4.6.0** en requirements y lock: la wheel oficial carga
+con Smart App Control activado en este Windows; la DLL de 4.7.0 es bloqueada
+(`WinError 4551`). La compatibilidad se verifica cargando los bundles vigentes
+M/F y ejecutando las puertas, sin reescribir modelos, manifiestos históricos
+ni predicciones. No se desactiva ninguna protección del sistema.
 
 El runtime obligatorio es **CPython 3.13**. `TENNIS/.venv` es derivado,
 desechable y no se copia entre rutas o máquinas. El lanzador verifica
@@ -545,14 +555,24 @@ Desde el 06/09/2026, `scripts/update_tennis_abstract.py` adquiere también
 históricos/estadísticas de jugadores **automáticamente** desde `run_tennis.ps1`
 y, por tanto, desde el `start.ps1` raíz. La tarea diaria existente que invoca
 `run_tennis.ps1 -UpdateOnly` incorpora esta adquisición, sin reentrenar/publicar.
-Desde el 09/09, primero se actualiza TennisRatio y después se adquieren **solo
-los participantes de la cartelera de hoy UTC** (o de `-Date`). El inventario de
+Desde el 25/09, primero se actualiza TennisRatio y después TA adquiere **los
+participantes de la cartelera de hoy UTC primero** (o de `-Date`) **más hasta
+50 perfiles pendientes adicionales**. El inventario de
 enlaces exactos de los informes Elo ATP/WTA sirve para resolver los perfiles,
 no para descargarlos todos. Se deduplican los participantes y se exige nombre
 completo normalizado + género únicos; nombres abreviados, ambiguos o fuera del
 inventario se informan, sin crear slugs ni mappings canónicos de modelo.
 Cada ficha válida se guarda una vez por día UTC. Si falta cartelera no se
 sustituye por un barrido completo. Se conserva todo el histórico ya adquirido.
+
+Los adicionales se reservan en SQLite por día UTC: se prioriza el intento más
+antiguo, se excluyen participantes de la cartelera y fichas ya actualizadas hoy,
+y una repetición reanuda el mismo cupo sin descargar otros 50. El log separa
+`SELECCION` y `RESUMEN` de cartelera/adicionales. `--extra-profiles N` configura
+el cupo (`0` deja solo cartelera); `--max-profiles` sigue siendo un límite total
+explícito de diagnóstico, no el cupo de adicionales. `--full-inventory` no usa
+este cupo. La política aplica también a la tarea `-UpdateOnly`, sin duplicarla
+en PowerShell. Es independiente del límite de 50 adicionales de TennisRatio.
 
 La [migración es por fases](docs/tennis_abstract_daily.md): Sackmann se conserva
 como archivo de entrenamiento. Los nuevos datos se guardan en
@@ -1195,3 +1215,39 @@ con un mensaje visible; no duplica la adquisición ni el entrenamiento. El mutex
 se libera al terminar o al morir el proceso; una interrupción exige verificar los
 artefactos, nunca activar un staging incompleto. El bloqueo no sustituye las
 comprobaciones de integridad ni la puerta de promoción.
+
+## Recuperación de adquisición y replay (24/09/2026)
+
+El arranque diario actualiza **todos los perfiles visibles de la cartelera
+primero y como máximo 50 adicionales** de TennisRatio. Los adicionales se eligen
+por el intento publicado más antiguo (incluidos fallos), no siempre por orden
+alfabético, para que el backlog avance aunque cambie todo el sitemap. El log
+indica seleccionados, pendientes y progreso. `update_tennisratio.py --max-profiles N`
+cambia ese límite; `--full-inventory` conserva el barrido completo explícito.
+Las rutas raíz y TENNIS comparten este entrypoint. No se borra ningún histórico.
+
+La etiqueta `National Team`, observada en la cartelera TennisRatio de Davis Cup,
+ya no aborta la actualización entera. Se conserva literalmente en
+`tournament_level_source`, con `tour_level` nulo y el flag de ausencia del vector;
+no se equipara a ATP ni se inventa `best_of`. Los otros niveles no inspeccionados
+siguen fallando explícitamente. Las capturas de hoy no se convierten en features
+anteriores a hoy por este cambio.
+
+Tennis Abstract descarga primero por HTTP con Scrapling: un HTTP 200 válido no
+abre Chrome. El resumen muestra cada perfil **GUARDADO**, sus filas válidas y
+en cuarentena, y los perfiles pendientes. Eso acredita persistencia en el almacén
+de la fuente, no integración de esas filas en el modelo.
+
+Si hay un challenge con `Retry-After`, se persiste la pausa del host, compartida
+por HTTP y navegador. Solo después de cumplirla se abre Chrome visible para un
+único intento de recuperación. Una espera superior al presupuesto configurado
+(`rate_limit_wait_budget_seconds`, 90 segundos por defecto) se aplaza sin abrir
+otra sesión; no se ignoran 429 ni se generan bucles de ventanas. Los 429 ordinarios
+mantienen los reintentos acotados del cliente común.
+
+La conciliación de resultados Explorer guardados identifica los nuevos runs con
+`observation-remap-v2` y el hash del contenido completo: filas, procedencia,
+timestamp de observación y metadata. El hash antiguo omitía algunos de esos
+campos y podía colisionar, incluso con cero filas, bloqueando el pipeline. No se
+reescriben runs antiguos, predicciones, observaciones ni settlements; se usan las
+APIs append-only existentes y una repetición idéntica sigue siendo idempotente.

@@ -53,6 +53,8 @@ class DependencyManifestTests(unittest.TestCase):
             observed_names.add(match.group(1).lower().replace("_", "-"))
             if requirement.startswith("scrapling[fetchers]"):
                 self.assertEqual(requirement, "scrapling[fetchers]==0.4.12")
+            elif requirement.startswith("lightgbm"):
+                self.assertEqual(requirement, "lightgbm==4.6.0")
             else:
                 self.assertIn(">=", requirement, requirement)
                 self.assertIn("<", requirement, requirement)

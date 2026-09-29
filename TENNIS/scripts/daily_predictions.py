@@ -23,6 +23,7 @@ Cómo se ejecuta:
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import UTC, date, datetime
 from pathlib import Path
 import sys
@@ -49,6 +50,7 @@ from src.operations import (  # noqa: E402
 from src.operations.result_sources import (  # noqa: E402
     TennisRatioResultSnapshot,
 )
+from src.operations.result_recovery import recover_results  # noqa: E402
 
 
 CONSOLE_MAX_ROWS = 50
@@ -211,6 +213,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     run = operational.daily_run
+    # This entrypoint is shared by both launchers. Recovery cannot prevent
+    # publication of today's predictions, and never retrains a model.
+    try:
+        recovered = recover_results(
+            max_dates=int(os.environ.get("TENNIS_RESULT_RECOVERY_DATES", "3")),
+            max_profiles=int(os.environ.get("TENNIS_RESULT_RECOVERY_PROFILES", "10")),
+            exclude_fetched_dates=(operational.result_date,)
+            if operational.result_date is not None
+            and not isinstance(operational.result_snapshot, TennisRatioResultSnapshot)
+            else (),
+        )
+        print(f"Resultados pendientes de detalle: {recovered['pending']}")
+    except Exception as exc:
+        print(
+            f"ADVERTENCIA recuperación de resultados [{type(exc).__name__}]: {exc}", file=sys.stderr
+        )
     attempted_at = _parse_optional_utc(args.tennisratio_attempted_at_utc)
     source_families = set(run.predictions.get("source_family", pd.Series(dtype="string")).dropna())
     freshness = build_freshness_report(

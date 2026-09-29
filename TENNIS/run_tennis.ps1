@@ -707,7 +707,7 @@ if ($TennisRatioUpdateExitCode -ne 0) {
 }
 
 Write-Host ''
-Write-Host '[TENNIS] Tennis Abstract: solo jugadores de la cartelera (Scrapling; adquisicion, no modelo)'
+Write-Host '[TENNIS] Tennis Abstract: cartelera primero + hasta 50 pendientes diarios (Scrapling; adquisicion, no modelo)'
 $TennisAbstractArguments = @()
 if ($Date) { $TennisAbstractArguments += @('--date', $Date) }
 $TennisAbstractUpdateExitCode = Invoke-TennisPython -Python $PythonExecutable -Arguments (@($TennisAbstractUpdateScript) + $TennisAbstractArguments)

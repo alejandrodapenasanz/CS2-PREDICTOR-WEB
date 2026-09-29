@@ -169,6 +169,19 @@ trap {
 }
 
 # --- Modelo de etapas: timing + progreso + dry-run + exit codes --------------
+# The maintenance menu uses the same lock. OS handles release it on every exit.
+$script:OperationLock = $null
+if (-not $script:DryRun) {
+    $OperationLockPath = Join-Path $StateRoot 'PIPELINE\operation.lock'
+    try {
+        $script:OperationLock = [IO.File]::Open(
+            $OperationLockPath, [IO.FileMode]::OpenOrCreate,
+            [IO.FileAccess]::ReadWrite, [IO.FileShare]::None
+        )
+    } catch {
+        throw 'CS2 esta ocupado: espera a que termine start.ps1 o soluciona_errores.py.'
+    }
+}
 $script:StageIndex = 0
 $script:StageTotal = 0
 $script:StageTimings = @()

@@ -202,6 +202,32 @@ class TennisRatioStore:
             ).fetchone()
         return row is not None
 
+    def profile_attempt_times(self) -> dict[str, str]:
+        """Order extra acquisition slots fairly, including failed published attempts.
+
+        This read-only scheduling evidence never alters causal feature availability.
+        Unpublished attempts remain pending and do not consume a daily budget forever.
+        """
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT source_url, MAX(first_seen_at_utc) AS attempted_at
+                FROM (
+                    SELECT sync.source_url, sync.first_seen_at_utc
+                    FROM profile_sync_observations AS sync
+                    JOIN published_batches USING (batch_id)
+                    UNION ALL
+                    SELECT failed.source_url, failed.first_seen_at_utc
+                    FROM quarantine_events AS failed
+                    JOIN published_batches USING (batch_id)
+                    WHERE failed.reason = 'profile_acquisition_failure'
+                )
+                GROUP BY source_url
+                """
+            ).fetchall()
+        return {str(row["source_url"]): str(row["attempted_at"]) for row in rows}
+
     def record_profile_sync(
         self,
         *,

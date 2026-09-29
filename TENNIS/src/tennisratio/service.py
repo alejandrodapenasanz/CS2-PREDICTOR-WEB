@@ -17,6 +17,7 @@ import errno
 import gzip
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -229,6 +230,17 @@ def refresh_tennisratio(
             delta_entries,
             visible_entries=visible_entries,
             max_profiles=max_profiles,
+            attempted_at=store.profile_attempt_times(),
+        )
+        logging.getLogger(__name__).info(
+            "Seleccion: %s perfiles de cartelera primero + %s adicionales; "
+            "%s deltas aplazados (no se borra historico).",
+            len(visible_entries),
+            len(selected) - len(visible_entries),
+            len(
+                {entry.source_url for entry in delta_entries}
+                - {entry.source_url for entry in selected}
+            ),
         )
         mapper = _SackmannMapper(sackmann_root)
         identity_remaps = _stage_identity_remaps(
@@ -244,6 +256,9 @@ def refresh_tennisratio(
         unchanged = 0
         profile_manifest: list[dict[str, object]] = []
         for index, entry in enumerate(selected):
+            logging.getLogger(__name__).info(
+                "Perfil %s/%s: %s", index + 1, len(selected), entry.profile_slug
+            )
             attempted += 1
             previous_good = store.latest_good_profile_snapshot(entry.source_player_key)
             profile_payload = None
@@ -730,20 +745,24 @@ def _select_profiles(
     *,
     visible_entries: Mapping[str, SitemapPlayer],
     max_profiles: int | None,
+    attempted_at: Mapping[str, str] | None = None,
 ) -> list[SitemapPlayer]:
     """Keep every visible player, then fill deterministic sitemap delta slots."""
 
-    selected = dict(visible_entries)
+    attempts = attempted_at or {}
+    selected = dict(sorted(visible_entries.items()))
     extras = [
         entry
-        for entry in sorted(delta_entries, key=lambda item: item.source_url)
+        for entry in sorted(
+            delta_entries, key=lambda item: (attempts.get(item.source_url, ""), item.source_url)
+        )
         if entry.source_url not in selected
     ]
     if max_profiles is not None:
         extras = extras[:max_profiles]
     for entry in extras:
         selected[entry.source_url] = entry
-    return sorted(selected.values(), key=lambda item: item.source_url)
+    return list(selected.values())
 
 
 def _visible_profile_urls(agenda: pd.DataFrame) -> set[str]:

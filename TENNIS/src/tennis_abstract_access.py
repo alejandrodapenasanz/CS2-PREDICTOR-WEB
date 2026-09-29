@@ -18,6 +18,7 @@ from .config import PROJECT_ROOT
 from .responsible_http import (
     DEFAULT_CACHE_ROOT,
     HttpResponse,
+    HttpClientSettings,
     RateLimitedError,
     ResponsibleHttpClient,
     WafBlockedError,
@@ -180,10 +181,21 @@ class TennisAbstractAcquisitionClient:
                 now=time.time(),
             )
             if retry_after is not None and retry_after > 0:
-                self._blocked = True
-                raise RateLimitedError(
-                    url, time.time() + retry_after, fresh_response=False
-                ) from exc
+                deadline = active.defer_host_until(url, time.time() + retry_after)
+                delay = max(0.0, deadline - time.time())
+                budget = HttpClientSettings.load(
+                    host=urlsplit(url).hostname
+                ).rate_limit_wait_budget_seconds
+                if not self._browser_enabled or self._browser_used or delay > budget:
+                    self._blocked = True
+                    raise RateLimitedError(url, deadline, fresh_response=False) from exc
+                logging.getLogger(__name__).warning(
+                    "Tennis Abstract: challenge con Retry-After; espera %.1fs antes de "
+                    "abrir el navegador visible. No se solicitan datos durante la pausa.",
+                    delay,
+                )
+                while (remaining := deadline - time.time()) > 0:
+                    time.sleep(min(30.0, remaining))
             if not self._browser_enabled or self._browser_used:
                 self._blocked = True
                 raise

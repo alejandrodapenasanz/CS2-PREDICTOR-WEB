@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +19,45 @@ def load_daily_start_module():
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize("fallback_ok", [False, True])
+def test_failed_upcoming_never_promotes_empty_run_even_when_results_were_downloaded(
+    tmp_path, monkeypatch, fallback_ok
+) -> None:
+    """A timed-out/empty fallback must fail before replacing the master publication pointer."""
+
+    daily = load_daily_start_module()
+    master = tmp_path / "master.json"
+    pointer = tmp_path / "manifest.json"
+    master.write_text("{}", encoding="utf-8")
+    pointer.write_text('{"last_run_id":"previous"}', encoding="utf-8")
+    monkeypatch.setattr(daily, "MASTER_MATCHES", master)
+    monkeypatch.setattr(daily, "MASTER_MANIFEST", pointer)
+    monkeypatch.setattr(daily, "RUNS_DIR", tmp_path / "runs")
+    monkeypatch.setattr(daily, "run_id", lambda: "failed-run")
+    monkeypatch.setattr(daily, "db_pending_match_ids", lambda: set())
+    monkeypatch.setattr(daily, "db_pending_match_info", lambda: {})
+    monkeypatch.setattr(daily, "scrape_recent_results", lambda *args, **kwargs: [{"id": "result"}])
+    monkeypatch.setattr(daily, "update_pending_matches", lambda *args, **kwargs: pytest.fail("Agenda must run first"))
+    monkeypatch.setattr(daily, "run_spider", lambda *args, **kwargs: (fallback_ok, "timeout or empty response"))
+
+    def blocked(*args, **kwargs):
+        """Simulate the production WAF failure without using the network."""
+
+        raise RuntimeError("fixture WAF")
+
+    monkeypatch.setattr(daily, "fetch_html", blocked)
+    monkeypatch.setattr(sys, "argv", ["start.py", "--skip-warmup", "--skip-same-day-recovery", "--allow-empty-scrape"])
+    with pytest.raises(RuntimeError, match="HLTV upcoming"):
+        daily.main()
+    assert json.loads(pointer.read_text())["last_run_id"] == "previous"
+    failed_run = tmp_path / "runs" / "failed-run"
+    manifest = json.loads((failed_run / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["steps"]["recent_results"]["count"] == 1
+    assert manifest["steps"]["upcoming"]["status"] == "failed"
+    assert manifest["failed_at"]
+    assert not (failed_run / "predictions_enriched.json").exists()
 
 
 def test_operator_pipeline_config_uses_direct_visible_refresh(monkeypatch) -> None:
@@ -375,3 +416,88 @@ def test_regular_html_does_not_open_a_browser(interactive_daily, monkeypatch) ->
     monkeypatch.setattr(daily, "_scrapling_impersonate_get", lambda *args: (200, "<html>real data</html>"))
     assert daily.fetch_html("/matches/1/a-vs-b", min_interval=0.0, use_cache=False) == "<html>real data</html>"
     assert commands == [] and daily._STEALTH_SOLVES == 0
+
+
+def test_browser_capture_is_used_without_retrying_blocked_http(interactive_daily, monkeypatch):
+    """Regression: the visible browser worked but HTTP still returned 403."""
+    daily, _ = interactive_daily
+    url = "https://www.hltv.org/matches"
+    html = '<html><body><div class="matches-list-section">real agenda</div></body></html>'
+    calls = []
+
+    def renew(command, *args, **kwargs):
+        daily.CF_SESSION.write_text('{"cf_clearance":"new","user_agent":"ua"}', encoding="utf-8")
+        output = Path(command[command.index("--capture-output") + 1])
+        output.write_text(json.dumps({"url": url, "html": html, "sha256": hashlib.sha256(html.encode()).hexdigest()}))
+        return True, ""
+
+    def blocked(*args):
+        calls.append(args[0])
+        return 403, "Just a moment"
+
+    monkeypatch.setattr(daily, "run_cmd", renew)
+    monkeypatch.setattr(daily, "_scrapling_impersonate_get", blocked)
+    assert daily.fetch_html(url, min_interval=0, use_cache=False) == html
+    assert calls == [url]
+    assert daily.fetch_diagnostics()["interactive_browser_successes"] == 1
+    assert not list(daily.CF_SESSION.parent.glob("cf_capture_*"))
+
+
+@pytest.mark.parametrize("reason", ["wrong_url", "wrong_hash", "challenge", "partial_load"])
+def test_invalid_browser_capture_is_never_accepted(interactive_daily, monkeypatch, reason):
+    daily, _ = interactive_daily
+    url = "https://www.hltv.org/matches"
+    daily.fetch_cache_put(url, "<html><body>old cached agenda</body></html>")
+    html = "<html><body>Just a moment</body></html>" if reason == "challenge" else "<html><body>real page</body></html>"
+    if reason == "partial_load":
+        html = "<html><head>page loading</head></html>"
+
+    def renew(command, *args, **kwargs):
+        daily.CF_SESSION.write_text('{"cf_clearance":"new","user_agent":"ua"}', encoding="utf-8")
+        output = Path(command[command.index("--capture-output") + 1])
+        output.write_text(
+            json.dumps(
+                {
+                    "url": url + "/wrong" if reason == "wrong_url" else url,
+                    "html": html,
+                    "sha256": "invalid" if reason == "wrong_hash" else hashlib.sha256(html.encode()).hexdigest(),
+                }
+            )
+        )
+        return True, ""
+
+    monkeypatch.setattr(daily, "run_cmd", renew)
+    monkeypatch.setattr(daily, "_scrapling_impersonate_get", lambda *args: (403, "Just a moment"))
+    with pytest.raises(daily.FetchSuppressedError):
+        daily.fetch_html(url, min_interval=0, use_cache=False)
+    assert daily.fetch_cache_get(url) is None
+
+
+@pytest.mark.parametrize("error_name", ["FetchSuppressedError", "FetchBudgetExceeded"])
+def test_upcoming_deferred_does_not_start_another_scrapy_retry_loop(tmp_path, monkeypatch, error_name):
+    daily = load_daily_start_module()
+
+    def deferred(*args, **kwargs):
+        raise getattr(daily, error_name)("fixture access deferred")
+
+    monkeypatch.setattr(daily, "fetch_html", deferred)
+    monkeypatch.setattr(daily, "run_spider", lambda *args, **kwargs: pytest.fail("No 600-second retry loop"))
+    with pytest.raises(RuntimeError, match="preserving the previous published run"):
+        daily.scrape_upcoming(tmp_path)
+    assert not (tmp_path / "raw" / "upcoming_matches.json").exists()
+
+
+def test_scrapling_reuses_the_browser_user_agent(tmp_path, monkeypatch):
+    daily = load_daily_start_module()
+    daily.CF_SESSION = tmp_path / "session.json"
+    daily.CF_SESSION.write_text('{"cf_clearance":"secret","user_agent":"actual-browser-ua"}')
+    captured = {}
+
+    def get(url, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(status=200, html_content="<html>real</html>")
+
+    monkeypatch.setattr(daily, "_ScraplingFetcher", SimpleNamespace(get=get))
+    assert daily._scrapling_impersonate_get("https://www.hltv.org/matches", {"cf_clearance": "secret"}, 5)[0] == 200
+    assert captured["headers"]["User-Agent"] == "actual-browser-ua"
+    assert captured["cookies"] == {"cf_clearance": "secret"}

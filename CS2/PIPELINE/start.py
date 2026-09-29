@@ -16,6 +16,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import requests
@@ -28,6 +29,8 @@ except ModuleNotFoundError:  # tests de parsers offline pueden correr sin venv d
 
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 SCRAPER_PROJECT = ROOT / "SCRAPER" / "hltv-scraper-api"
 SCRAPY_ROOT = SCRAPER_PROJECT / "hltv_scraper"
@@ -44,8 +47,10 @@ except Exception:  # pragma: no cover - fallback to Scrapy paths if parser impor
     PF = None
 
 try:
+    from PIPELINE.agenda_contract import AgendaCoverageError, validate_agenda_rows
     from PIPELINE.match_context import parse_match_context_meta
 except Exception:  # pragma: no cover - direct script execution
+    from agenda_contract import AgendaCoverageError, validate_agenda_rows
     from match_context import parse_match_context_meta
 
 DATA_ROOT = STATE_ROOT / "PIPELINE"
@@ -157,6 +162,7 @@ _FETCH_STATS: dict[str, Any] = {
     "cloudscraper_successes": 0,
     "scrapling_successes": 0,
     "scrapling_stealth_successes": 0,
+    "interactive_browser_successes": 0,
     "stealth_solves": 0,
     "ca_bundle": None,
     "freshness_skipped": 0,
@@ -695,16 +701,21 @@ def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
     if not helper.exists():
         return False
     _CF_SESSION_REFRESHED_THIS_RUN = True
+    _HTML_CACHE.pop(url, None)  # A forced refresh must never accept an older cached page.
     _FETCH_STATS["cf_session_refresh_attempts"] += 1
     log(f"cf_session refresh triggered by {reason}: {url}", force=True)
     try:
         previous_mtime_ns = CF_SESSION.stat().st_mtime_ns if CF_SESSION.exists() else None
-        ok, logs = run_cmd(
-            [str(PYTHON_EXE), str(helper), "--url", url],
-            SCRAPER_PROJECT,
-            timeout=CF_REFRESH_TIMEOUT_SECONDS,
-            stream=True,
-        )
+        CF_SESSION.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(prefix="cf_capture_", dir=CF_SESSION.parent) as temporary:
+            capture = Path(temporary) / "page.json"
+            ok, logs = run_cmd(
+                [str(PYTHON_EXE), str(helper), "--capture-output", str(capture), "--url", url],
+                SCRAPER_PROJECT,
+                timeout=CF_REFRESH_TIMEOUT_SECONDS,
+                stream=True,
+            )
+            captured = read_json(capture, {})
         current_mtime_ns = CF_SESSION.stat().st_mtime_ns if CF_SESSION.exists() else None
         fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
         if not isinstance(fresh, dict):
@@ -726,7 +737,20 @@ def maybe_refresh_cf_session_once(reason: str, url: str) -> bool:
         _REQUESTS_PREFERRED_UNTIL = time.monotonic() + float(
             os.environ.get("HLTV_PREFER_REQUESTS_AFTER_CF_SECONDS", "900")
         )
-        log("cf_session refreshed; retrying blocked request", force=True)
+        html = captured.get("html") if isinstance(captured, dict) else None
+        if (
+            isinstance(html, str)
+            and "<html" in html[:8000].lower()
+            and "<body" in html.lower()
+            and captured.get("url") == url
+            and captured.get("sha256") == hashlib.sha256(html.encode("utf-8")).hexdigest()
+            and not is_cloudflare_challenge(html)
+        ):
+            fetch_cache_put(url, html)
+            register_fetch_success("interactive_browser", url)
+            log("cf_session refreshed; verified browser HTML preserved", force=True)
+        else:
+            log("cf_session refreshed; HTTP verification still required", force=True)
         return True
     log(f"cf_session refresh did not produce a usable session: {logs[-500:]}", force=True)
     return False
@@ -1005,7 +1029,9 @@ def first_css_text(selector: Selector, selectors: list[str]) -> str | None:
 
 
 def team_from_listing(selector: Selector, number: int, include_score: bool = False) -> dict[str, Any]:
+    raw_id = selector.css(f".match-wrapper::attr(team{number})").get() or ""
     team: dict[str, Any] = {
+        "id": raw_id if raw_id.isdigit() and int(raw_id) > 0 else None,
         "name": first_css_text(
             selector,
             [
@@ -1170,11 +1196,10 @@ def _scrapling_impersonate_get(url: str, cookies: dict[str, str] | None, timeout
         kwargs["proxy"] = SCRAPLING_PROXY
     if cookies:
         kwargs["cookies"] = cookies
-    try:
-        resp = _ScraplingFetcher.get(url, **kwargs)
-    except TypeError:
-        # Firma distinta segun version: reintenta sin cookies/proxy.
-        resp = _ScraplingFetcher.get(url, impersonate=SCRAPLING_IMPERSONATE, stealthy_headers=True, timeout=timeout)
+        session = read_json(CF_SESSION, {})
+        if session.get("user_agent"):
+            kwargs["headers"] = {"User-Agent": session["user_agent"]}
+    resp = _ScraplingFetcher.get(url, **kwargs)
     return _scrapling_response_parts(resp)
 
 
@@ -1212,6 +1237,9 @@ def _scrapling_stealth_solve(url: str) -> tuple[int | None, str] | None:
 
 
 def _retry_after_cf_refresh(url: str, timeout: int, interval: float) -> str | None:
+    captured_html = fetch_cache_get(url)
+    if captured_html is not None:
+        return captured_html
     fresh = read_json(CF_SESSION, {}) if CF_SESSION.exists() else {}
     cookies = {"cf_clearance": fresh["cf_clearance"]} if fresh.get("cf_clearance") else None
     if not cookies:
@@ -3006,21 +3034,32 @@ def scrape_upcoming(run_dir: Path) -> list[dict[str, Any]]:
         data = [match for match in data if match and match.get("link")]
         if not data:
             data = parse_upcoming_matches_fallback(html)
+        try:
+            validate_agenda_rows(html, data)
+        except AgendaCoverageError:
+            data = parse_upcoming_matches_fallback(html)
+            validate_agenda_rows(html, data)
         write_json(output, data)
         matches = [match for match in data if match and match.get("link")]
         log(f"upcoming: parsed {len(matches)} matches")
         return matches
     except Exception as exc:
-        log(f"upcoming: direct fetch ERROR {exc}; trying scrapy fallback")
         write_json(run_dir / "logs" / "upcoming_direct_error.log.json", {"error": str(exc)})
+        if isinstance(exc, (FetchSuppressedError, FetchBudgetExceeded, AgendaCoverageError)):
+            log("upcoming: access deferred; no second retry loop, previous publication preserved", force=True)
+            raise RuntimeError("HLTV upcoming acquisition deferred; preserving the previous published run.") from exc
+        log(f"upcoming: direct fetch ERROR {exc}; trying scrapy fallback")
 
     ok, logs = run_spider("hltv_upcoming_matches", output, timeout=600)
     if not ok:
         log("upcoming: scrapy fallback failed")
         write_json(run_dir / "logs" / "upcoming_error.log.json", {"logs": logs})
-        return []
+        raise RuntimeError("HLTV upcoming acquisition failed; preserving the previous published run.")
     data = read_json(output, [])
     matches = [match for match in data if match and match.get("link")]
+    if not matches:
+        write_json(run_dir / "logs" / "upcoming_error.log.json", {"logs": logs, "error": "empty_fallback"})
+        raise RuntimeError("HLTV upcoming fallback produced no matches after a failed fetch; refusing empty publication.")
     log(f"upcoming: scrapy fallback parsed {len(matches)} matches")
     return matches
 
@@ -4417,6 +4456,23 @@ def main() -> int:
     manifest["steps"]["recent_results"] = {"count": len(recent_results), **recent_manifest}
     write_json(run_dir / "manifest.json", manifest)
 
+    # Acquire the publication-critical agenda before spending the bounded
+    # browser recovery/request budget on optional historical details.
+    log("phase: upcoming matches", force=VERBOSE)
+    try:
+        upcoming = scrape_upcoming(run_dir)
+    except Exception as exc:
+        manifest["failed_at"] = now_utc()
+        manifest["failure"] = str(exc)
+        manifest["steps"]["upcoming"] = {"status": "failed", "count": None, "error": str(exc)}
+        manifest["steps"]["fetch_diagnostics"] = fetch_diagnostics()
+        write_json(run_dir / "manifest.json", manifest)
+        raise
+    if args.max_matches:
+        upcoming = upcoming[: args.max_matches]
+    manifest["steps"]["upcoming"] = {"status": "success", "count": len(upcoming)}
+    write_json(run_dir / "manifest.json", manifest)
+
     log("phase: pending updates", force=VERBOSE)
     pending_updates = update_pending_matches(master, run_dir, recent_results, capture_analytics=not args.skip_analytics)
     manifest["steps"]["pending_updates"] = {"count": len(pending_updates)}
@@ -4437,12 +4493,6 @@ def main() -> int:
     manifest["steps"]["same_day_recovery"] = {key: value for key, value in recovery_result.items() if key != "index"}
     write_json(run_dir / "manifest.json", manifest)
 
-    log("phase: upcoming matches", force=VERBOSE)
-    upcoming = scrape_upcoming(run_dir)
-    if args.max_matches:
-        upcoming = upcoming[: args.max_matches]
-    manifest["steps"]["upcoming"] = {"count": len(upcoming)}
-    write_json(run_dir / "manifest.json", manifest)
     if not args.allow_empty_scrape and not recent_results and not upcoming:
         manifest["failed_at"] = now_utc()
         manifest["failure"] = (
@@ -4600,6 +4650,20 @@ def main() -> int:
             write_json(MASTER_MATCHES, master)
     manifest["steps"]["match_assets"] = {key: value for key, value in match_assets_result.items() if key != "index"}
     write_json(run_dir / "manifest.json", manifest)
+
+    # Result completeness is independent of winner settlement and map-stat assets.
+    # New recovery evidence is isolated from feature input tables.
+    from PIPELINE.result_recovery import run_daily as recover_result_details
+
+    try:
+        manifest["steps"]["result_recovery"] = recover_result_details(
+            BBDD_DB, master, run_dir,
+            limit=int(os.environ.get("CS2_RESULT_RECOVERY_LIMIT", "20")) if promote_run else 0,
+            client=sys.modules[__name__],
+        )
+    except Exception as exc:
+        manifest["steps"]["result_recovery"] = {"errors": 1, "error": str(exc)}
+        log(f"WARNING result recovery: {exc}", force=True)
 
     map_winrates = compute_map_winrates(master, run_dir)
     log(f"map winrates: teams={len(map_winrates)}", force=VERBOSE)

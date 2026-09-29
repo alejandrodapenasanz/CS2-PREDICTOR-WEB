@@ -19,6 +19,14 @@ ignore = ["F401"]
 [tool.mypy]
 python_version = "3.13"
 files = [
+    "BBDD/result_store.py",
+    "PIPELINE/result_recovery.py",
+    "BBDD/fetch_recovery.py",
+    "BBDD/recovery_references.py",
+    "PIPELINE/operation_lock.py",
+    "PIPELINE/fetch_recovery_worker.py",
+    "PIPELINE/repair_fetch_errors.py",
+    "PIPELINE/agenda_contract.py",
     "MODEL/cs2model/match_rankings.py",
     "BBDD/ranking_store.py",
     "PIPELINE/ranking_badges.py",

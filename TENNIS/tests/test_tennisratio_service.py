@@ -41,6 +41,41 @@ FIXTURES = Path(__file__).parent / "fixtures" / "tennisratio"
 BASE_URL = "https://www.tennisratio.com"
 
 
+def test_national_team_batch_publishes_without_fabricating_level(tmp_path, monkeypatch):
+    """Keep the full agenda and source label, with unchanged strict as-of publication."""
+
+    original_get = _FixtureSession.get
+
+    def get(self, url, **kwargs):
+        """Replay the inspected new level with all other source evidence intact."""
+
+        response = original_get(self, url, **kwargs)
+        if url.endswith("/atp-matches.html"):
+            response.content = response.content.replace(
+                b'data-level="ATP"', b'data-level="National Team"'
+            )
+        return response
+
+    monkeypatch.setattr(_FixtureSession, "get", get)
+    database = tmp_path / "tennisratio.sqlite3"
+    report = refresh_tennisratio(
+        raw_dir=tmp_path / "raw",
+        database_path=database,
+        now_utc=datetime(2026, 8, 22, 10, tzinfo=UTC),
+        request_delay_seconds=0,
+        session=_FixtureSession(),
+        sackmann_raw_dir=_write_sackmann_masters(tmp_path),
+    )
+    assert report.agenda_rows == 3
+    agenda = load_active_agenda(date(2026, 8, 22), database_path=database)
+    men = agenda.loc[agenda["gender"].eq("M")]
+    assert len(men) == 2
+    assert men["tour_level"].isna().all()
+    assert men["tournament_level_source"].eq("National Team").all()
+    # Today's acquisition is visible for acquisition/UX, never as a pre-D feature.
+    assert load_agenda_as_of(date(2026, 8, 22), database_path=database).empty
+
+
 def test_exhausted_429_stops_profiles_and_preserves_published_batch(tmp_path, monkeypatch):
     """A blocked host never publishes a truncated refresh or advances last_good."""
     sackmann_root = _write_sackmann_masters(tmp_path)

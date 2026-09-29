@@ -167,11 +167,13 @@ def test_default_cli_uses_agenda_and_full_inventory_requires_explicit_flag(monke
     loader.assert_called_once_with(DAY)
     assert update.call_args.kwargs["players"] == list(selection.players)
     assert update.call_args.kwargs["selection_context"] == selection.report
+    assert update.call_args.kwargs["extra_profiles"] == 50
     loader.reset_mock()
     monkeypatch.setattr("sys.argv", ["update_tennis_abstract.py", "--full-inventory"])
     assert cli.main() == 0
     loader.assert_not_called()
     assert update.call_args.kwargs["players"] is None
+    assert update.call_args.kwargs["extra_profiles"] == 0
 
 
 def test_missing_agenda_never_falls_back_to_the_full_catalogue(monkeypatch, capsys):

@@ -632,6 +632,9 @@
           ? ` · lote descargado ${esc(source.last_batch_at_utc)}` : "";
         return `<div class="freshness-source ${cls}"><b>${esc(source.component)} · ${esc(source.label||source.source_id)} · ${status}</b><span>Antigüedad ${esc(ageLabel(source.ageHours))} · umbral ${esc(ageLabel(Number(source.threshold_hours||24)))} · ${esc(freshnessCauseLabel(source.cause))}${batch}</span></div>`;
       });
+      if(DATA.publication?.status === "fallback"){
+        freshnessCards.unshift(`<div class="freshness-source warning"><b>CS2 · CARTELERA ANTERIOR CONSERVADA</b><span>${esc(DATA.publication.reason)} Se muestran únicamente partidos aún publicables del último lote válido, con su fecha real de captura; no es una nueva descarga correcta.</span></div>`);
+      }
       if(cleanupWarning){
         const names = cleanupItems.map(item=>item.name).filter(Boolean).join(", ");
         const detail = cleanupItems.length
@@ -673,10 +676,11 @@
       if (cov < 0.6) r *= 0.92;
       return Math.max(0.05, Math.min(1, r));
     }
-    const decisionProb = (m) => m.prediction?.decision_prob_team1 ?? m.prediction?.risk_adjusted_prob_team1 ?? m.prediction?.model_prob_team1 ?? .5;
-    const decisionConfidence = (m) => Math.max(decisionProb(m), 1 - decisionProb(m));
-    const decisionSide = (m) => (m.prediction?.decision_favorite_side || (decisionProb(m) >= .5 ? "team1" : "team2"));
-    const decisionFavorite = (m) => m.prediction?.decision_favorite || sideName(m, decisionSide(m));
+    const hasPrediction = (m) => m.prediction?.status !== "unavailable" && [m.prediction?.decision_prob_team1, m.prediction?.model_prob_team1].some(p => p != null && Number.isFinite(Number(p)));
+    const decisionProb = (m) => hasPrediction(m) ? (m.prediction?.decision_prob_team1 ?? m.prediction?.risk_adjusted_prob_team1 ?? m.prediction?.model_prob_team1) : null;
+    const decisionConfidence = (m) => hasPrediction(m) ? Math.max(decisionProb(m), 1 - decisionProb(m)) : null;
+    const decisionSide = (m) => hasPrediction(m) ? (m.prediction?.decision_favorite_side || (decisionProb(m) >= .5 ? "team1" : "team2")) : null;
+    const decisionFavorite = (m) => hasPrediction(m) ? (m.prediction?.decision_favorite || sideName(m, decisionSide(m))) : null;
     function estimateView(m){
       const prediction = m.prediction || {};
       const finite = key => {
@@ -844,14 +848,15 @@
       renderRows();
     }
     function renderKpis(list){
+      const predicted = list.filter(hasPrediction);
       const odds = list.filter(m=>m.odds?.available).length;
       const warn = list.filter(m=>matchFlags(m).some(f=>f.level==="warning" || f.level==="danger")).length;
-      const high = list.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
+      const high = predicted.filter(m=>decisionConfidence(m)>=.7 && reliability(m)>=.6).length;
       const val = list.filter(m=>Math.abs(m.controls?.market?.model_edge_team1||0)>=.08).length;
-      const avg = list.length ? list.reduce((s,m)=>s+decisionConfidence(m),0)/list.length : 0;
+      const avg = predicted.length ? predicted.reduce((s,m)=>s+decisionConfidence(m),0)/predicted.length : null;
       const cal = DATA.calibration?.all || {};
       $("kpis").innerHTML = [
-        [list.length,"partidos"],[high,"oportunidades sólidas"],[odds,"con odds"],[val,"value edge"],
+        [list.length,"partidos"],[list.length-predicted.length,"sin predicción"],[high,"oportunidades sólidas"],[odds,"con odds"],[val,"value edge"],
         [warn,"con warning"],[pct(avg),"confianza media"],
         [cal.n?pct(cal.accuracy):"—","acc. real diaria"]
       ].map(([a,b])=>`<div class="kpi"><b>${a}</b><span>${b}</span></div>`).join("");
@@ -859,6 +864,7 @@
     function renderRows(){
       const list = filtered(); renderKpis(list); $("rowCount").textContent = list.length;
       $("rows").innerHTML = list.map(m=>{
+        if(!hasPrediction(m)) return `<tr data-id="${esc(m.id)}"><td class="hourcell">${esc(m.hour||"—")}<div class="d">${esc(m.date||"")}</div></td><td>${esc(tn(m,'team1'))} VS ${esc(tn(m,'team2'))}<div class="ev">${esc(m.event||"")}</div></td><td>Sin predicción · —</td><td>NO DISPONIBLE</td><td><span class="flag warning">PARTICIPANTES PENDIENTES</span></td></tr>`;
         const p1 = decisionProb(m);
         const favSide = decisionSide(m);
         const favT1 = favSide==="team1";
@@ -892,6 +898,7 @@
       $("detail").innerHTML = detailHTML(m);
     }
     function detailHTML(m){
+      if(!hasPrediction(m)) return `<div class="empty"><b>${esc(tn(m,'team1'))} vs ${esc(tn(m,'team2'))}</b><p>Sin predicción: falta confirmar la identidad de los participantes. El partido permanece en la cartelera; no se asigna ganador, porcentaje ni stake.</p></div>`;
       const p=m.prediction||{}, f=m.features||{}, ctl=m.controls||{}, mk=ctl.market||{}, mp=ctl.map_pool||{}, ctx=ctl.tournament_context||{};
       const st=m.staking||{};
       const sv=stakeView(st,m);
@@ -995,7 +1002,7 @@
       const dayF = $("bestDay")?.value || "";
       const probMin = Math.max(0.65, parseFloat($("bestProb")?.value || "0.65") || 0.65);
       const relMin = Math.max(0.45, parseFloat($("bestRel")?.value || "0") || 0);
-      const list = M.filter(m=>!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
+      const list = M.filter(m=>hasPrediction(m)&&!isTBD(tn(m,'team1'))&&!isTBD(tn(m,'team2')))
                     .map(m=>({m, opp:opportunity(m), rel:reliability(m)}))
                     .filter(x=>x.m.prediction?.opportunity_eligible===true)
                     .filter(x=>decisionConfidence(x.m)>=probMin && x.rel>=relMin)

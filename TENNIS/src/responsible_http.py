@@ -579,6 +579,39 @@ class ResponsibleHttpClient:
                 self._store_response(cache_key, response)
             return response
 
+    def defer_host_until(self, url: str, retry_at: float) -> float:
+        """Persist a server deadline across transports without shortening an existing pause.
+
+        Source-specific challenge recovery may wait for this deadline before
+        switching transport. The shared host policy still guards every GET.
+        """
+
+        self._require_open()
+        origin = _origin(_validate_url(url))
+        if not math.isfinite(retry_at) or retry_at < 0:
+            raise ValueError("retry_at must be a finite positive epoch.")
+        with self._host_lock(origin):
+            state_path = self._host_state_path(origin).with_name("rate_limit.json")
+            state = _read_json(state_path) or {}
+            try:
+                existing = float(state.get("retry_at_epoch", 0.0))
+                streak = max(0, int(state.get("streak", 0)))
+                if not math.isfinite(existing):
+                    raise ValueError("nonfinite deadline")
+            except (TypeError, ValueError) as exc:
+                raise HttpCacheError(f"Estado de pausa corrupto para {origin}.") from exc
+            deadline = max(existing, retry_at)
+            _atomic_write_json(
+                state_path,
+                {
+                    "schema_version": 1,
+                    "origin": origin,
+                    "retry_at_epoch": deadline,
+                    "streak": streak,
+                },
+            )
+        return deadline
+
     def close(self) -> None:
         """Cierra una vez el transporte subyacente."""
 

@@ -426,10 +426,60 @@ function Test-PipCheck {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Test-PythonRuntimeProbe {
+    <# Conserva stderr completo bajo PowerShell 5; distingue entorno roto de bloqueo del SO. #>
+    param(
+        [Parameter(Mandatory)][string]$Python,
+        [Parameter(Mandatory)][string]$Code,
+        [Parameter(Mandatory)][string]$Component
+    )
+    $oldErrorActionPreference = $ErrorActionPreference
+    $oldOutputEncoding = [Console]::OutputEncoding
+    $oldPythonEncoding = $env:PYTHONIOENCODING
+    $oldNativeErrorPreference = $null
+    if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+        $oldNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+        $PSNativeCommandUseErrorActionPreference = $false
+    }
+    try {
+        # Native stderr is diagnostic text, not a terminating PowerShell error.
+        # The process must finish so its exit code and final traceback survive.
+        $ErrorActionPreference = 'Continue'
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $env:PYTHONIOENCODING = 'utf-8'
+        $output = @(& $Python -B -c $Code 2>&1 | ForEach-Object { [string]$_ })
+        $probeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $oldErrorActionPreference
+        [Console]::OutputEncoding = $oldOutputEncoding
+        $env:PYTHONIOENCODING = $oldPythonEncoding
+        if ($null -ne $oldNativeErrorPreference) {
+            $PSNativeCommandUseErrorActionPreference = $oldNativeErrorPreference
+        }
+    }
+    if ($probeExitCode -eq 0) {
+        if ($output.Count -gt 0) {
+            Write-Log ("Runtime ${Component}: " + ($output -join [Environment]::NewLine)) -Level DEBUG
+        }
+        return $true
+    }
+    $diagnostic = $output -join [Environment]::NewLine
+    Write-Log ("Fallo de imports del runtime $Component (exit=$probeExitCode, Python=$Python):" +
+        [Environment]::NewLine + $diagnostic) -Level WARN
+    # Reinstalling the same binary cannot repair an explicit OS policy denial.
+    # Stop before deleting/building/swapping any venv, without weakening policy.
+    if ($diagnostic -match '(?i)(?:WinError|Errno)\s+(?:4551|577)\b|una directiva de control de aplicaciones|an application control policy has blocked') {
+        throw ("Windows Application Control ha bloqueado una biblioteca del runtime $Component. " +
+            'El traceback anterior identifica el archivo. Requiere revision/autorizacion en Windows; ' +
+            'no se reinstala el entorno ni se modifica la politica, el modelo o la BBDD.')
+    }
+    return $false
+}
+
 function Test-ModelRuntimeImports {
     <# Carga dependencias criticas y sus binarios bajo la politica de Windows. #>
     param([Parameter(Mandatory)][string]$Python)
-    & $Python -B -c @'
+    $code = @'
 import catboost
 import lightgbm
 import matplotlib
@@ -442,22 +492,22 @@ import shap
 import sklearn
 import xgboost
 import yaml
-'@ *> $null
-    return ($LASTEXITCODE -eq 0)
+'@
+    return Test-PythonRuntimeProbe -Python $Python -Code $code -Component 'CS2 modelo'
 }
 
 function Test-ScraperRuntimeImports {
     <# Carga el transporte/parser compilado antes de aceptar el venv scraper. #>
     param([Parameter(Mandatory)][string]$Python)
-    & $Python -B -c @'
+    $code = @'
 import curl_cffi
 import flask
 import lxml.etree
 import parsel
 import scrapling
 import scrapy
-'@ *> $null
-    return ($LASTEXITCODE -eq 0)
+'@
+    return Test-PythonRuntimeProbe -Python $Python -Code $code -Component 'CS2 scraper'
 }
 
 function Ensure-ModelPython {

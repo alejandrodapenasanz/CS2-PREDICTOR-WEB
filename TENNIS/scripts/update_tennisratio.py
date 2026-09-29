@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import logging
 from pathlib import Path
 import sys
 from typing import Sequence
@@ -44,7 +45,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--full-inventory",
         action="store_true",
         default=None,
-        help="Procesa todo sitemap; por defecto solo ocurre en la primera sincronización.",
+        help="Barrido completo explícito; sin límite salvo --max-profiles.",
     )
     parser.add_argument(
         "--request-delay-seconds",
@@ -55,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-profiles",
         type=int,
-        help="Límite diagnóstico para perfiles de inventario; no limita los visibles.",
+        help="Perfiles adicionales: 50 por defecto; no limita los jugadores de la cartelera.",
     )
     parser.add_argument("--database-path", type=Path, help="SQLite lateral alternativo.")
     parser.add_argument("--raw-dir", type=Path, help="Raíz alternativa de snapshots.")
@@ -72,6 +73,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     parser = build_parser()
     arguments = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="[TennisRatio] %(message)s")
     if arguments.remap_only and (
         arguments.force or arguments.full_inventory or arguments.max_profiles is not None
     ):
@@ -90,7 +92,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=arguments.force,
                 full_inventory=arguments.full_inventory,
                 request_delay_seconds=arguments.request_delay_seconds,
-                max_profiles=arguments.max_profiles,
+                max_profiles=(
+                    arguments.max_profiles
+                    if arguments.max_profiles is not None or arguments.full_inventory
+                    else 50
+                ),
                 sackmann_raw_dir=arguments.sackmann_raw_dir,
             )
     except (TennisRatioError, ValueError) as exc:

@@ -1,7 +1,7 @@
 """Download Tennis Abstract histories with Scrapling and scoped browser recovery.
 
 Usage: python scripts/update_tennis_abstract.py [--date YYYY-MM-DD | --full-inventory | --status]
-By default selects only participants in the published TennisRatio agenda today.
+By default selects today's agenda first plus up to fifty pending inspected profiles.
 The inspected Elo-report links resolve profiles; they are not all downloaded.
 Persists source evidence in a dedicated SQLite, never model/operational data.
 --full-inventory is an explicit, resumable full-catalogue acquisition.
@@ -41,6 +41,12 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--status", action="store_true", help="Estado de solo lectura; sin red.")
     parser.add_argument("--max-profiles", type=int, default=None)
+    parser.add_argument(
+        "--extra-profiles",
+        type=int,
+        default=None,
+        help="Cupo diario de pendientes adicionales tras la cartelera: 50 por defecto; 0 lo desactiva.",
+    )
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument(
         "--date", type=date.fromisoformat, help="Fecha de cartelera; defecto: hoy UTC."
@@ -52,7 +58,16 @@ def main() -> int:
         help="Reintento interactivo de fallo LOCAL; nunca ignora Retry-After del servidor.",
     )
     args = parser.parse_args()
-    if args.status and (args.browser_recovery or args.max_profiles is not None or args.date):
+    if args.extra_profiles is not None and args.extra_profiles < 0:
+        parser.error("--extra-profiles no puede ser negativo.")
+    if args.full_inventory and args.extra_profiles is not None:
+        parser.error("--extra-profiles no se combina con --full-inventory.")
+    if args.status and (
+        args.browser_recovery
+        or args.max_profiles is not None
+        or args.date
+        or args.extra_profiles is not None
+    ):
         parser.error("--status no se combina con opciones de descarga.")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     try:
@@ -74,12 +89,25 @@ def main() -> int:
                     "message": "Sin perfiles seleccionables. Actualice la cartelera o revise identidades; no se ejecuta el catálogo completo.",
                 }
             else:
+                progress(
+                    "Adquisicion HTTP con Scrapling; Chrome visible solo si un challenge "
+                    "requiere recuperacion (respetando Retry-After)."
+                )
                 report = update_daily(
                     players=None if selection is None else list(selection.players),
                     selection_context=None if selection is None else selection.report,
+                    extra_profiles=0
+                    if args.full_inventory
+                    else (50 if args.extra_profiles is None else args.extra_profiles),
                     max_profiles=args.max_profiles,
                     browser_recovery=args.browser_recovery,
                     progress=progress,
+                )
+                progress(
+                    f"RESUMEN: nuevos cartelera={report.get('refreshed_agenda', 0)}, "
+                    f"nuevos adicionales={report.get('refreshed_extra', 0)}; "
+                    f"pendientes cartelera={report.get('pending_agenda', 0)}, "
+                    f"adicionales={report.get('pending_extra', 0)}."
                 )
     except (
         ResponsibleHttpError,

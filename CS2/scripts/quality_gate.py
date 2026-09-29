@@ -19,6 +19,20 @@ from tempfile import TemporaryDirectory
 CS2_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = CS2_ROOT.parent
 FORMAT_BASELINE = (
+    "BBDD/result_store.py",
+    "PIPELINE/result_recovery.py",
+    "TESTS/test_result_recovery.py",
+    "../main.py",
+    "../scripts/soluciona_errores.py",
+    "BBDD/fetch_recovery.py",
+    "BBDD/recovery_references.py",
+    "PIPELINE/operation_lock.py",
+    "PIPELINE/fetch_recovery_worker.py",
+    "PIPELINE/repair_fetch_errors.py",
+    "TESTS/test_fetch_recovery.py",
+    "PIPELINE/agenda_contract.py",
+    "TESTS/test_agenda_contract.py",
+    "TESTS/test_web_unavailable_agenda.py",
     "TESTS/test_launcher_logging.py",
     "MODEL/cs2model/match_rankings.py",
     "TESTS/test_match_rankings.py",
@@ -73,6 +87,7 @@ FORMAT_BASELINE = (
     "TESTS/test_segment_calibration.py",
     "TESTS/test_training_promotion_wiring.py",
     "TESTS/test_web_uncertainty_display.py",
+    "TESTS/test_web_publication_recovery.py",
 )
 
 
@@ -118,6 +133,9 @@ def main() -> int:
         cwd=REPOSITORY_ROOT,
     )
     for entrypoint in (
+        "../scripts/soluciona_errores.py",
+        "PIPELINE/repair_fetch_errors.py",
+        "PIPELINE/fetch_recovery_worker.py",
         "BBDD/ranking_store.py",
         "BBDD/round_history_store.py",
         "MODEL/run_pistol_ablation.py",

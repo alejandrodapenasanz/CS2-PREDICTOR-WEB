@@ -21,6 +21,8 @@ ignore = ["F401"]
 [tool.mypy]
 python_version = "3.13"
 files = [
+    "src/operations/result_details.py",
+    "src/operations/result_recovery.py",
     "src/tennis_abstract_selection.py",
     "src/tennis_abstract_browser.py",
     "src/tennis_abstract_daily.py",

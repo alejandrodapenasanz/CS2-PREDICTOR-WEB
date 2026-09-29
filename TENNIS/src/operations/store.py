@@ -33,6 +33,7 @@ from .identifiers import (
     required_text,
 )
 from .schema import SCHEMA_SQL, SCHEMA_VERSION
+from .result_details import SCHEMA_SQL as RESULT_DETAILS_SCHEMA_SQL, register_detail
 from .types import (
     ObservationReconciliation,
     OperationsConflictError,
@@ -184,7 +185,7 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         )
 
     def _initialize_schema(self) -> None:
-        """Aplica el esquema y migra v1 a v2 de forma atómica y sin pérdida."""
+        """Migra a v3 de forma aditiva, sin reescribir el triplete sagrado."""
 
         current_version = int(self.connection.execute("PRAGMA user_version").fetchone()[0])
         if current_version > SCHEMA_VERSION:
@@ -210,11 +211,12 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
         migration = (
             "BEGIN IMMEDIATE;\n"
             f"{SCHEMA_SQL}\n"
+            f"{RESULT_DETAILS_SCHEMA_SQL}\n"
             f"{upgrade_sql}"
             "INSERT OR IGNORE INTO schema_versions("
             "version, applied_at_utc, description"
             f") VALUES ({SCHEMA_VERSION}, '{escaped_now}', "
-            "'Embargo causal de resultados y provenance del modelo');\n"
+            "'Detalle aditivo de resultados y recuperación con disponibilidad separada');\n"
             f"PRAGMA user_version = {SCHEMA_VERSION};\n"
             "COMMIT;"
         )
@@ -1214,6 +1216,13 @@ class OperationsStore(AbstractContextManager["OperationsStore"]):
                         )
                     )
                     continue
+                register_detail(
+                    self.connection,
+                    {**row, "source_match_id": source_match_id},
+                    observation_id=observation_id,
+                    source=source,
+                    obtained_at=observed_at,
+                )
                 if not validity.is_valid:
                     if validity.status == "finished" or (validity.invalid_reason or "").startswith(
                         "winner_present"

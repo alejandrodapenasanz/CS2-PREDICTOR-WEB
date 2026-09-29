@@ -261,6 +261,7 @@ def test_challenge_retry_after_never_launches_browser(tmp_path):
     """A server cooldown takes priority over operator browser recovery."""
 
     with patch("src.tennis_abstract_access.build_http_client") as build:
+        build.return_value.defer_host_until.side_effect = lambda _url, deadline: deadline
         build.return_value.get.side_effect = WafBlockedError(
             "challenge", HttpResponse(429, b"challenge", {"Retry-After": "3600"}, URL)
         )
@@ -273,6 +274,80 @@ def test_challenge_retry_after_never_launches_browser(tmp_path):
             assert build.call_count == 1
         finally:
             client.close()
+
+
+def test_short_challenge_cooldown_precedes_one_visible_browser_recovery(tmp_path):
+    """Do not abandon today's profiles or open a browser before Retry-After expires."""
+
+    from tests.test_responsible_http import _Clock
+
+    clock = _Clock()
+    static, browser = Mock(), Mock()
+    static.get.side_effect = WafBlockedError(
+        "challenge", HttpResponse(429, b"challenge", {"Retry-After": "40"}, URL)
+    )
+    static.defer_host_until.side_effect = lambda _url, deadline: deadline
+    browser.get.return_value = HttpResponse(200, BODY, {}, URL)
+
+    def create_browser(**kwargs):
+        """The recovery session is created only after the full server deadline."""
+
+        assert clock.now == 10_040
+        return Mock()
+
+    with (
+        patch("src.tennis_abstract_access.build_http_client", side_effect=[static, browser]),
+        patch("src.tennis_abstract_access.time.time", clock.time),
+        patch("src.tennis_abstract_access.time.sleep", clock.sleep),
+        patch(
+            "src.tennis_abstract_browser.TennisAbstractBrowserTransport", side_effect=create_browser
+        ) as transport,
+    ):
+        client = TennisAbstractAcquisitionClient(
+            config_path=access_config(tmp_path), cache_root=tmp_path
+        )
+        try:
+            assert client.get(URL).content == BODY
+            assert client.get(URL).content == BODY
+            assert clock.sleeps == [30, 10]
+            static.defer_host_until.assert_called_once_with(URL, 10_040)
+            static.get.assert_called_once()
+            assert transport.call_args.kwargs["headless"] is False
+            assert transport.call_count == 1
+        finally:
+            client.close()
+
+
+def test_persisted_server_cooldown_blocks_other_transports(tmp_path):
+    """A new client cannot escape a persisted pause by changing transport or URL."""
+
+    from src.responsible_http import build_http_client
+    from tests.test_responsible_http import _Clock, _Response, _Transport
+
+    clock = _Clock()
+    transport = _Transport({URL: _Response(200, BODY, {}, URL)})
+    with build_http_client(
+        transport=transport,
+        cache_root=tmp_path,
+        clock=clock.time,
+        sleeper=clock.sleep,
+        robots_exception=lambda _url: True,
+    ) as client:
+        assert client.defer_host_until(URL, clock.now + 40) == 10_040
+        assert client.defer_host_until(URL, clock.now + 10) == 10_040
+    with build_http_client(
+        transport=transport,
+        cache_root=tmp_path,
+        clock=clock.time,
+        sleeper=clock.sleep,
+        robots_exception=lambda _url: True,
+    ) as client:
+        with pytest.raises(RateLimitedError):
+            client.get(URL)
+        assert transport.calls == []
+        clock.sleep(40)
+        assert client.get(URL).content == BODY
+        assert transport.calls == [URL]
 
 
 def test_local_pause_migration_is_single_use_and_not_a_server_cooldown_bypass(monkeypatch):

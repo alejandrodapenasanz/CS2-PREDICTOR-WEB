@@ -150,6 +150,54 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def daily_extra_players(
+    store: TennisAbstractStore,
+    agenda: list[InventoryPlayer],
+    checks: dict[tuple[str, str], dict[str, Any]],
+    *,
+    day: str,
+    limit: int,
+) -> tuple[list[InventoryPlayer], int]:
+    """Reserve a resumable UTC-day quota using inspected identities, never guessed URLs.
+
+    A repeated launcher resumes the same quota instead of selecting fifty more.
+    Oldest attempts go first, so unchanged daily inventories cannot starve a tail.
+    This mutable scheduling state is not historical evidence or a model feature.
+    """
+
+    inventory = {(p.gender, p.key): p for p in load_inventory()}
+    primary = {(p.gender, p.key) for p in agenda}
+    plan = store.state("daily_extra_selection") or {}
+    reserved = (
+        [tuple(identity) for identity in plan.get("identities", [])]
+        if plan.get("utc_date") == day
+        else []
+    )
+    candidates = [
+        identity
+        for identity in inventory
+        if identity not in primary
+        and identity not in reserved
+        and (checks.get(identity, {}).get("last_success_utc") or "")[:10] != day
+    ]
+    candidates.sort(
+        key=lambda identity: (
+            checks.get(identity, {}).get("last_attempt_utc", ""),
+            inventory[identity].rank,
+            *identity,
+        )
+    )
+    reserved.extend(candidates[: max(0, limit - len(reserved))])
+    store.set_state("daily_extra_selection", {"utc_date": day, "identities": reserved})
+    extras = [
+        inventory[identity]
+        for identity in reserved[:limit]
+        if identity in inventory and identity not in primary
+    ]
+    deferred = sum(identity not in reserved for identity in candidates)
+    return extras, deferred
+
+
 def acquisition_status(
     *,
     store_path: Path = DEFAULT_STORE,
@@ -221,7 +269,18 @@ def acquisition_status(
             ],
             last_run={
                 key: last.get(key)
-                for key in ("status", "selection_scope", "inventory_players", "finished_at_utc")
+                for key in (
+                    "status",
+                    "selection_scope",
+                    "inventory_players",
+                    "finished_at_utc",
+                    "agenda_players",
+                    "extra_players_selected",
+                    "refreshed_agenda",
+                    "refreshed_extra",
+                    "pending_agenda",
+                    "pending_extra",
+                )
             }
             if last
             else None,
@@ -239,11 +298,22 @@ def update_daily(
     browser_recovery: bool = False,
     progress: Callable[[str], None] | None = None,
     selection_context: dict[str, Any] | None = None,
+    extra_profiles: int = 0,
 ) -> dict:
     """Commit each successful player; pause safely with visible pending coverage."""
 
     if max_profiles is not None and (isinstance(max_profiles, bool) or max_profiles <= 0):
         raise ValueError("max_profiles must be positive, or omitted for the full inventory.")
+    if (
+        isinstance(extra_profiles, bool)
+        or not isinstance(extra_profiles, int)
+        or extra_profiles < 0
+    ):
+        raise ValueError("extra_profiles must be a non-negative integer.")
+    if extra_profiles and players is None:
+        raise ValueError(
+            "Extra profiles require an explicit primary selection, not full inventory."
+        )
     if browser_recovery and not browser_recovery_authorized():
         raise ValueError("Explicit browser recovery requires dated operator authorization.")
     inventory = load_inventory() if players is None else players
@@ -256,6 +326,13 @@ def update_daily(
     day = start[:10]
     with acquisition_lock(store_path), closing(TennisAbstractStore(store_path)) as store:
         checks = store.checks()
+        primary_ids = set(identifiers)
+        extra_players, deferred_extras = (
+            daily_extra_players(store, inventory, checks, day=day, limit=extra_profiles)
+            if extra_profiles
+            else ([], 0)
+        )
+        inventory = [*inventory, *extra_players]
         pending = [
             player
             for player in inventory
@@ -265,6 +342,7 @@ def update_daily(
         # A rejected/failed player does not permanently starve untouched players.
         pending.sort(
             key=lambda player: (
+                0 if (player.gender, player.key) in primary_ids else 1,
                 checks.get((player.gender, player.key), {}).get("last_attempt_utc", ""),
                 player.rank,
                 player.gender,
@@ -282,6 +360,14 @@ def update_daily(
             "agenda_selection": selection_context,
             "coverage_scope": "all_stored_players",
             "already_refreshed": len(inventory) - len(pending),
+            "agenda_players": len(primary_ids) if selection_context is not None else None,
+            "extra_profiles_limit": extra_profiles,
+            "extra_players_selected": len(extra_players),
+            "extra_backlog_deferred": deferred_extras,
+            "refreshed_agenda": 0,
+            "refreshed_extra": 0,
+            "pending_agenda": sum((p.gender, p.key) in primary_ids for p in pending),
+            "pending_extra": sum((p.gender, p.key) not in primary_ids for p in pending),
             "refreshed": 0,
             "attempted": 0,
             "player_timeouts": [],
@@ -294,6 +380,15 @@ def update_daily(
             "parser_contract_version": PARSER_CONTRACT_VERSION,
             "oldest_inventory_capture_utc": min(p.inventory_captured_at_utc for p in inventory),
         }
+        if extra_profiles:
+            report["selection_scope"] += "_plus_pending"
+        if progress:
+            progress(
+                f"SELECCION: {len(primary_ids)} perfiles prioritarios de cartelera/seleccion "
+                f"+ {len(extra_players)} adicionales (cupo diario {extra_profiles}); "
+                f"{report['already_refreshed']} ya actualizados hoy; "
+                f"pendientes cartelera={report['pending_agenda']}, adicionales={report['pending_extra']}."
+            )
         pause = store.state("pause")
         player_pauses = store.state("player_timeouts") or {}
         if selection_context is not None:
@@ -394,7 +489,16 @@ def update_daily(
                         store.set_state("player_timeouts", player_pauses)
                     report["refreshed"] += 1
                     report["pending"] -= 1
+                    group = "agenda" if (player.gender, player.key) in primary_ids else "extra"
+                    report[f"refreshed_{group}"] += 1
+                    report[f"pending_{group}"] -= 1
                     report["status"] = "partial" if report["pending"] else "completed"
+                    if progress:
+                        progress(
+                            f"GUARDADO {player_identity}: {len(history.rows)} filas validas, "
+                            f"{len(history.quarantined_rows)} en cuarentena; "
+                            f"{report['pending']} perfiles pendientes."
+                        )
             finally:
                 if client is None:
                     active.close()

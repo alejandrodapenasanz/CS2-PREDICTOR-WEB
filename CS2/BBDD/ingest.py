@@ -607,6 +607,9 @@ def upsert_prediction_ledger(
 def finalize_prediction_ledger(conn: sqlite3.Connection, now: str | None = None) -> int:
     """Freeze started matches and score only the exact frozen prediction."""
     now = now or utcnow()
+    from BBDD.result_store import ensure_schema
+
+    ensure_schema(conn)
     conn.execute(
         """
         UPDATE prediction_ledger
@@ -630,12 +633,15 @@ def finalize_prediction_ledger(conn: sqlite3.Connection, now: str | None = None)
         """
         SELECT pl.ledger_id, pl.team1_id, pl.team2_id, pl.prob_team1,
                m.team1_id AS result_team1_id, m.team2_id AS result_team2_id,
-               m.winner_team_id, m.result_filled_at_utc
+               COALESCE(r.winner_team_id,m.winner_team_id),
+               COALESCE(e.obtained_at_utc,m.result_filled_at_utc)
         FROM prediction_ledger pl
         JOIN matches m ON m.match_id=pl.match_id
+        LEFT JOIN result_status r ON r.match_id=m.match_id AND r.status='finished'
+        LEFT JOIN result_evidence e ON e.evidence_id=r.evidence_id
         WHERE pl.ledger_status IN ('open','frozen')
-          AND m.status='completed'
-          AND m.winner_team_id IS NOT NULL
+          AND (m.status='completed' OR r.status='finished')
+          AND COALESCE(r.winner_team_id,m.winner_team_id) IS NOT NULL
         """
     ).fetchall()
     evaluated = 0
@@ -718,6 +724,17 @@ def update_player_snapshot_flags(conn: sqlite3.Connection, run_dir: Path) -> int
     return touched
 
 
+def match_detail_fetch_status(payload: dict[str, Any]) -> str:
+    """A listing fallback is not evidence of a successfully downloaded detail."""
+    detail = payload.get("detail") or {}
+    error = str(payload.get("html_error") or "").lower()
+    if error:
+        return "blocked" if any(x in error for x in ("403", "429", "cloudflare", "challenge", "quarantine")) else "error"
+    if detail.get("source") == "upcoming_row_fallback" or not detail.get("match"):
+        return "partial"
+    return "ok"
+
+
 def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
     touched = 0
     manifest = read_json(run_dir / "manifest.json", {})
@@ -782,8 +799,9 @@ def update_fetch_state_from_run(conn: sqlite3.Connection, run_dir: Path) -> int:
             conn,
             "match_detail",
             str(payload.get("id") or path.stem),
-            "ok",
+            match_detail_fetch_status(payload),
             fetched_at=payload.get("captured_at") or captured_at,
+            note=str(payload.get("html_error") or "")[:500] or None,
         )
     return touched
 
@@ -952,7 +970,18 @@ def ingest_run(
             counts[key] += value
         conn.commit()
 
+        settled_before = conn.execute("SELECT COUNT(*) FROM prediction_ledger WHERE ledger_status='evaluated'").fetchone()[0]
         counts["predictions_rows"] += insert_predictions(conn, run_dir)
+        finalize_prediction_ledger(conn)
+        settled_after = conn.execute("SELECT COUNT(*) FROM prediction_ledger WHERE ledger_status='evaluated'").fetchone()[0]
+        counts["result_predictions_settled"] = settled_after - settled_before
+        from BBDD.result_store import coverage as result_coverage
+
+        print("[CS2 resultados persistidos] " + json.dumps({
+            **read_json(run_dir / "result_recovery_summary.json", {}),
+            "predictions_settled": counts["result_predictions_settled"],
+            "coverage": result_coverage(conn, utcnow()),
+        }, ensure_ascii=False))
         counts["player_snapshot_flags"] += update_player_snapshot_flags(conn, run_dir)
         counts["fetch_state_rows"] += update_fetch_state_from_run(conn, run_dir)
         counts["reconciled_player_fetch_state_rows"] += reconcile_known_missing_player_stats(conn)

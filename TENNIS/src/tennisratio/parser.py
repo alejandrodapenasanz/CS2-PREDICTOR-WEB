@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import hashlib
 import json
+import logging
 import math
 import re
 from typing import Final, Literal, cast
@@ -50,6 +51,9 @@ _ALLOWED_LEVELS: Final[dict[str, str]] = {
     "Futures": "ITF",
     "Grand Slams": "grand_slam",
 }
+# Inspected in the saved ATP agenda (Davis Cup / Davis Cup Qualies).
+# This source label has no accredited training-level equivalence.
+_UNMAPPED_LEVELS: Final[frozenset[str]] = frozenset({"National Team"})
 _ALLOWED_SURFACES: Final[frozenset[str]] = frozenset({"Hard", "Clay", "Grass", "Carpet"})
 _CANONICAL_SURFACES: Final[dict[str, str]] = {
     surface.casefold(): surface for surface in _ALLOWED_SURFACES
@@ -321,10 +325,18 @@ def _parse_tournament_group(
     level_label = _required_attr(group, "data-level")
     surface = _required_attr(group, "data-surface")
     mapped_level = _ALLOWED_LEVELS.get(level_label)
-    if mapped_level is None:
+    if mapped_level is None and level_label not in _UNMAPPED_LEVELS:
         raise TennisRatioSchemaError(f"Unsupported tournament level {level_label!r}.")
+    tour_level: object
     if mapped_level == "grand_slam":
         tour_level = "ATP" if gender == "M" else "WTA"
+    elif mapped_level is None:
+        tour_level = pd.NA
+        logging.getLogger(__name__).warning(
+            "TennisRatio: nivel %r conservado en tournament_level_source; "
+            "tour_level ausente, sin equivalencia de modelo ni best_of inventados.",
+            level_label,
+        )
     else:
         tour_level = mapped_level
     if surface not in _ALLOWED_SURFACES:

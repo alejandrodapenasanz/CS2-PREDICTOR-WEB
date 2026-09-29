@@ -1156,6 +1156,8 @@ def insert_match_analytics_snapshots(
     match_id_map: dict[str, int],
     team_ids: dict[str, int],
     team_ids_by_hltv: dict[str, int],
+    *,
+    update_events: bool = True,
 ) -> dict[str, int]:
     counts = {"analytics_snapshot_rows": 0, "analytics_map_stats_rows": 0, "analytics_map_handicap_rows": 0}
     for path in sorted((run_dir / "analytics").glob("*.json")):
@@ -1172,7 +1174,7 @@ def insert_match_analytics_snapshots(
         team2 = (series.get("team2") or {}).get("team")
         source_file = payload.get("source_file") or source_name(path)
         event_row = cur.execute("SELECT event_id FROM matches WHERE match_id=?", (match_id,)).fetchone()
-        if event_row:
+        if event_row and update_events:
             cur.execute(
                 """
                 UPDATE events
@@ -1270,12 +1272,17 @@ def insert_match_analytics_snapshots(
     return counts
 
 
-def insert_team_rankings(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int]) -> int:
+def insert_team_rankings(
+    cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int], *, run_dirs: list[Path] | None = None
+) -> int:
     runs_dir = DAILY_ROOT / "runs"
-    if not runs_dir.exists():
+    if run_dirs is None and not runs_dir.exists():
         return 0
     inserted = 0
-    for path in sorted(runs_dir.glob("*/rankings/*.json")):
+    paths = runs_dir.glob("*/rankings/*.json") if run_dirs is None else (
+        path for run in run_dirs for path in (run / "rankings").glob("*.json")
+    )
+    for path in sorted(paths):
         payload = json.loads(path.read_text(encoding="utf-8"))
         run_id = path.parents[1].name
         ranking_type = payload.get("ranking_type") or path.stem
@@ -1341,14 +1348,15 @@ def insert_raw_snapshot(
     return cur.rowcount
 
 
-def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
+def insert_daily_archives(cur: sqlite3.Cursor, *, run_dirs: list[Path] | None = None) -> dict[str, int]:
     runs_dir = STATE_ROOT / "PIPELINE" / "runs"
-    if not runs_dir.exists():
+    if run_dirs is None and not runs_dir.exists():
         return {"raw_snapshots_rows": 0, "player_stat_snapshots_rows": 0}
 
     raw_count = 0
     player_count = 0
-    for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
+    selected_runs = run_dirs if run_dirs is not None else [path for path in runs_dir.iterdir() if path.is_dir()]
+    for run_dir in sorted(selected_runs):
         run_id = run_dir.name
         manifest_path = run_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -1473,7 +1481,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 run_id=run_id,
                 path=team_profiles_path,
                 payload=item,
-                captured_at=run_captured_at,
+                captured_at=item.get("captured_at") or run_captured_at,
                 hltv_team_id=team_id,
                 source_file=f"{source_name(team_profiles_path)}#{team_id}",
             )
@@ -1486,7 +1494,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 run_id=run_id,
                 path=path,
                 payload=payload,
-                captured_at=run_captured_at,
+                captured_at=payload.get("captured_at") or run_captured_at,
             )
             year = parse_int(payload.get("year"))
             for comparison in payload.get("results") or []:

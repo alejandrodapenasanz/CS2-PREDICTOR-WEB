@@ -740,7 +740,14 @@ class LiveDatabasePipelineTests(unittest.TestCase):
         master = Path(tmp.name) / "matches.json"
         master.write_text("{}", encoding="utf-8")
 
-        ingest.ingest_run(run_dir, db_path, master, backup_dir=None, mirror_backup_dir=None)
+        # An offline fixture must not import the operator's entire live VAULT.
+        # Production archive scans belong in operational runs, not this test.
+        with (
+            patch.object(build_db, "STATE_ROOT", Path(tmp.name) / "empty_state"),
+            patch.object(build_db, "DAILY_ROOT", Path(tmp.name)),
+            patch.object(build_db, "DEFAULT_ROSTER_HISTORY", Path(tmp.name) / "roster_history.json"),
+        ):
+            ingest.ingest_run(run_dir, db_path, master, backup_dir=None, mirror_backup_dir=None)
 
         conn = build_db.connect_live_db(db_path)
         row = conn.execute(

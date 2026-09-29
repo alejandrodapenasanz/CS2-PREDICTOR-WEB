@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Final
 
 
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
 
 SCHEMA_SQL: Final[str] = """
 CREATE TABLE IF NOT EXISTS schema_versions (

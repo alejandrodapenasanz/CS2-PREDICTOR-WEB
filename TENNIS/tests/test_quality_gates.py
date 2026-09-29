@@ -20,6 +20,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 class ImportCoverageTests(unittest.TestCase):
     """Fija el contrato manifest/import y demuestra su caso negativo."""
 
+    def test_lightgbm_pin_preserves_verified_windows_runtime(self) -> None:
+        """Impide volver a instalar silenciosamente la DLL 4.7 bloqueada."""
+        source = (PROJECT_ROOT / "requirements.txt").read_text(encoding="utf-8")
+        lock = (PROJECT_ROOT / "requirements.lock.txt").read_text(encoding="utf-8")
+        self.assertIn("lightgbm==4.6.0", source.splitlines())
+        self.assertIn("lightgbm==4.6.0 \\", lock.splitlines())
+        self.assertIn("37089ee95664b6550a7189d887dbf098e3eadab03537e411f52c63c121e3ba4b", lock)
+
     def test_real_direct_requirements_cover_all_external_imports(self) -> None:
         """No permite imports externos productivos sin declaración directa."""
 

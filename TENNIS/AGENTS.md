@@ -56,8 +56,15 @@ Estas reglas se aplican en todas las fases y sesiones del proyecto.
 
 - El 09/09/2026 el usuario pidió limitar la adquisición diaria a quienes juegan
   en la cartelera seleccionada. Primero se actualiza la cartelera TennisRatio;
-  después se adquieren solo sus participantes identificables en los enlaces
-  inspeccionados de TA. El catálogo completo requiere `--full-inventory`
+  después se adquieren sus participantes identificables en los enlaces
+  inspeccionados de TA. El 25/09/2026 el usuario amplió explícitamente este
+  alcance: primero todos los participantes de la cartelera, después hasta 50
+  perfiles pendientes adicionales del inventario inspeccionado de TA. El cupo
+  es diario UTC y reanudable; repetir el arranque no consume otros 50. Los más
+  antiguos/no intentados tienen prioridad dentro del grupo de adicionales.
+  Esto también se aplica al launcher raíz y a `-UpdateOnly` a través del mismo
+  entrypoint, sin eliminar el cupo independiente de TennisRatio.
+  El catálogo completo requiere `--full-inventory`
   explícito. No se borra el histórico ya adquirido ni se adivinan URLs/identidades
   para cubrir ausencias. La selección por nombre completo único + género sirve
   solo para adquirir perfiles; no constituye mapping canónico para el modelo.

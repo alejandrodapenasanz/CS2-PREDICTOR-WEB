@@ -1,7 +1,9 @@
 import argparse
 import asyncio
+import hashlib
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,7 +29,12 @@ def hltv_target_url(value: str) -> str:
     return value
 
 
-async def grab_cf_session(target_url: str = CF_TARGET_URL) -> bool:
+async def grab_cf_session(target_url: str = CF_TARGET_URL, capture_output: Path | None = None) -> bool:
+    """Save a session only after the exact requested page has actually loaded.
+
+    The optional capture is a private, one-use handoff to the pipeline. A
+    cookie alone does not prove that the page or another HTTP client works.
+    """
     target_url = hltv_target_url(target_url)
     browser = await uc.start(headless=False)
     try:
@@ -38,13 +45,47 @@ async def grab_cf_session(target_url: str = CF_TARGET_URL) -> bool:
             cookies = await browser.cookies.get_all()
             cf = next((c for c in cookies if c.name == "cf_clearance" and c.value), None)
             if cf:
-                ua = await tab.evaluate("navigator.userAgent")
-                CF_SESSION_FILE.write_text(
-                    json.dumps({"cf_clearance": cf.value, "user_agent": ua}, indent=2),
-                    encoding="utf-8",
+                ready = await tab.evaluate("document.readyState")
+                page_url = await tab.evaluate("window.location.href")
+                html = await tab.get_content()
+                head = html[:8000].lower()
+                blocked = any(
+                    marker in head
+                    for marker in (
+                        "just a moment",
+                        "cf-chl",
+                        "cf_chl_",
+                        "challenge-platform",
+                        "checking your browser",
+                        "enable javascript and cookies",
+                        "attention required",
+                        "turnstile",
+                        "<title>access denied",
+                        "<title>forbidden",
+                    )
                 )
-                print(f"Saved session to {CF_SESSION_FILE}", flush=True)
-                return True
+                exact_page = urlsplit(str(page_url))._replace(fragment="") == urlsplit(target_url)._replace(fragment="")
+                if ready in {"interactive", "complete"} and exact_page and "<body" in html.lower() and not blocked:
+                    ua = await tab.evaluate("navigator.userAgent")
+                    CF_SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = CF_SESSION_FILE.with_suffix(".json.tmp")
+                    temporary.write_text(json.dumps({"cf_clearance": cf.value, "user_agent": ua}), encoding="utf-8")
+                    temporary.replace(CF_SESSION_FILE)
+                    if capture_output is not None:
+                        capture_output.parent.mkdir(parents=True, exist_ok=True)
+                        capture_output.write_text(
+                            json.dumps(
+                                {
+                                    "url": target_url,
+                                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                                    "sha256": hashlib.sha256(html.encode("utf-8")).hexdigest(),
+                                    "html": html,
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
+                    print(f"Saved session and verified page from {target_url}", flush=True)
+                    return True
             await asyncio.sleep(1)
         print("Failed to obtain cf_clearance within 3 minutes.", flush=True)
         return False
@@ -55,8 +96,9 @@ async def grab_cf_session(target_url: str = CF_TARGET_URL) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Open an HLTV page visibly for interactive session renewal.")
     parser.add_argument("--url", type=hltv_target_url, default=CF_TARGET_URL)
+    parser.add_argument("--capture-output", type=Path, help="Optional private JSON handoff of the verified page.")
     args = parser.parse_args()
-    return 0 if uc.loop().run_until_complete(grab_cf_session(args.url)) else 1
+    return 0 if uc.loop().run_until_complete(grab_cf_session(args.url, args.capture_output)) else 1
 
 
 if __name__ == "__main__":
