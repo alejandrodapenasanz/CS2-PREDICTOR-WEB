@@ -68,7 +68,14 @@ def test_daily_refresh_is_persistent_idempotent_and_full_inventory_by_default(tm
     path = tmp_path / "tennis_abstract.sqlite3"
     players = [player(), player("CarlosAlcaraz", rank=2)]
     client = client_for(page(), page("70"))
-    first = update_daily(store_path=path, players=players, client=client, clock=lambda: START)
+    messages = []
+    first = update_daily(
+        store_path=path,
+        players=players,
+        client=client,
+        clock=lambda: START,
+        progress=messages.append,
+    )
     assert first["status"] == "completed"
     assert first["refreshed"] == first["stored_players"] == 2
     assert first["pending"] == first["model_ready_rows"] == 0
@@ -77,6 +84,8 @@ def test_daily_refresh_is_persistent_idempotent_and_full_inventory_by_default(tm
     assert again["unique_source_rows"] == 2
     assert client.get.call_count == 2
     assert not first["production_changed"]
+    assert "GUARDADO M:CarlosAlcaraz: 1 filas validas" in messages[-1]
+    assert "0 perfiles pendientes" in messages[-1]
 
 
 def test_partial_limit_resumes_without_starving_remaining_players(tmp_path):

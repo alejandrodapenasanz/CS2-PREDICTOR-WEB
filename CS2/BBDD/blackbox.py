@@ -40,9 +40,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent  # .../CS2/BBDD
 CS2_ROOT = ROOT.parent  # .../CS2
-DEFAULT_DB = ROOT / "cs2.db"
-DEFAULT_BLACKBOX = ROOT / "BLACKBOX"
-DEFAULT_BACKUP_DIR = ROOT / "backups"
+if str(CS2_ROOT) not in sys.path:
+    sys.path.insert(0, str(CS2_ROOT))
+
+from BBDD.result_store import SCHEMA as RESULT_SCHEMA
+STATE_ROOT = CS2_ROOT.parent / "VAULT" / "CS2" / "BBDD"
+DEFAULT_DB = STATE_ROOT / "cs2.db"
+DEFAULT_BLACKBOX = STATE_ROOT / "BLACKBOX"
+DEFAULT_BACKUP_DIR = STATE_ROOT / "backups"
 SCHEMA_SQL = ROOT / "cs2_prediction_schema.sql"
 BUILD_DB = ROOT / "build_db.py"
 
@@ -78,12 +83,17 @@ SOURCE_OF_TRUTH_TABLES: tuple[str, ...] = (
     "raw_snapshots",
     "player_stat_snapshots",
     "team_ranking_snapshots",
+    "match_team_ranking_observations",
     "match_analytics_snapshots",
     "match_analytics_map_stats",
     "match_analytics_map_handicap",
     # Auditoria del modelo (congelada, no recomputable)
     "predictions",
     "prediction_ledger",
+    "result_evidence",
+    "result_status",
+    "result_maps",
+    "result_fetch_state",
 )
 
 # Excluidas: se REGENERAN. No entran en BLACKBOX.
@@ -201,7 +211,7 @@ def _build_blackbox_sqlite(snapshot_db: Path, dest_sqlite: Path) -> dict[str, di
     """
     if dest_sqlite.exists():
         dest_sqlite.unlink()
-    schema_text = SCHEMA_SQL.read_text(encoding="utf-8")
+    schema_text = SCHEMA_SQL.read_text(encoding="utf-8") + "\n" + RESULT_SCHEMA
 
     dest = sqlite3.connect(dest_sqlite)
     try:
@@ -301,7 +311,7 @@ def export(db_path: Path, blackbox_dir: Path) -> int:
 
     # Copia del esquema canonico.
     schema_copy = staging / SCHEMA_COPY_NAME
-    shutil.copyfile(SCHEMA_SQL, schema_copy)
+    schema_copy.write_text(SCHEMA_SQL.read_text(encoding="utf-8") + "\n" + RESULT_SCHEMA, encoding="utf-8")
 
     # Manifest con checksums.
     files_meta: dict[str, dict] = {}
@@ -315,7 +325,7 @@ def export(db_path: Path, blackbox_dir: Path) -> int:
         "tool_version": TOOL_VERSION,
         "created_at_utc": utcnow_iso(),
         "source_db": str(db_path),
-        "schema_sha256": sha256_file(SCHEMA_SQL),
+        "schema_sha256": sha256_file(schema_copy),
         "source_of_truth_tables": list(SOURCE_OF_TRUTH_TABLES),
         "derived_excluded_tables": list(DERIVED_EXCLUDED_TABLES),
         "total_source_rows": total_rows,

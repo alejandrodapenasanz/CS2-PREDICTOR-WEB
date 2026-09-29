@@ -149,7 +149,7 @@ def test_schema_is_versioned_and_default_path_is_inside_tennis() -> None:
     """El esquema y la ruta productiva quedan versionados dentro del proyecto."""
 
     assert OPERATIONS_DATABASE_PATH == (
-        PROJECT_ROOT / "BBDD" / "tennis.sqlite3"
+        PROJECT_ROOT.parent / "VAULT" / "TENNIS" / "BBDD" / "tennis.sqlite3"
     )
     with temporary_store() as store:
         version = store.connection.execute(
@@ -158,11 +158,11 @@ def test_schema_is_versioned_and_default_path_is_inside_tennis() -> None:
         recorded = store.connection.execute(
             "SELECT version FROM schema_versions"
         ).fetchone()[0]
-        assert version == SCHEMA_VERSION == recorded == 2
+        assert version == SCHEMA_VERSION == recorded == 3
 
 
 def test_schema_migrates_v1_and_unversioned_databases() -> None:
-    """Bases v1 o completas sin PRAGMA se elevan a v2 sin perder filas."""
+    """Bases v1 o completas sin PRAGMA se elevan a v3 sin perder filas."""
 
     legacy_sql = SCHEMA_SQL.replace(
         "    model_training_available_max_date TEXT,\n",
@@ -200,8 +200,8 @@ def test_schema_migrates_v1_and_unversioned_databases() -> None:
                 assert "model_training_available_max_date" in columns
                 assert store.connection.execute(
                     "PRAGMA user_version"
-                ).fetchone()[0] == 2
-                assert 2 in versions
+                ).fetchone()[0] == 3
+                assert 3 in versions
 
 
 def test_empty_runs_are_supported_and_idempotent() -> None:

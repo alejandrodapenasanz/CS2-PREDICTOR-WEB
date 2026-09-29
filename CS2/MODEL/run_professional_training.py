@@ -30,8 +30,9 @@ from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 TRAIN_SCRIPT = ROOT / "MODEL" / "train.py"
-RESULTS_DIR = ROOT / "MODEL" / "results"
+RESULTS_DIR = STATE_ROOT / "MODEL" / "results"
 BASELINE_NAMES = {"base_rate", "elo", "glicko"}
 
 
@@ -39,8 +40,7 @@ def require_cpython_313() -> None:
     """Abort unless training runs with the project's exact CPython version."""
     if sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 13):
         raise SystemExit(
-            "Professional training requires CPython 3.13 from CS2/.venv. "
-            "Run CS2/start.ps1 once to provision it."
+            "Professional training requires CPython 3.13 from CS2/.venv. Run CS2/start.ps1 once to provision it."
         )
 
 
@@ -177,9 +177,7 @@ def best_from_metrics(metrics_path: Path) -> tuple[str, dict]:
     candidates = {
         name: values
         for name, values in metrics.items()
-        if name not in BASELINE_NAMES
-        and isinstance(values, dict)
-        and "log_loss" in values
+        if name not in BASELINE_NAMES and isinstance(values, dict) and "log_loss" in values
     }
     if not candidates:
         raise RuntimeError(f"No production candidates found in {metrics_path}")
@@ -219,16 +217,14 @@ def append_result_table(report_fh, rows: list[RunResult]) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Full verbose training sweep for the CS2 predictive model."
-    )
+    parser = argparse.ArgumentParser(description="Full verbose training sweep for the CS2 predictive model.")
     parser.add_argument("--half-lives", type=parse_float_list, default=parse_float_list("45,60,90,120,180"))
     parser.add_argument("--wf-gaps", type=parse_int_list, default=parse_int_list("0,1"))
     parser.add_argument("--output", default=str(Path("MODEL") / "results" / "professional_training_output.md"))
-    parser.add_argument("--skip-final", action="store_true",
-                        help="Do not retrain the final artifact with the best config.")
-    parser.add_argument("--no-catboost", action="store_true",
-                        help="Disable CatBoost candidates.")
+    parser.add_argument(
+        "--skip-final", action="store_true", help="Do not retrain the final artifact with the best config."
+    )
+    parser.add_argument("--no-catboost", action="store_true", help="Disable CatBoost candidates.")
     parser.add_argument(
         "--algorithms",
         default="all",
@@ -240,10 +236,12 @@ def main() -> int:
         default="core",
         help="Feature ablation profile passed to MODEL/train.py.",
     )
-    parser.add_argument("--quiet-train", action="store_true",
-                        help="Do not pass --verbose to MODEL/train.py.")
-    parser.add_argument("--install-deps", action="store_true",
-                        help="Install the hashed requirements.lock.txt into the active CPython 3.13 environment.")
+    parser.add_argument("--quiet-train", action="store_true", help="Do not pass --verbose to MODEL/train.py.")
+    parser.add_argument(
+        "--install-deps",
+        action="store_true",
+        help="Install the hashed requirements.lock.txt into the active CPython 3.13 environment.",
+    )
     parser.add_argument("--raw", default=None)
     parser.add_argument("--warmup-weeks", type=int, default=None)
     parser.add_argument("--min-train", type=int, default=None)
@@ -309,6 +307,7 @@ def main() -> int:
         if not args.no_catboost:
             try:
                 import catboost  # noqa: F401
+
                 report_fh.write("\nCatBoost import: `OK`\n")
             except Exception as exc:
                 report_fh.write(f"\nCatBoost import: `FAILED` - `{exc}`\n")
@@ -324,10 +323,7 @@ def main() -> int:
                 cmd = train_command(args, half_life, gap)
                 rc = tee_command(cmd, report_fh, f"TRAIN {config}", env)
                 report_dst, metrics_dst = copy_current_outputs(run_dir, config)
-                report_fh.write(
-                    f"\nCopied report: `{report_dst}`  \n"
-                    f"Copied metrics: `{metrics_dst}`\n"
-                )
+                report_fh.write(f"\nCopied report: `{report_dst}`  \nCopied metrics: `{metrics_dst}`\n")
                 if rc != 0:
                     report_fh.write(f"\nStopping because `{config}` failed.\n")
                     return rc
@@ -347,8 +343,7 @@ def main() -> int:
                 )
                 rows.append(row)
                 report_fh.write(
-                    f"\nResult `{config}`: prod=`{row.model}` "
-                    f"logloss=`{row.log_loss:.6f}` acc=`{row.accuracy:.6f}`\n"
+                    f"\nResult `{config}`: prod=`{row.model}` logloss=`{row.log_loss:.6f}` acc=`{row.accuracy:.6f}`\n"
                 )
                 report_fh.flush()
 
@@ -361,10 +356,7 @@ def main() -> int:
         best = min(rows, key=lambda item: item.log_loss)
         if not args.skip_final:
             report_fh.write("\n## Final production training\n\n")
-            report_fh.write(
-                "Retraining final artifact with the best config by log loss: "
-                f"`{best.config}`.\n"
-            )
+            report_fh.write(f"Retraining final artifact with the best config by log loss: `{best.config}`.\n")
             rc = tee_command(
                 train_command(args, best.half_life, best.wf_gap),
                 report_fh,

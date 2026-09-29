@@ -18,10 +18,11 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DAILY_ROOT = ROOT / "PIPELINE"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+DAILY_ROOT = STATE_ROOT / "PIPELINE"
 RUNS_DIR = DAILY_ROOT / "runs"
 MASTER_MATCHES = DAILY_ROOT / "master" / "matches.json"
-OUTPUT_DIR = ROOT / "MODEL" / "results"
+OUTPUT_DIR = STATE_ROOT / "MODEL" / "results"
 
 sys.path.insert(0, str(ROOT))
 try:
@@ -31,6 +32,7 @@ try:
         reliability_score,
     )
 except Exception:  # pragma: no cover - fallback for isolated report runs
+
     def build_market_blend_policy(master: dict[str, Any]) -> dict[str, Any]:
         return {"available": False, "source": "unavailable_import_fallback"}
 
@@ -103,7 +105,12 @@ CATEGORY_FLAGS = {
     "market_sparse_or_missing": {"NO_ODDS", "LOW_ODDS_SOURCES", "LOW_MARKET_CONSENSUS"},
     "market_disagreement": {"MODEL_ODDS_DISAGREE", "VALUE_EDGE", "ODDS_STRONG_DRIFT"},
     "map_veto_pool_uncertain": {"LOW_MAP_POOL_DATA"},
-    "roster_player_uncertain": {"ROSTER_RECENT_CHANGE", "STANDIN_RISK", "LOW_PLAYER_STATS", "PLAYER_FORM_BACKFILL_ONLY"},
+    "roster_player_uncertain": {
+        "ROSTER_RECENT_CHANGE",
+        "STANDIN_RISK",
+        "LOW_PLAYER_STATS",
+        "PLAYER_FORM_BACKFILL_ONLY",
+    },
     "low_team_history": {"LOW_TEAM_HISTORY", "UNKNOWN_EVENT", "CALIBRATION_LOW_SAMPLE"},
     "format_variance": {"BO1_HIGH_VARIANCE"},
     "schedule_fatigue": {"FATIGUE_BACK_TO_BACK", "MULTI_MATCH_DAY", "HIGH_SCHEDULE_DENSITY"},
@@ -145,8 +152,12 @@ def market_prob_team1(entry: dict[str, Any]) -> float | None:
     prediction = entry.get("prediction") or {}
     if prediction.get("odds_prob_team1") is not None:
         return safe_prob(prediction.get("odds_prob_team1"))
-    market = ((entry.get("controls") or {}).get("market") or {})
-    for source in (market.get("latest") or {}, (entry.get("odds") or {}).get("average") or {}, market.get("opening") or {}):
+    market = (entry.get("controls") or {}).get("market") or {}
+    for source in (
+        market.get("latest") or {},
+        (entry.get("odds") or {}).get("average") or {},
+        market.get("opening") or {},
+    ):
         value = source.get("team1_implied_prob_norm")
         prob = safe_prob(value)
         if prob is not None:
@@ -181,7 +192,7 @@ def probabilities(entry: dict[str, Any], policy: dict[str, Any] | None = None) -
         return {"model": None, "market": None, "risk_adjusted": None, "decision": None}
     market_p = market_prob_team1(entry)
     rel = entry_reliability(entry)
-    market = ((entry.get("controls") or {}).get("market") or {})
+    market = (entry.get("controls") or {}).get("market") or {}
     decision = decision_probability_team1(model_p, market_p, rel, market=market, policy=policy)
     return {
         "model": model_p,
@@ -226,7 +237,9 @@ def load_prediction_rows() -> list[dict[str, Any]]:
                 "model_side": "team1" if p >= 0.5 else "team2",
                 "actual_side": "team1" if y else "team2",
                 "model_confidence": max(p, 1 - p),
-                "decision_confidence": max(float(probs["decision"]), 1 - float(probs["decision"])) if probs["decision"] is not None else None,
+                "decision_confidence": max(float(probs["decision"]), 1 - float(probs["decision"]))
+                if probs["decision"] is not None
+                else None,
                 "reliability": entry_reliability(entry),
                 "flags": flags,
                 "odds_available": probs["market"] is not None,
@@ -266,7 +279,9 @@ def log_loss(y: int, p: float) -> float:
     return -(y * math.log(p) + (1 - y) * math.log(1 - p))
 
 
-def metric_block(rows: list[dict[str, Any]], prob_key: str = "model_prob_team1", correct_key: str | None = None) -> dict[str, Any]:
+def metric_block(
+    rows: list[dict[str, Any]], prob_key: str = "model_prob_team1", correct_key: str | None = None
+) -> dict[str, Any]:
     vals = [row for row in rows if row.get(prob_key) is not None]
     if not vals:
         return {"n": 0}
@@ -332,13 +347,15 @@ def flag_stats(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for flag, n in totals.most_common():
         fail_n = failures[flag]
-        out.append({
-            "flag": flag,
-            "n": n,
-            "failures": fail_n,
-            "failure_rate_when_present": fail_n / n if n else None,
-            "share_of_failures": fail_n / max(1, sum(1 for row in rows if not row["model_correct"])),
-        })
+        out.append(
+            {
+                "flag": flag,
+                "n": n,
+                "failures": fail_n,
+                "failure_rate_when_present": fail_n / n if n else None,
+                "share_of_failures": fail_n / max(1, sum(1 for row in rows if not row["model_correct"])),
+            }
+        )
     return out
 
 
@@ -347,21 +364,23 @@ def category_stats(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for category, flags in CATEGORY_FLAGS.items():
         if category == "low_operational_reliability":
             subset = [
-                row for row in rows
-                if float(row.get("reliability") or 1.0) < 0.35
-                and float(row.get("model_confidence") or 0.5) >= 0.65
+                row
+                for row in rows
+                if float(row.get("reliability") or 1.0) < 0.35 and float(row.get("model_confidence") or 0.5) >= 0.65
             ]
         else:
             subset = [row for row in rows if flags.intersection(row["flags"])]
         fail_subset = [row for row in subset if not row["model_correct"]]
-        out.append({
-            "category": category,
-            "flags": sorted(flags),
-            "n_present": len(subset),
-            "failures_present": len(fail_subset),
-            "failure_rate_when_present": len(fail_subset) / len(subset) if subset else None,
-            "share_of_all_failures": len(fail_subset) / max(1, sum(1 for row in rows if not row["model_correct"])),
-        })
+        out.append(
+            {
+                "category": category,
+                "flags": sorted(flags),
+                "n_present": len(subset),
+                "failures_present": len(fail_subset),
+                "failure_rate_when_present": len(fail_subset) / len(subset) if subset else None,
+                "share_of_all_failures": len(fail_subset) / max(1, sum(1 for row in rows if not row["model_correct"])),
+            }
+        )
     out.sort(key=lambda row: (row["failures_present"], row["n_present"]), reverse=True)
     return out
 
@@ -375,7 +394,8 @@ def market_eval(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "market": metric_block(odds_rows, "market_prob_team1", "market_correct"),
         "decision": metric_block(odds_rows, "decision_prob_team1", "decision_correct"),
         "disagreements": [
-            summarize_case(row) for row in odds_rows
+            summarize_case(row)
+            for row in odds_rows
             if row.get("market_side") and row["market_side"] != row["model_side"]
         ],
     }
@@ -393,11 +413,17 @@ def summarize_case(row: dict[str, Any]) -> dict[str, Any]:
         "model_side": row["model_side"],
         "model_prob_team1": round(float(row["model_prob_team1"]), 4),
         "decision_side": row.get("decision_side"),
-        "decision_prob_team1": round(float(row["decision_prob_team1"]), 4) if row.get("decision_prob_team1") is not None else None,
+        "decision_prob_team1": round(float(row["decision_prob_team1"]), 4)
+        if row.get("decision_prob_team1") is not None
+        else None,
         "market_side": row.get("market_side"),
-        "market_prob_team1": round(float(row["market_prob_team1"]), 4) if row.get("market_prob_team1") is not None else None,
+        "market_prob_team1": round(float(row["market_prob_team1"]), 4)
+        if row.get("market_prob_team1") is not None
+        else None,
         "confidence": round(float(row["model_confidence"]), 4),
-        "decision_confidence": round(float(row["decision_confidence"]), 4) if row.get("decision_confidence") is not None else None,
+        "decision_confidence": round(float(row["decision_confidence"]), 4)
+        if row.get("decision_confidence") is not None
+        else None,
         "reliability": round(float(row["reliability"]), 4),
         "flags": row["flags"],
     }
@@ -474,9 +500,9 @@ def build_report(rows: list[dict[str, Any]], latest: list[dict[str, Any]], analy
         rate = row["failure_rate_when_present"]
         share = row["share_of_all_failures"]
         lines.append(
-            f"| {row['category']} | {row['n_present']} | {row['failures_present']} | "
-            f"{rate:.3f} | {share:.3f} |\n" if rate is not None else
-            f"| {row['category']} | {row['n_present']} | {row['failures_present']} | - | {share:.3f} |\n"
+            f"| {row['category']} | {row['n_present']} | {row['failures_present']} | {rate:.3f} | {share:.3f} |\n"
+            if rate is not None
+            else f"| {row['category']} | {row['n_present']} | {row['failures_present']} | - | {share:.3f} |\n"
         )
 
     lines.append("\n## High-confidence misses\n\n")
@@ -508,9 +534,15 @@ def build_report(rows: list[dict[str, Any]], latest: list[dict[str, Any]], analy
     )
 
     lines.append("\n## Next TESTS\n\n")
-    lines.append("- Recompute this report after every scrape/result update; require at least 100-200 closed odds matches before promoting Model B stats+odds as a production model.\n")
-    lines.append("- Once analytics/veto coverage has enough closed outcomes, backtest a map-compositional Bo3 model: estimate map win probabilities, simulate likely veto/picks, then aggregate series probability.\n")
-    lines.append("- Track error by roster-change recency and player L5/L10 coverage; if the failure rate remains elevated, make roster/player coverage a formal model feature or stronger stake penalty.\n")
+    lines.append(
+        "- Recompute this report after every scrape/result update; require at least 100-200 closed odds matches before promoting Model B stats+odds as a production model.\n"
+    )
+    lines.append(
+        "- Once analytics/veto coverage has enough closed outcomes, backtest a map-compositional Bo3 model: estimate map win probabilities, simulate likely veto/picks, then aggregate series probability.\n"
+    )
+    lines.append(
+        "- Track error by roster-change recency and player L5/L10 coverage; if the failure rate remains elevated, make roster/player coverage a formal model feature or stronger stake penalty.\n"
+    )
     return "".join(lines)
 
 
@@ -520,7 +552,8 @@ def run() -> dict[str, Any]:
     latest = latest_by_match(rows)
     failures = [row for row in latest if not row["model_correct"]]
     high_confidence_misses = [
-        summarize_case(row) for row in sorted(failures, key=lambda r: r["model_confidence"], reverse=True)
+        summarize_case(row)
+        for row in sorted(failures, key=lambda r: r["model_confidence"], reverse=True)
         if row["model_confidence"] >= 0.65
     ]
     analysis = {
@@ -553,7 +586,9 @@ def run() -> dict[str, Any]:
         "market_latest": market_eval(latest),
         "market_all_snapshots": market_eval(rows),
         "high_confidence_misses": high_confidence_misses,
-        "latest_failures": [summarize_case(row) for row in sorted(failures, key=lambda r: r["model_confidence"], reverse=True)],
+        "latest_failures": [
+            summarize_case(row) for row in sorted(failures, key=lambda r: r["model_confidence"], reverse=True)
+        ],
     }
     return analysis
 
@@ -568,14 +603,19 @@ def main() -> int:
     write_json(out / "failure_analysis.json", analysis)
     report = build_report([], [], analysis)
     (out / "FAILURE_ANALYSIS.md").write_text(report, encoding="utf-8")
-    print(json.dumps({
-        "output_json": str(out / "failure_analysis.json"),
-        "output_md": str(out / "FAILURE_ANALYSIS.md"),
-        "latest_closed_matches": analysis["counts"]["latest_closed_matches"],
-        "latest_failures": analysis["counts"]["latest_failures"],
-        "latest_model_accuracy": analysis["latest"]["model"].get("accuracy"),
-        "latest_decision_accuracy": analysis["latest"]["decision"].get("accuracy"),
-    }, indent=2))
+    print(
+        json.dumps(
+            {
+                "output_json": str(out / "failure_analysis.json"),
+                "output_md": str(out / "FAILURE_ANALYSIS.md"),
+                "latest_closed_matches": analysis["counts"]["latest_closed_matches"],
+                "latest_failures": analysis["counts"]["latest_failures"],
+                "latest_model_accuracy": analysis["latest"]["model"].get("accuracy"),
+                "latest_decision_accuracy": analysis["latest"]["decision"].get("accuracy"),
+            },
+            indent=2,
+        )
+    )
     return 0
 
 

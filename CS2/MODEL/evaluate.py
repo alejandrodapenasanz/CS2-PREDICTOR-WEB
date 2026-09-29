@@ -34,8 +34,9 @@ import yaml
 from cs2model.evaluation import EvalConfig, Family, nested_walk_forward
 
 ROOT = Path(__file__).resolve().parents[1]
-OUTPUT_DIR = ROOT / "MODEL" / "results"
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+OUTPUT_DIR = STATE_ROOT / "MODEL" / "results"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
 DEFAULT_CONFIG = ROOT / "MODEL" / "config.yaml"
 REGISTRY = OUTPUT_DIR / "experiments.jsonl"
 
@@ -47,7 +48,7 @@ def load_eval_config(config_path: Path, overrides: dict[str, Any]) -> tuple[Eval
     raw = {}
     if config_path.exists():
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-    ev = (raw.get("evaluation") or {})
+    ev = raw.get("evaluation") or {}
     seed = int(raw.get("random_seed", 42))
     thresholds = raw.get("feature_thresholds") or {}
     cfg = EvalConfig(
@@ -124,6 +125,7 @@ def _families_from_config(F: Any, thresholds: dict[str, int]) -> list[Family]:
         ("event_metadata", F.EVENT_METADATA_FEATURE_COLUMNS, "event_metadata_available", 300),
         ("player_snapshots", F.PLAYER_FEATURE_COLUMNS, "player_snapshot_available", 200),
         ("rankings", F.RANKING_FEATURE_COLUMNS, "ranking_available", 200),
+        ("match_rankings", F.MATCH_RANKING_COLUMNS, "match_ranking_available", 200),
         ("roster", F.ROSTER_FEATURE_COLUMNS, "roster_available", 200),
         ("mov_rating", F.MOV_FEATURE_COLUMNS, "mov_available", 800),
         ("team_trueskill", F.TRUESKILL_FEATURE_COLUMNS, "trueskill_available", 800),
@@ -154,7 +156,9 @@ def _families_from_config(F: Any, thresholds: dict[str, int]) -> list[Family]:
 # ===========================================================================
 # Datos sinteticos (smoke reproducible, sin cs2.db)
 # ===========================================================================
-def build_synthetic_rows(seed: int, periods: int = 80, per_week: int = 10) -> tuple[list[dict[str, Any]], list[str], list[Family]]:
+def build_synthetic_rows(
+    seed: int, periods: int = 80, per_week: int = 10
+) -> tuple[list[dict[str, Any]], list[str], list[Family]]:
     rng = random.Random(seed)
     T = 18
     strength = {t: rng.gauss(0, 1) for t in range(T)}
@@ -168,15 +172,20 @@ def build_synthetic_rows(seed: int, periods: int = 80, per_week: int = 10) -> tu
             mkt = min(max(prob + rng.gauss(0, 0.05), 0.02), 0.98)
             close = min(max(prob + rng.gauss(0, 0.03), 0.02), 0.98)
             avail = 1.0 if p >= periods // 2 else 0.0
-            rows.append({
-                "label": label, "period": p,
-                "elo_prob_centered": prob - 0.5 + rng.gauss(0, 0.02),
-                "noise1": rng.gauss(0, 1),
-                "extra_feat": (diff * 0.5 + rng.gauss(0, 0.3)) if avail else float("nan"),
-                "extra_available": avail,
-                "opening_prob_t1": mkt, "opening_odds_t1": 1 / mkt, "opening_odds_t2": 1 / (1 - mkt),
-                "closing_prob_t1": close,
-            })
+            rows.append(
+                {
+                    "label": label,
+                    "period": p,
+                    "elo_prob_centered": prob - 0.5 + rng.gauss(0, 0.02),
+                    "noise1": rng.gauss(0, 1),
+                    "extra_feat": (diff * 0.5 + rng.gauss(0, 0.3)) if avail else float("nan"),
+                    "extra_available": avail,
+                    "opening_prob_t1": mkt,
+                    "opening_odds_t1": 1 / mkt,
+                    "opening_odds_t2": 1 / (1 - mkt),
+                    "closing_prob_t1": close,
+                }
+            )
     families = [Family("extra", ("extra_feat",), "extra_available", threshold=200)]
     return rows, ["elo_prob_centered", "noise1"], families
 
@@ -200,14 +209,12 @@ def _dataset_hash(rows: list[dict[str, Any]]) -> str:
     return h.hexdigest()
 
 
-def run_manifest(rows: list[dict[str, Any]], cfg: EvalConfig, args: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+def run_manifest(
+    rows: list[dict[str, Any]], cfg: EvalConfig, args: dict[str, Any], results: dict[str, Any]
+) -> dict[str, Any]:
     summary = {}
     for window, res in results.items():
-        primary_name = (
-            "model"
-            if "model" in res.get("models", {})
-            else res.get("best_combo")
-        )
+        primary_name = "model" if "model" in res.get("models", {}) else res.get("best_combo")
         mm = res.get("models", {}).get(primary_name, {})
         summary[window] = {
             "primary_model": primary_name,
@@ -225,9 +232,12 @@ def run_manifest(rows: list[dict[str, Any]], cfg: EvalConfig, args: dict[str, An
         "dataset_rows": len(rows),
         "seed": cfg.seed,
         "config": {
-            "warmup_periods": cfg.warmup_periods, "gap_periods": cfg.gap_periods,
-            "outer_step": cfg.outer_step, "inner_step": cfg.inner_step,
-            "l2_grid": list(cfg.l2_grid), "calibration_methods": list(cfg.calibration_methods),
+            "warmup_periods": cfg.warmup_periods,
+            "gap_periods": cfg.gap_periods,
+            "outer_step": cfg.outer_step,
+            "inner_step": cfg.inner_step,
+            "l2_grid": list(cfg.l2_grid),
+            "calibration_methods": list(cfg.calibration_methods),
             "recency_half_life": cfg.recency_half_life,
         },
         "arguments": args,
@@ -243,6 +253,7 @@ def run_manifest(rows: list[dict[str, Any]], cfg: EvalConfig, args: dict[str, An
 def write_reliability_plot(calibration: dict[str, list[dict[str, float]]], path: Path) -> bool:
     try:
         import matplotlib
+
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
     except ImportError:
@@ -276,7 +287,9 @@ def _fmt(v: Any, nd: int = 4) -> str:
 def write_report(results: dict[str, Any], manifest: dict[str, Any], path: Path) -> None:
     lines: list[str] = ["# EVAL_REPORT — walk-forward anidado (medicion honesta)\n"]
     lines.append(f"Generado: {manifest['ts_utc']} · commit: {manifest.get('git_commit')}\n")
-    lines.append(f"Dataset: {manifest['dataset_rows']} filas · sha256 {manifest['dataset_sha256'][:12]} · seed {manifest['seed']}\n")
+    lines.append(
+        f"Dataset: {manifest['dataset_rows']} filas · sha256 {manifest['dataset_sha256'][:12]} · seed {manifest['seed']}\n"
+    )
     lines.append("\n> log loss es la metrica PRIMARIA. accuracy es secundaria (el favorito ya acierta ~63-65%).\n")
     for window, res in results.items():
         lines.append(f"\n## Ventana: {window}  (n_eval={res['n_eval']}, folds={res['n_folds']})\n\n")
@@ -286,19 +299,29 @@ def write_report(results: dict[str, Any], manifest: dict[str, Any], path: Path) 
         labels = {"model": "**Modelo (nested)**", "elo": "Baseline Elo", "market": "Baseline mercado (Model B)"}
         for name in order:
             m = res["models"].get(name, {})
-            lines.append(f"| {labels[name]} | {_fmt(m.get('log_loss'))} | {_fmt(m.get('brier'))} | "
-                         f"{_fmt(m.get('ece_10'))} | {_fmt(m.get('roc_auc'))} | {_fmt(m.get('accuracy'))} |\n")
+            lines.append(
+                f"| {labels[name]} | {_fmt(m.get('log_loss'))} | {_fmt(m.get('brier'))} | "
+                f"{_fmt(m.get('ece_10'))} | {_fmt(m.get('roc_auc'))} | {_fmt(m.get('accuracy'))} |\n"
+            )
         b = res["betting"]
-        lines.append(f"\n**Apuestas vs mercado** (subconjunto con odds={b['subset_with_odds']}): "
-                     f"apuestas={b['bets']}, hit={_fmt(b['hit_rate'],3)}, ROI={_fmt(b['roi_on_stake'],4)}, "
-                     f"CLV medio={_fmt(b['clv_mean'],4)} (n={b['clv_n']}).\n")
-        lines.append(f"\n**Accuracy del favorito recomputada (el '65%' honesto): {_fmt(res['recomputed_favorite_accuracy'],4)}**\n")
+        lines.append(
+            f"\n**Apuestas vs mercado** (subconjunto con odds={b['subset_with_odds']}): "
+            f"apuestas={b['bets']}, hit={_fmt(b['hit_rate'], 3)}, ROI={_fmt(b['roi_on_stake'], 4)}, "
+            f"CLV medio={_fmt(b['clv_mean'], 4)} (n={b['clv_n']}).\n"
+        )
+        lines.append(
+            f"\n**Accuracy del favorito recomputada (el '65%' honesto): {_fmt(res['recomputed_favorite_accuracy'], 4)}**\n"
+        )
         cal = set(d["calibration"] for d in res["decisions"])
         fams = sorted(set(f for d in res["decisions"] for f in d["families"]))
-        lines.append(f"\nDecisiones del bucle interno — calibradores usados: {sorted(cal)}; "
-                     f"familias activadas: {fams or 'ninguna'}.\n")
-    lines.append("\n---\n*Bucle externo insesgado; todas las decisiones en el bucle interno con datos "
-                 "estrictamente pasados y gap temporal. Modelo de produccion se reentrena aparte.*\n")
+        lines.append(
+            f"\nDecisiones del bucle interno — calibradores usados: {sorted(cal)}; "
+            f"familias activadas: {fams or 'ninguna'}.\n"
+        )
+    lines.append(
+        "\n---\n*Bucle externo insesgado; todas las decisiones en el bucle interno con datos "
+        "estrictamente pasados y gap temporal. Modelo de produccion se reentrena aparte.*\n"
+    )
     path.write_text("".join(lines), encoding="utf-8")
 
 
@@ -335,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     results: dict[str, Any] = {}
     for window in windows:
         import dataclasses
+
         wcfg = dataclasses.replace(cfg, window=window)
         print(f"[evaluate] nested walk-forward ({window})...", flush=True)
         results[window] = nested_walk_forward(rows, base_cols, families, wcfg)
@@ -360,9 +384,13 @@ def main(argv: list[str] | None = None) -> int:
 
     for window, res in results.items():
         mm = res["models"]["model"]
-        print(f"[evaluate] {window}: n_eval={res['n_eval']} log_loss={_fmt(mm.get('log_loss'))} "
-              f"auc={_fmt(mm.get('roc_auc'))} fav_acc={_fmt(res['recomputed_favorite_accuracy'])}")
-    print(f"[evaluate] artefactos en {args.output_dir} (reliability png: {'si' if plotted else 'omitido, sin matplotlib'})")
+        print(
+            f"[evaluate] {window}: n_eval={res['n_eval']} log_loss={_fmt(mm.get('log_loss'))} "
+            f"auc={_fmt(mm.get('roc_auc'))} fav_acc={_fmt(res['recomputed_favorite_accuracy'])}"
+        )
+    print(
+        f"[evaluate] artefactos en {args.output_dir} (reliability png: {'si' if plotted else 'omitido, sin matplotlib'})"
+    )
     return 0
 
 

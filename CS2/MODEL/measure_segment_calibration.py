@@ -15,10 +15,11 @@ from cs2model.segment_calibration import segment_calibration_suite
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CSV = ROOT / "MODEL" / "results" / "predictions_walkforward.csv"
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_JSON = ROOT / "MODEL" / "results" / "segment_calibration_backtest.json"
-DEFAULT_MARKDOWN = ROOT / "MODEL" / "results" / "SEGMENT_CALIBRATION_BACKTEST.md"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+DEFAULT_CSV = STATE_ROOT / "MODEL" / "results" / "predictions_walkforward.csv"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_JSON = STATE_ROOT / "MODEL" / "results" / "segment_calibration_backtest.json"
+DEFAULT_MARKDOWN = STATE_ROOT / "MODEL" / "results" / "SEGMENT_CALIBRATION_BACKTEST.md"
 
 
 def _match_context(db_path: Path) -> dict[str, dict[str, Any]]:

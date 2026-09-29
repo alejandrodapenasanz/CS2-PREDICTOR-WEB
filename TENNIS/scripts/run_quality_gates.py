@@ -31,9 +31,11 @@ def main() -> int:
     if sys.version_info[:2] != (3, 13):
         raise RuntimeError(f"TENNIS requiere Python 3.13; activo: {sys.version.split()[0]}")
     python = sys.executable
+    test_cache_root = PROJECT_ROOT.parent / "VAULT" / "TENNIS" / ".cache" / "gates"
+    test_cache_root.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(
         prefix=".tennis-quality-",
-        dir=PROJECT_ROOT,
+        dir=test_cache_root,
         ignore_cleanup_errors=True,
     ) as temporary:
         mypy_cache = str(Path(temporary) / "cache")
@@ -54,6 +56,8 @@ def main() -> int:
                     "tests",
                     "-q",
                     f"--basetemp={pytest_temp}",
+                    "-o",
+                    f"cache_dir={Path(temporary) / 'pytest-cache'}",
                 ],
             ),
             ("cobertura de imports", [python, "scripts/check_import_coverage.py"]),

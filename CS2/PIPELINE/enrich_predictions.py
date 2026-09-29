@@ -9,6 +9,7 @@ import re
 import sqlite3
 import statistics
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -19,6 +20,7 @@ from parsel import Selector
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 
 # ---------------------------------------------------------------------------
 # Motor de modelo entrenado (MODEL/cs2model). Carga perezosa y tolerante a
@@ -52,8 +54,12 @@ try:
     )
     from cs2model.artifacts import load_artifact as cs2_load_artifact
     from cs2model.pistols import PISTOL_COLUMNS, PISTOL_DIFF_COLUMNS, load_pistol_store
+    from cs2model.match_rankings import MATCH_RANKING_DIFF_COLUMNS, MATCH_RANKING_SYM_COLUMNS
     from cs2model.pistol_opponents import (
-        OPPONENT_COLUMNS, OPPONENT_DIFF_COLUMNS, PistolOpponentHistory, state_before_day,
+        OPPONENT_COLUMNS,
+        OPPONENT_DIFF_COLUMNS,
+        PistolOpponentHistory,
+        state_before_day,
     )
     from cs2model.odds import (
         ODDS_FEATURE_COLUMNS as CS2_ODDS_FEATURE_COLUMNS,
@@ -88,6 +94,7 @@ except Exception:  # pragma: no cover - entorno sin librería
     CS2_PLAYER_SYM_COLUMNS = []
     CS2_RANKING_DIFF_COLUMNS = []
     CS2_RANKING_SYM_COLUMNS = []
+    MATCH_RANKING_DIFF_COLUMNS = MATCH_RANKING_SYM_COLUMNS = []
     CS2_ROSTER_DIFF_COLUMNS = []
     CS2_ROSTER_SYM_COLUMNS = []
     CS2_ODDS_FEATURE_COLUMNS = ()
@@ -98,24 +105,36 @@ except Exception:  # pragma: no cover - entorno sin librería
         return {}
 
 
-DAILY_ROOT = ROOT / "PIPELINE"
+DAILY_ROOT = STATE_ROOT / "PIPELINE"
 RUNS_DIR = DAILY_ROOT / "runs"
 MASTER_MANIFEST = DAILY_ROOT / "master" / "manifest.json"
 MASTER_MATCHES = DAILY_ROOT / "master" / "matches.json"
 MASTER_ROSTERS = DAILY_ROOT / "master" / "roster_history.json"
 MASTER_CALIBRATION = DAILY_ROOT / "master" / "calibration.json"
-LIVE_DB = ROOT / "BBDD" / "cs2.db"
+LIVE_DB = STATE_ROOT / "BBDD" / "cs2.db"
 ROSTER_CHANGE_WINDOW_DAYS = 90
 COMPLETE_LINEUP_SIZE = 5
 
 try:
+    from PIPELINE.agenda_contract import (
+        coverage_report,
+        load_identity_evidence,
+        recover_snapshot_identity,
+        unavailable_entry,
+    )
     from PIPELINE.match_context import parse_match_context_meta
     from PIPELINE.opportunity import annotate_opportunities, roster_confirmation
 except Exception:  # pragma: no cover - direct script execution
+    from agenda_contract import (
+        coverage_report,
+        load_identity_evidence,
+        recover_snapshot_identity,
+        unavailable_entry,
+    )
     from match_context import parse_match_context_meta
     from opportunity import annotate_opportunities, roster_confirmation
 DEFAULT_HISTORY = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -163,7 +182,16 @@ def read_json(path: Path, default: Any) -> Any:
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    content = json.dumps(data, ensure_ascii=False, indent=2)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def sha256_file(path: Path) -> str | None:
@@ -262,6 +290,11 @@ def is_snapshot_publishable(
     detail = snapshot.get("detail") or {}
     if isinstance(detail, dict) and detail_has_completed_score(detail):
         return False, "completed_detail"
+    match_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
+    if match_dt and match_dt < run_started_local - timedelta(minutes=grace_minutes):
+        return False, "already_started"
+    if (snapshot.get("data_quality") or {}).get("identity_conflict"):
+        return False, "participants_unconfirmed"
     match = detail.get("match") if isinstance(detail, dict) else {}
     match = match if isinstance(match, dict) else {}
     upcoming = snapshot.get("upcoming_row") or {}
@@ -269,9 +302,6 @@ def is_snapshot_publishable(
     team2 = match.get("team2") or upcoming.get("team2")
     if not resolved_team(team1) or not resolved_team(team2):
         return False, "participants_unconfirmed"
-    match_dt = parse_match_datetime(snapshot.get("date"), snapshot.get("hour"))
-    if match_dt and match_dt < run_started_local - timedelta(minutes=grace_minutes):
-        return False, "already_started"
     return True, ""
 
 
@@ -846,8 +876,13 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
                 raise ValueError("Opponent-pistol model requires canonical history")
             with sqlite3.connect(LIVE_DB.resolve().as_uri() + "?mode=ro", uri=True) as connection:
                 pistol_history = PistolOpponentHistory(rows, load_pistol_store(connection))
-            return {"artifact": artifact, "state": None, "history_rows": rows,
-                    "states_by_day": {}, "pistol_opponents": pistol_history}
+            return {
+                "artifact": artifact,
+                "state": None,
+                "history_rows": rows,
+                "states_by_day": {},
+                "pistol_opponents": pistol_history,
+            }
         rows = cs2_dataio.load_training_rows(
             history_path,
             MASTER_MATCHES if MASTER_MATCHES.exists() else None,
@@ -865,8 +900,8 @@ def load_model_engine(history_path: Path) -> dict[str, Any] | None:
 
 def model_external_features_for_order(features: dict[str, Any], reverse: bool = False) -> dict[str, float]:
     out: dict[str, float] = {}
-    diff_columns = CS2_PLAYER_DIFF_COLUMNS + CS2_RANKING_DIFF_COLUMNS + CS2_ROSTER_DIFF_COLUMNS
-    sym_columns = CS2_PLAYER_SYM_COLUMNS + CS2_RANKING_SYM_COLUMNS + CS2_ROSTER_SYM_COLUMNS
+    diff_columns = CS2_PLAYER_DIFF_COLUMNS + CS2_RANKING_DIFF_COLUMNS + CS2_ROSTER_DIFF_COLUMNS + MATCH_RANKING_DIFF_COLUMNS
+    sym_columns = CS2_PLAYER_SYM_COLUMNS + CS2_RANKING_SYM_COLUMNS + CS2_ROSTER_SYM_COLUMNS + MATCH_RANKING_SYM_COLUMNS
     for col in diff_columns:
         try:
             value = float(features.get(col) or 0.0)
@@ -3007,7 +3042,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         if engine
         else "logistic_fallback"
     )
-    artifact_path = ROOT / "MODEL" / "artifacts" / "model.pkl"
+    artifact_path = STATE_ROOT / "MODEL" / "artifacts" / "model.pkl"
     model_trace = {
         "model_version": (
             f"{model_metadata.get('production_model', 'model')}@{model_metadata.get('trained_at', 'unknown')}"
@@ -3043,6 +3078,8 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
     run_started_local = parse_iso_as_local(manifest.get("started_at")) or now_local
     publish_reference_local = max(run_started_local, now_local)
     snapshots = [read_json(path, {}) for path in sorted((run_dir / "match_snapshots").glob("*.json"))]
+    identity_evidence, identity_meta = load_identity_evidence(run_dir)
+    snapshots = [recover_snapshot_identity(snapshot, identity_evidence, identity_meta) for snapshot in snapshots]
     for snapshot in snapshots:
         snapshot["run_id"] = run_dir.name
     schedule_index = build_schedule_index(history, master, snapshots)
@@ -3050,12 +3087,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
     market_blend_policy = build_market_blend_policy(master)
     favorite_upset_records = build_favorite_upset_records()
     enriched = []
+    unavailable: list[dict[str, Any]] = []
+    excluded: dict[str, str] = {}
     skipped_unpublishable: dict[str, int] = defaultdict(int)
 
     for snapshot in snapshots:
         publishable, skip_reason = is_snapshot_publishable(snapshot, publish_reference_local)
         if not publishable:
             skipped_unpublishable[skip_reason] += 1
+            if skip_reason == "participants_unconfirmed":
+                unavailable.append(unavailable_entry(snapshot, skip_reason))
+            else:
+                excluded[str(snapshot["id"])] = skip_reason
             continue
         detail = snapshot.get("detail") or {}
         match = detail.get("match") or {}
@@ -3063,6 +3106,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         team2 = match.get("team2") or (snapshot.get("upcoming_row") or {}).get("team2") or {}
         t1, t2 = clean_team(team1.get("name")), clean_team(team2.get("name"))
         if not t1 or not t2:
+            unavailable.append(unavailable_entry(snapshot, "participants_unconfirmed"))
             continue
 
         elo1 = state["elos"][t1]
@@ -3293,13 +3337,18 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
                 match_dt,
             )
             ranking_features = external.get("ranking_snapshot_features") or {}
+            features.update(external.get("match_ranking_features") or {})
             features.update(external.get("pistol_snapshot_features") or {})
             if engine and engine.get("pistol_opponents") and match_dt is not None:
-                features.update(engine["pistol_opponents"].features(
-                    str(team1.get("id")), str(team2.get("id")),
-                    cs2_dataio.clean_team(team1.get("name")), cs2_dataio.clean_team(team2.get("name")),
-                    match_dt.date(),
-                ))
+                features.update(
+                    engine["pistol_opponents"].features(
+                        str(team1.get("id")),
+                        str(team2.get("id")),
+                        cs2_dataio.clean_team(team1.get("name")),
+                        cs2_dataio.clean_team(team2.get("name")),
+                        match_dt.date(),
+                    )
+                )
             ranking_snapshot_evidence = external.get("ranking_snapshot_evidence") or {}
             roster_features = external.get("roster_snapshot_features") or {}
             features.update(ranking_features)
@@ -3443,6 +3492,9 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
             "team2": team2,
         }
         reliability = reliability_score(reliability_entry, features)
+        detail_degraded = bool(snapshot.get("html_error")) or detail.get("source") == "upcoming_row_fallback"
+        if detail_degraded:
+            reliability = min(reliability, 0.54)
         if freshness_degraded:
             freshness_factor = 0.60 if hltv_freshness.get("status") == "stale" else 0.75
             reliability = max(0.05, min(1.0, reliability * freshness_factor))
@@ -3494,7 +3546,7 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         )
         if genuinely_uncertain_without_odds:
             estimate_fields["estimate_confidence_level"] = "low"
-        if freshness_degraded:
+        if freshness_degraded or detail_degraded:
             estimate_fields["estimate_confidence_level"] = "low"
 
         # Primary fields keep the calibrated stats model (Model A). Decision
@@ -3607,22 +3659,47 @@ def enrich(run_dir: Path, history_path: Path) -> list[dict[str, Any]]:
         prediction["recommended_stake_pct_bankroll"] = staking.get("recommended_pct_bankroll")
         prediction["recommended_stake_team"] = staking.get("team")
         entry["flags"] = flag_match(entry, features, prediction)
+        if detail_degraded:
+            entry["flags"].append(
+                {
+                    "level": "warning",
+                    "code": "MATCH_DETAIL_UNAVAILABLE",
+                    "message": "Detalle HLTV no disponible: participantes confirmados por la cartelera; confianza reducida.",
+                }
+            )
         enriched.append(entry)
     annotate_opportunities(enriched)
     integrity_report = roster_integrity_report(enriched)
     write_json(run_dir / "roster_integrity_report.json", integrity_report)
     if integrity_report["hard_violation_count"]:
         raise RuntimeError(f"Roster integrity check failed; see {run_dir / 'roster_integrity_report.json'}")
+    source_rows = read_json(run_dir / "raw" / "upcoming_matches.json", snapshots)
+    coverage = coverage_report(source_rows, enriched, unavailable, excluded)
+    coverage["generated_at"] = datetime.now(timezone.utc).isoformat()
+    coverage["identity_recovered_count"] = sum(
+        bool((snapshot.get("data_quality") or {}).get("identity_recovered_from_agenda")) for snapshot in snapshots
+    )
+    if not coverage["complete"]:
+        write_json(run_dir / "publication_coverage_failed.json", coverage)
+        raise RuntimeError("Cartelera incompleta: hay partidos sin salida ni motivo de exclusión; publicación detenida.")
     write_json(run_dir / "predictions_enriched.json", enriched)
-    if skipped_unpublishable:
-        write_json(
-            run_dir / "predictions_skipped_unpublishable.json",
-            {
-                "run_started_local": run_started_local.strftime("%Y-%m-%dT%H:%M:%S"),
-                "publish_reference_local": publish_reference_local.strftime("%Y-%m-%dT%H:%M:%S"),
-                "skipped": dict(skipped_unpublishable),
-            },
-        )
+    write_json(run_dir / "agenda_unavailable.json", unavailable)
+    coverage["prediction_sha256"] = sha256_file(run_dir / "predictions_enriched.json")
+    coverage["unavailable_sha256"] = sha256_file(run_dir / "agenda_unavailable.json")
+    write_json(run_dir / "publication_coverage.json", coverage)
+    print(
+        f"[agenda] {len(source_rows)} adquiridos: {len(enriched)} predicciones, "
+        f"{len(unavailable)} visibles sin predicción, {len(excluded)} finalizados/iniciados; "
+        f"identidades recuperadas={coverage['identity_recovered_count']}"
+    )
+    write_json(
+        run_dir / "predictions_skipped_unpublishable.json",
+        {
+            "run_started_local": run_started_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "publish_reference_local": publish_reference_local.strftime("%Y-%m-%dT%H:%M:%S"),
+            "skipped": dict(skipped_unpublishable),
+        },
+    )
     compute_daily_calibration(master, run_dir)
     return enriched
 

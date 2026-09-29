@@ -19,12 +19,14 @@ from pathlib import Path
 from typing import Any
 
 from .identity import is_provisional_team_name
+from .match_rankings import RankingStore, load_match_ranking_store, match_ranking_payload_asof
 from .odds import devig_two_way
 
 ROOT = Path(__file__).resolve().parents[2]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
 
 try:
     from PIPELINE.match_context import parse_match_context_meta
@@ -35,8 +37,24 @@ except Exception:  # pragma: no cover - train can still run from MODEL cwd
 # (bo1 jugado a mapa único) o marcadores de no-jugado.
 SERIES_FORMATS = {"bo1", "bo3", "bo5"}
 SINGLE_MAP_TOKENS = {
-    "anc", "anubis", "anb", "d2", "dust2", "inf", "inferno", "mrg", "mirage",
-    "nuke", "ovp", "overpass", "trn", "train", "vtg", "vertigo", "cbl", "cache",
+    "anc",
+    "anubis",
+    "anb",
+    "d2",
+    "dust2",
+    "inf",
+    "inferno",
+    "mrg",
+    "mirage",
+    "nuke",
+    "ovp",
+    "overpass",
+    "trn",
+    "train",
+    "vtg",
+    "vertigo",
+    "cbl",
+    "cache",
 }
 NON_PLAYED = {"def", "cch", "-", ""}
 
@@ -215,12 +233,7 @@ def load_results(
         if floor and date_str and date_str < floor:
             continue
         name1, name2 = t1.get("name"), t2.get("name")
-        if (
-            not name1
-            or not name2
-            or is_provisional_team_name(name1)
-            or is_provisional_team_name(name2)
-        ):
+        if not name1 or not name2 or is_provisional_team_name(name1) or is_provisional_team_name(name2):
             continue
         rows.append(
             {
@@ -375,15 +388,10 @@ def _latest_snapshot_by_match(conn: sqlite3.Connection, kind: str) -> dict[str, 
 def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict[str, Any]]:
     if market_type not in {"opening", "closing"}:
         raise ValueError("market_type must be opening or closing")
-    odds_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(odds)").fetchall()
-    }
-    match_columns = {
-        row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
-    }
+    odds_columns = {row[1] for row in conn.execute("PRAGMA table_info(odds)").fetchall()}
+    match_columns = {row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()}
     observed_closing_clause = (
-        "AND (? <> 'closing' OR odds.is_observed_closing = 1)"
-        if "is_observed_closing" in odds_columns else ""
+        "AND (? <> 'closing' OR odds.is_observed_closing = 1)" if "is_observed_closing" in odds_columns else ""
     )
     opening_contract_clause = (
         """
@@ -418,8 +426,7 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
               {opening_contract_clause}
             ORDER BY odds.match_id, odds.captured_at_utc, odds.bookmaker
             """,
-            (market_type, market_type)
-            if observed_closing_clause else (market_type,),
+            (market_type, market_type) if observed_closing_clause else (market_type,),
         ).fetchall()
     except sqlite3.Error:
         return {}
@@ -428,15 +435,11 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
         grouped.setdefault(int(row["match_id"]), []).append(row)
     out: dict[int, dict[str, Any]] = {}
     for match_id, items in grouped.items():
-        timestamps = list(
-            dict.fromkeys(str(item["captured_at_utc"]) for item in items)
-        )
+        timestamps = list(dict.fromkeys(str(item["captured_at_utc"]) for item in items))
         if market_type == "closing":
             timestamps = timestamps[-1:]
         for captured_at in timestamps:
-            captured_items = [
-                item for item in items if str(item["captured_at_utc"]) == captured_at
-            ]
+            captured_items = [item for item in items if str(item["captured_at_utc"]) == captured_at]
             probs1: list[float] = []
             probs2: list[float] = []
             odds1: list[float] = []
@@ -466,12 +469,8 @@ def _odds_by_match(conn: sqlite3.Connection, market_type: str) -> dict[int, dict
             if market_type == "opening" and not probs1:
                 continue
             out[match_id] = {
-                "team1_implied_prob_norm": (
-                    sum(probs1) / len(probs1) if probs1 else None
-                ),
-                "team2_implied_prob_norm": (
-                    sum(probs2) / len(probs2) if probs2 else None
-                ),
+                "team1_implied_prob_norm": (sum(probs1) / len(probs1) if probs1 else None),
+                "team2_implied_prob_norm": (sum(probs2) / len(probs2) if probs2 else None),
                 "team1_decimal": sum(odds1) / len(odds1) if odds1 else None,
                 "team2_decimal": sum(odds2) / len(odds2) if odds2 else None,
                 "captured_at": captured_at,
@@ -629,10 +628,7 @@ def _actual_lineups_by_match(
     ``observe()`` after that row's features and label have been emitted.
     """
 
-    wanted = {
-        int(row["match_id"]): (int(row["team1_id"]), int(row["team2_id"]))
-        for row in matches
-    }
+    wanted = {int(row["match_id"]): (int(row["team1_id"]), int(row["team2_id"])) for row in matches}
     if not wanted:
         return {}
     try:
@@ -657,9 +653,7 @@ def _actual_lineups_by_match(
         player_id = str(row["hltv_player_id"] or "").strip()
         if not player_id:
             continue
-        grouped.setdefault(match_id, {}).setdefault(int(row["team_id"]), {})[
-            player_id
-        ] = {
+        grouped.setdefault(match_id, {}).setdefault(int(row["team_id"]), {})[player_id] = {
             "hltv_player_id": player_id,
             "nickname": str(row["nick"] or player_id),
             "is_standin": bool(row["is_standin"]),
@@ -722,10 +716,7 @@ def _team_player_snapshot_summary(
     for row in rows:
         by_player.setdefault(str(row["hltv_player_id"]), []).append(row)
     available_windows = [
-        str(row["time_filter"])
-        for player_rows in by_player.values()
-        for row in player_rows
-        if row["time_filter"]
+        str(row["time_filter"]) for player_rows in by_player.values() for row in player_rows if row["time_filter"]
     ]
     windows = [
         *PLAYER_TIME_FILTER_PRIORITY,
@@ -773,11 +764,7 @@ def _team_player_snapshot_summary(
         "captured_at_max": None,
         "metrics": {},
     }
-    captured_values = sorted(
-        str(row["captured_at_utc"])
-        for row in selected
-        if row["captured_at_utc"]
-    )
+    captured_values = sorted(str(row["captured_at_utc"]) for row in selected if row["captured_at_utc"])
     if captured_values:
         out["captured_at_min"] = captured_values[0]
         out["captured_at_max"] = captured_values[-1]
@@ -841,11 +828,7 @@ def _player_snapshot_features(
         float(t2.get("maps_per_player_min") or 0.0),
     )
     snapshot_available = coverage_min >= 0.8 and maps_per_player_min >= PLAYER_MIN_MAPS_PER_PLAYER
-    captured_values = [
-        str(value)
-        for value in (t1.get("captured_at_max"), t2.get("captured_at_max"))
-        if value
-    ]
+    captured_values = [str(value) for value in (t1.get("captured_at_max"), t2.get("captured_at_max")) if value]
     return {
         "player_snapshot_available": 1.0 if snapshot_available else 0.0,
         # Audit-only evidence used by enhanced-info.  features.py deliberately
@@ -869,9 +852,11 @@ def _player_snapshot_features(
         "player_adr_diff": _metric(t1, "adr", "avg", 75.0) - _metric(t2, "adr", "avg", 75.0),
         "player_impact_diff": _metric(t1, "impact", "avg", 1.0) - _metric(t2, "impact", "avg", 1.0),
         "player_round_swing_diff": _metric(t1, "round_swing", "avg", 0.0) - _metric(t2, "round_swing", "avg", 0.0),
-        "player_round_swing_top2_avg_diff": _metric(t1, "round_swing", "top2_avg", 0.0) - _metric(t2, "round_swing", "top2_avg", 0.0),
+        "player_round_swing_top2_avg_diff": _metric(t1, "round_swing", "top2_avg", 0.0)
+        - _metric(t2, "round_swing", "top2_avg", 0.0),
         "player_opening_kpr_diff": _metric(t1, "opening_kpr", "avg", 0.0) - _metric(t2, "opening_kpr", "avg", 0.0),
-        "player_opening_kpr_top2_avg_diff": _metric(t1, "opening_kpr", "top2_avg", 0.0) - _metric(t2, "opening_kpr", "top2_avg", 0.0),
+        "player_opening_kpr_top2_avg_diff": _metric(t1, "opening_kpr", "top2_avg", 0.0)
+        - _metric(t2, "opening_kpr", "top2_avg", 0.0),
     }
 
 
@@ -880,6 +865,15 @@ def load_external_feature_store(conn_or_path: sqlite3.Connection | str | Path) -
     owns_connection = not isinstance(conn_or_path, sqlite3.Connection)
     conn = sqlite3.connect(conn_or_path) if owns_connection else conn_or_path
     conn.row_factory = sqlite3.Row
+    try:
+        match_rankings = load_match_ranking_store(conn)
+        return _load_external_feature_store(conn, match_rankings)
+    finally:
+        if owns_connection:
+            conn.close()
+
+
+def _load_external_feature_store(conn: sqlite3.Connection, match_rankings: RankingStore) -> dict[str, Any]:
     try:
         ranking_index: dict[tuple[str, str], dict[str, list[Any]]] = {}
         for row in conn.execute(
@@ -911,12 +905,15 @@ def load_external_feature_store(conn_or_path: sqlite3.Connection | str | Path) -
         ):
             roster_index.setdefault(str(row["hltv_team_id"]), []).append(dict(row))
         from .pistols import load_pistol_store
-        return {"rankings": ranking_index, "rosters": roster_index, "pistols": load_pistol_store(conn)}
+
+        return {
+            "rankings": ranking_index,
+            "match_rankings": match_rankings,
+            "rosters": roster_index,
+            "pistols": load_pistol_store(conn),
+        }
     except sqlite3.Error:
-        return {"rankings": {}, "rosters": {}}
-    finally:
-        if owns_connection:
-            conn.close()
+        return {"rankings": {}, "rosters": {}, "match_rankings": match_rankings}
 
 
 def _ranking_asof(
@@ -1005,20 +1002,22 @@ def external_snapshot_features_asof(
     roster = {
         "roster_available": float(roster_available),
         "roster_days_log_diff": (
-            math.log1p(roster1["days"]) - math.log1p(roster2["days"])
-            if roster_available else 0.0
+            math.log1p(roster1["days"]) - math.log1p(roster2["days"]) if roster_available else 0.0
         ),
         "roster_size_diff": roster1["size"] - roster2["size"] if roster_available else 0.0,
         "roster_standin_risk_advantage": (
-            roster2["standin_risk"] - roster1["standin_risk"]
-            if roster_available else 0.0
+            roster2["standin_risk"] - roster1["standin_risk"] if roster_available else 0.0
         ),
         "roster_days_min": min(roster1["days"], roster2["days"]) if roster_available else 0.0,
         "roster_size_min": min(roster1["size"], roster2["size"]) if roster_available else 0.0,
     }
     from .pistols import pistol_features_asof
+
     return {
-        "pistol_snapshot_features": pistol_features_asof(store.get("pistols", {}), team1_hltv_id, team2_hltv_id, match_dt),
+        **match_ranking_payload_asof(store.get("match_rankings", {}), team1_hltv_id, team2_hltv_id, match_dt),
+        "pistol_snapshot_features": pistol_features_asof(
+            store.get("pistols", {}), team1_hltv_id, team2_hltv_id, match_dt
+        ),
         "ranking_snapshot_features": ranking,
         "ranking_snapshot_evidence": {
             "captured_at_max": max(captured_values) if captured_values else None,
@@ -1096,14 +1095,11 @@ def load_training_rows_from_db(
         odds_by_match = _opening_odds_by_match(conn)
         closing_odds_by_match = _closing_odds_by_match(conn)
         assets_by_hltv = _latest_snapshot_by_match(conn, "match_assets")
-        match_columns = {
-            row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()
-        }
+        match_columns = {row[1] for row in conn.execute("PRAGMA table_info(matches)").fetchall()}
         precision_select = (
             "m.datetime_precision"
             if "datetime_precision" in match_columns
-            else "CASE WHEN instr(m.datetime_utc, 'T')=0 THEN 'date_only' ELSE 'exact' END "
-                 "AS datetime_precision"
+            else "CASE WHEN instr(m.datetime_utc, 'T')=0 THEN 'date_only' ELSE 'exact' END AS datetime_precision"
         )
         rows = conn.execute(
             f"""
@@ -1165,10 +1161,7 @@ def load_training_rows_from_db(
         fmt = f"bo{bo}" if bo in (1, 3, 5) else "other"
         if fmt == "other":
             continue
-        if (
-            is_provisional_team_name(row["team1_name"])
-            or is_provisional_team_name(row["team2_name"])
-        ):
+        if is_provisional_team_name(row["team1_name"]) or is_provisional_team_name(row["team2_name"]):
             continue
         context_payload = _json_or_none(row["context_json"]) or {
             "environment": row["environment"],
@@ -1196,9 +1189,8 @@ def load_training_rows_from_db(
                 "date": date_text,
                 "date_obj": parse_date(str(row["datetime_utc"])),
                 "kickoff_utc": str(row["datetime_utc"] or ""),
-                "datetime_precision": row["datetime_precision"] or (
-                    "exact" if "T" in str(row["datetime_utc"] or "") else "date_only"
-                ),
+                "datetime_precision": row["datetime_precision"]
+                or ("exact" if "T" in str(row["datetime_utc"] or "") else "date_only"),
                 "event": row["event_name"] or "",
                 "event_tier": row["event_tier"],
                 "link": f"https://www.hltv.org/matches/{hltv_match_id}/",

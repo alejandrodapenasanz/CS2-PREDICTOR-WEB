@@ -13,8 +13,9 @@ from cs2model.config import DEFAULT_CONFIG_PATH, load_config
 from cs2model.segment_calibration import segment_calibration_suite
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_OUTPUT = ROOT / "MODEL" / "results" / "live_ledger_evaluation.json"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_OUTPUT = STATE_ROOT / "MODEL" / "results" / "live_ledger_evaluation.json"
 
 
 def summarize(rows: list[sqlite3.Row]) -> dict:

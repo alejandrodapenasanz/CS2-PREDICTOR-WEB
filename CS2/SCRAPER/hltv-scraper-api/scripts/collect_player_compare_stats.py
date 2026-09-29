@@ -18,7 +18,9 @@ import requests
 from parsel import Selector
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SESSION_FILE = PROJECT_ROOT / "hltv_scraper" / "cf_session.json"
+DEFAULT_SESSION_FILE = (
+    PROJECT_ROOT.parents[2] / "VAULT" / "CS2" / "SCRAPER" / "hltv-scraper-api" / "hltv_scraper" / "cf_session.json"
+)
 BLOCK_HTTP_CODES = {403, 429, 500, 502, 503, 504, 522, 524}
 CHALLENGE_MARKERS = (
     "Just a moment",

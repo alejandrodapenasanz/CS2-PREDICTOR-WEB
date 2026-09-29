@@ -21,6 +21,7 @@ from ..config import (
     PLAYER_MAPPING_DATABASE_PATH,
     PREDICTIONS_PROCESSED_DIR,
     PROJECT_ROOT,
+    STATE_ROOT,
 )
 from ..daily_pipeline import (
     DailyPredictionRun,
@@ -125,6 +126,8 @@ def _project_relative(path: Path | None) -> str | None:
     if path is None:
         return None
     resolved = Path(path).resolve(strict=False)
+    if resolved.is_relative_to(STATE_ROOT.resolve()):
+        return resolved.relative_to(STATE_ROOT.resolve()).as_posix()
     try:
         return resolved.relative_to(PROJECT_ROOT.resolve()).as_posix()
     except ValueError as exc:

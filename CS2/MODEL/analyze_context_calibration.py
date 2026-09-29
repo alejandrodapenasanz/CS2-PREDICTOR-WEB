@@ -19,6 +19,7 @@ from typing import Any, Callable
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_ROOT = ROOT / "MODEL"
@@ -28,9 +29,9 @@ if str(MODEL_ROOT) not in sys.path:
 from PIPELINE.match_context import parse_match_context_meta
 from cs2model.metrics import metric_dict
 
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_RUNS = ROOT / "PIPELINE" / "runs"
-DEFAULT_OUT = ROOT / "MODEL" / "results"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_RUNS = STATE_ROOT / "PIPELINE" / "runs"
+DEFAULT_OUT = STATE_ROOT / "MODEL" / "results"
 PRODUCTION_MIN_SAMPLES = 200
 PRODUCTION_MIN_GROUP_SAMPLES = 30
 DIAGNOSTIC_MIN_TRAIN = 40
@@ -79,11 +80,11 @@ def latest_predictions(runs_dir: Path) -> dict[str, dict[str, Any]]:
 def context_from_record(record: dict[str, Any]) -> dict[str, Any]:
     # Prefer re-parsing raw meta so parser fixes apply to old assets.
     meta = None
-    source_file = ((record.get("hltv_assets") or {}).get("source_file") or record.get("hltv_assets_file"))
+    source_file = (record.get("hltv_assets") or {}).get("source_file") or record.get("hltv_assets_file")
     if source_file:
         path = ROOT / "PIPELINE" / source_file
         asset = read_json(path, {}) if path.exists() else {}
-        meta = ((asset.get("veto") or {}).get("meta") if isinstance(asset, dict) else None)
+        meta = (asset.get("veto") or {}).get("meta") if isinstance(asset, dict) else None
     if meta:
         return parse_match_context_meta(meta)
     context = record.get("match_context")
@@ -94,7 +95,7 @@ def context_from_record(record: dict[str, Any]) -> dict[str, Any]:
 
 
 def context_from_prediction(entry: dict[str, Any]) -> dict[str, Any]:
-    return ((entry.get("controls") or {}).get("tournament_context") or {})
+    return (entry.get("controls") or {}).get("tournament_context") or {}
 
 
 def build_samples(master: dict[str, Any], predictions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -153,8 +154,8 @@ def active_context_rows(master: dict[str, Any], predictions: dict[str, dict[str,
             continue
         context = context_from_prediction(entry) or context_from_record(record)
         context = context if isinstance(context, dict) else {}
-        team1 = ((entry.get("team1") or {}).get("name") or (record.get("team1") or {}).get("name") or "")
-        team2 = ((entry.get("team2") or {}).get("name") or (record.get("team2") or {}).get("name") or "")
+        team1 = (entry.get("team1") or {}).get("name") or (record.get("team1") or {}).get("name") or ""
+        team2 = (entry.get("team2") or {}).get("name") or (record.get("team2") or {}).get("name") or ""
         prediction = entry.get("prediction") or {}
         rows.append(
             {
@@ -188,7 +189,9 @@ def metrics_for(samples: list[dict[str, Any]], prob_key: str = "p_team1", y_key:
     metrics["avg_pred"] = float(np.mean(p))
     metrics["observed"] = float(np.mean(y))
     metrics["calibration_gap"] = metrics["avg_pred"] - metrics["observed"]
-    metrics["avg_confidence"] = float(np.mean([max(float(row[prob_key]), 1.0 - float(row[prob_key])) for row in samples]))
+    metrics["avg_confidence"] = float(
+        np.mean([max(float(row[prob_key]), 1.0 - float(row[prob_key])) for row in samples])
+    )
     return round_floats(metrics)
 
 
@@ -216,7 +219,9 @@ def round_floats(payload: Any) -> Any:
     return payload
 
 
-def grouped(samples: list[dict[str, Any]], name: str, key_func: Callable[[dict[str, Any]], str]) -> list[dict[str, Any]]:
+def grouped(
+    samples: list[dict[str, Any]], name: str, key_func: Callable[[dict[str, Any]], str]
+) -> list[dict[str, Any]]:
     buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in samples:
         buckets[key_func(row)].append(row)
@@ -247,7 +252,9 @@ def context_feature_row(sample: dict[str, Any]) -> list[float]:
     ]
 
 
-def context_calibrator_walk_forward(samples: list[dict[str, Any]], min_train: int = DIAGNOSTIC_MIN_TRAIN) -> dict[str, Any]:
+def context_calibrator_walk_forward(
+    samples: list[dict[str, Any]], min_train: int = DIAGNOSTIC_MIN_TRAIN
+) -> dict[str, Any]:
     """Calibrador diagnostico de confianza del favorito con contexto.
 
     Entrena solo con partidos anteriores y predice el siguiente bloque. El output
@@ -373,7 +380,9 @@ def markdown_report(report: dict[str, Any]) -> str:
 
     for segment_name, rows in report["segments"].items():
         lines.append(f"\n## {segment_name}\n\n")
-        lines.append("| Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |\n|---|---:|---:|---:|---:|---:|---:|\n")
+        lines.append(
+            "| Grupo | n | acc | log_loss | brier | fav_acc | conf_gap |\n|---|---:|---:|---:|---:|---:|---:|\n"
+        )
         for row in rows:
             model = row["model"]
             fav = row["favorite_confidence"]
@@ -413,8 +422,12 @@ def build_report(master_path: Path, runs_dir: Path) -> dict[str, Any]:
             "stage": grouped(with_context, "stage", lambda row: row["stage"]),
             "high_stakes": grouped(with_context, "high_stakes", lambda row: "yes" if row["high_stakes"] else "no"),
             "incentive_label": grouped(with_context, "incentive_label", lambda row: row["incentive_label"]),
-            "winner_advances": grouped(with_context, "winner_advances", lambda row: "yes" if row["winner_advances"] else "no"),
-            "loser_eliminated": grouped(with_context, "loser_eliminated", lambda row: "yes" if row["loser_eliminated"] else "no"),
+            "winner_advances": grouped(
+                with_context, "winner_advances", lambda row: "yes" if row["winner_advances"] else "no"
+            ),
+            "loser_eliminated": grouped(
+                with_context, "loser_eliminated", lambda row: "yes" if row["loser_eliminated"] else "no"
+            ),
             "format": grouped(with_context, "format", lambda row: str(row.get("format") or "unknown")),
         },
     }

@@ -20,7 +20,7 @@ import numpy as np
 
 from .reproducibility import force_single_threaded_inference
 
-ARTIFACT_DIR = Path(__file__).resolve().parents[1] / "artifacts"
+ARTIFACT_DIR = Path(__file__).resolve().parents[3] / "VAULT" / "CS2" / "MODEL" / "artifacts"
 ARTIFACT_PATH = ARTIFACT_DIR / "model.pkl"
 
 

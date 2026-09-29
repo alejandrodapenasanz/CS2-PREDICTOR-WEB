@@ -22,6 +22,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 sys.path.insert(0, str(ROOT / "MODEL"))
 
 import train
@@ -141,7 +142,7 @@ def paired_intervals(
 def main() -> int:
     """Evaluate fixed, preregistered families; never promote an unscored refit."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=ROOT / "BBDD/cs2.db")
+    parser.add_argument("--db", type=Path, default=STATE_ROOT / "BBDD/cs2.db")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument(
         "--opponent-adjusted",
@@ -155,7 +156,7 @@ def main() -> int:
     )
     parser.add_argument("--promote", action="store_true")
     args = parser.parse_args()
-    output = args.output_dir or ROOT / "MODEL/results" / (
+    output = args.output_dir or STATE_ROOT / "MODEL/results" / (
         "pistol_opponents" if args.opponent_adjusted else "pistol_rounds"
     )
     variants = OPPONENT_VARIANTS if args.opponent_adjusted else VARIANTS
@@ -170,7 +171,9 @@ def main() -> int:
         raise ValueError("Verify regime-specific whole-day calibration before testing a router champion")
     cutoff = str(live.metadata["date_max"])[:10]
     print(f"[pistols] live={reference.version}; cutoff={cutoff}; loading complete history", flush=True)
-    rows = train.dataio.load_training_rows(None, ROOT / "PIPELINE/master/matches.json", cs2_only=True, db_path=args.db)
+    rows = train.dataio.load_training_rows(
+        None, STATE_ROOT / "PIPELINE/master/matches.json", cs2_only=True, db_path=args.db
+    )
     with sqlite3.connect(args.db.resolve().as_uri() + "?mode=ro", uri=True) as conn:
         store = load_pistol_store(conn)
         names = {str(i): str(n) for i, n in conn.execute("SELECT hltv_id,name FROM teams WHERE hltv_id IS NOT NULL")}

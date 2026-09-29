@@ -16,10 +16,10 @@ import sqlite3
 from typing import Any, Iterator
 import zlib
 
-from .config import PROJECT_ROOT
+from .config import STATE_ROOT, PROJECT_ROOT
 from .tennis_abstract_history_audit import PlayerHistory
 
-DEFAULT_STORE = PROJECT_ROOT / "data" / "processed" / "tennis_abstract.sqlite3"
+DEFAULT_STORE = STATE_ROOT / "data" / "processed" / "tennis_abstract.sqlite3"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS ta_rows (

@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_DIR = ROOT / "MODEL"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -25,7 +26,7 @@ from PIPELINE.enrich_predictions import (
 
 
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -34,10 +35,10 @@ DEFAULT_RAW = (
     / "history_10000_2026-06-28"
     / "results_all.json"
 )
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_PREDICTIONS = ROOT / "MODEL" / "results" / "predictions_walkforward.csv"
-DEFAULT_GRAPHS_DIR = Path(__file__).resolve().parent / "graphs"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_PREDICTIONS = STATE_ROOT / "MODEL" / "results" / "predictions_walkforward.csv"
+DEFAULT_GRAPHS_DIR = STATE_ROOT / "TESTS" / "graphs"
 
 
 def safe_float(value: Any, default: float | None = None) -> float | None:

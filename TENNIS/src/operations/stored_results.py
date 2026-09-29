@@ -18,7 +18,7 @@ import pandas as pd
 from ..config import (
     OPERATIONS_DATABASE_PATH,
     PLAYER_MAPPING_DATABASE_PATH,
-    PROJECT_ROOT,
+    resolve_state_reference,
 )
 from ..tennis_explorer import TennisExplorerResultSnapshot
 from .result_sources import (
@@ -26,6 +26,7 @@ from .result_sources import (
     build_tennis_explorer_mapped_result_snapshot,
 )
 from .store import OperationsStore
+from .identifiers import canonical_json, payload_sha256
 from .types import ObservationReconciliation, OperationsSchemaError
 
 
@@ -56,9 +57,8 @@ def _project_path(value: object, field: str) -> Path:
 
     if not isinstance(value, str) or not value.strip():
         raise OperationsSchemaError(f"{field} falta en la metadata del run crudo.")
-    path = (PROJECT_ROOT / value).resolve(strict=False)
     try:
-        path.relative_to(PROJECT_ROOT.resolve())
+        path = resolve_state_reference(value)
     except ValueError as exc:
         raise OperationsSchemaError(f"{field} escapa de TENNIS/.") from exc
     return path
@@ -224,15 +224,27 @@ def reconcile_stored_tennis_explorer_results(
                 raw_snapshot,
                 mapping_database_path=mapping_database_path,
             )
-            run_id = (
-                f"observation-remap:{result_date.isoformat()}:"
-                f"{mapped_snapshot.snapshot_sha256[:12]}"
+            metadata = _mapped_metadata(raw_run_id, mapped_snapshot)
+            # The mapped-result hash omits audit counts, mapping timestamps and
+            # raw run identity. Those can change even when there are zero rows.
+            # Version the full invocation, never overwrite or reuse a divergent run.
+            digest = payload_sha256(
+                {
+                    "target_date": result_date,
+                    "observed_at_utc": mapped_snapshot.retrieved_at_utc,
+                    "metadata": metadata,
+                    "rows": sorted(
+                        canonical_json(row)
+                        for row in mapped_snapshot.matches.to_dict(orient="records")
+                    ),
+                }
             )
+            run_id = f"observation-remap-v2:{result_date.isoformat()}:{digest}"
             reconciliation = store.reconcile_observations(
                 run_id,
                 mapped_snapshot.matches,
                 source_system="tennis_explorer",
-                metadata=_mapped_metadata(raw_run_id, mapped_snapshot),
+                metadata=metadata,
                 observed_at_utc=mapped_snapshot.retrieved_at_utc,
                 target_date=result_date,
             )

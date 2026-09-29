@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "MODEL"
@@ -32,7 +33,7 @@ from cs2model.identity import (
 )
 
 
-DEFAULT_REPORT = ROOT / "BBDD" / "integrity_repair_report.json"
+DEFAULT_REPORT = STATE_ROOT / "BBDD" / "integrity_repair_report.json"
 
 
 def utcnow() -> str:
@@ -50,7 +51,7 @@ def _score_from_record(record: dict[str, Any]) -> tuple[int | None, int | None]:
     score = record.get("score") or {}
     left = build_db.parse_int(score.get("team1"))
     right = build_db.parse_int(score.get("team2"))
-    detail_match = ((record.get("detail") or {}).get("match") or {})
+    detail_match = (record.get("detail") or {}).get("match") or {}
     if left is None:
         left = build_db.parse_int((detail_match.get("team1") or {}).get("score"))
     if right is None:
@@ -135,12 +136,7 @@ def _backfill_match_ids_from_rows(
         if key:
             target_groups[key].append(int(row["match_id"]))
 
-    used = {
-        str(row[0])
-        for row in conn.execute(
-            "SELECT hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL"
-        )
-    }
+    used = {str(row[0]) for row in conn.execute("SELECT hltv_match_id FROM matches WHERE hltv_match_id IS NOT NULL")}
     updated = conflicts = 0
     for key, match_ids in target_groups.items():
         source_ids = sorted(
@@ -171,29 +167,22 @@ def backfill_historical_match_ids(
     """Recover stable HLTV IDs only from exact, cardinality-preserving evidence."""
     raw_rows = dataio.load_results(raw_path, cs2_only=True) if raw_path.exists() else []
     raw_result = _backfill_match_ids_from_rows(conn, raw_rows)
-    master_rows = (
-        dataio.load_daily_completed(master_path) if master_path.exists() else []
-    )
+    master_rows = dataio.load_daily_completed(master_path) if master_path.exists() else []
     master_result = _backfill_match_ids_from_rows(conn, master_rows)
     remaining = int(
         conn.execute(
-            "SELECT COUNT(*) FROM matches "
-            "WHERE data_tier='historical_seed' AND hltv_match_id IS NULL"
+            "SELECT COUNT(*) FROM matches WHERE data_tier='historical_seed' AND hltv_match_id IS NULL"
         ).fetchone()[0]
     )
     return {
         "historical_hltv_ids_from_raw": raw_result["updated"],
         "historical_hltv_ids_from_master": master_result["updated"],
-        "historical_hltv_id_conflicts": (
-            raw_result["conflicts"] + master_result["conflicts"]
-        ),
+        "historical_hltv_id_conflicts": (raw_result["conflicts"] + master_result["conflicts"]),
         "historical_hltv_ids_missing": remaining,
     }
 
 
-def repair_completed_participants(
-    conn: sqlite3.Connection, master: dict[str, dict[str, Any]]
-) -> dict[str, int]:
+def repair_completed_participants(conn: sqlite3.Connection, master: dict[str, dict[str, Any]]) -> dict[str, int]:
     rows = conn.execute(
         """
         SELECT m.match_id, m.hltv_match_id, t1.name AS team1, t2.name AS team2
@@ -206,10 +195,7 @@ def repair_completed_participants(
     repaired = unresolved = 0
     team_cache, team_hltv_cache = build_db._load_team_caches(conn)
     for row in rows:
-        if not (
-            is_provisional_team_name(row["team1"])
-            or is_provisional_team_name(row["team2"])
-        ):
+        if not (is_provisional_team_name(row["team1"]) or is_provisional_team_name(row["team2"])):
             continue
         record = master.get(str(row["hltv_match_id"])) or {}
         team1 = choose_match_team(record, "team1")
@@ -218,17 +204,25 @@ def repair_completed_participants(
             unresolved += 1
             continue
         team1_id = build_db._team_id_for(
-            conn, team_cache, team_hltv_cache,
-            name=team1["name"], hltv_id=team1.get("id"),
+            conn,
+            team_cache,
+            team_hltv_cache,
+            name=team1["name"],
+            hltv_id=team1.get("id"),
         )
         team2_id = build_db._team_id_for(
-            conn, team_cache, team_hltv_cache,
-            name=team2["name"], hltv_id=team2.get("id"),
+            conn,
+            team_cache,
+            team_hltv_cache,
+            name=team2["name"],
+            hltv_id=team2.get("id"),
         )
         score1, score2 = _score_from_record(record)
         winner_id = (
-            team1_id if score1 is not None and score2 is not None and score1 > score2
-            else team2_id if score1 is not None and score2 is not None and score2 > score1
+            team1_id
+            if score1 is not None and score2 is not None and score1 > score2
+            else team2_id
+            if score1 is not None and score2 is not None and score2 > score1
             else None
         )
         conn.execute(
@@ -246,9 +240,7 @@ def repair_completed_participants(
     return {"participants_repaired": repaired, "participants_unresolved": unresolved}
 
 
-def repair_event_metadata(
-    conn: sqlite3.Connection, master: dict[str, dict[str, Any]]
-) -> int:
+def repair_event_metadata(conn: sqlite3.Connection, master: dict[str, dict[str, Any]]) -> int:
     event_states: dict[int, dict[str, tuple[Any, ...]]] = {}
     for hltv_id, record in master.items():
         metadata: dict[str, Any] = {}
@@ -278,9 +270,7 @@ def repair_event_metadata(
             continue
         event_id = int(current[0])
         original = tuple(current[index] for index in range(1, 9))
-        state = event_states.setdefault(
-            event_id, {"original": original, "resolved": original}
-        )
+        state = event_states.setdefault(event_id, {"original": original, "resolved": original})
         incoming = (
             str(metadata.get("hltv_event_id") or "") or None,
             prize,
@@ -394,8 +384,7 @@ def repair_closing_odds(conn: sqlite3.Connection, max_age_hours: float = 6.0) ->
               OR is_observed_closing <> 0
               OR seconds_to_start IS NOT NULL
           )
-        """
-        ,
+        """,
         (float(max_age_hours),),
     ).rowcount
     promoted = conn.execute(
@@ -442,9 +431,7 @@ def repair_impossible_series_formats(conn: sqlite3.Connection) -> int:
 def _team_reference_columns(conn: sqlite3.Connection) -> list[tuple[str, str]]:
     references: list[tuple[str, str]] = []
     tables = [
-        row[0] for row in conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
-        )
+        row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
     ]
     for table in tables:
         for fk in conn.execute(f'PRAGMA foreign_key_list("{table}")'):
@@ -497,8 +484,7 @@ def merge_unambiguous_team_identities(conn: sqlite3.Connection) -> dict[str, int
                             (old_id,),
                         )
                 conn.execute(
-                    "UPDATE OR IGNORE ratings_history SET entity_id=? "
-                    "WHERE entity_type='team' AND entity_id=?",
+                    "UPDATE OR IGNORE ratings_history SET entity_id=? WHERE entity_type='team' AND entity_id=?",
                     (survivor_id, old_id),
                 )
                 conn.execute(
@@ -647,10 +633,7 @@ def unconfirmed_live_match_ids(conn: sqlite3.Connection) -> list[int]:
     return [
         int(row[0])
         for row in rows
-        if row[2] is None
-        or row[4] is None
-        or is_provisional_team_name(row[1])
-        or is_provisional_team_name(row[3])
+        if row[2] is None or row[4] is None or is_provisional_team_name(row[1]) or is_provisional_team_name(row[3])
     ]
 
 
@@ -663,12 +646,7 @@ def provisional_match_ids(conn: sqlite3.Connection) -> list[int]:
         JOIN teams t2 ON t2.team_id=m.team2_id
         """
     ).fetchall()
-    return [
-        int(row[0])
-        for row in rows
-        if is_provisional_team_name(row[1])
-        or is_provisional_team_name(row[2])
-    ]
+    return [int(row[0]) for row in rows if is_provisional_team_name(row[1]) or is_provisional_team_name(row[2])]
 
 
 def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> dict[str, Any]:
@@ -683,32 +661,24 @@ def _purge_match_ids(conn: sqlite3.Connection, match_ids: list[int]) -> dict[str
         ).fetchone():
             protected_match_ids.append(match_id)
             continue
-        map_ids = [
-            int(row[0])
-            for row in conn.execute(
-                "SELECT map_id FROM maps WHERE match_id=?", (match_id,)
-            )
-        ]
+        map_ids = [int(row[0]) for row in conn.execute("SELECT map_id FROM maps WHERE match_id=?", (match_id,))]
         for map_id in map_ids:
             conn.execute("DELETE FROM map_player_side_stats WHERE map_id=?", (map_id,))
             conn.execute("DELETE FROM map_player_stats WHERE map_id=?", (map_id,))
         analytics_ids = [
             int(row[0])
             for row in conn.execute(
-                "SELECT analytics_snapshot_id FROM match_analytics_snapshots "
-                "WHERE match_id=?",
+                "SELECT analytics_snapshot_id FROM match_analytics_snapshots WHERE match_id=?",
                 (match_id,),
             )
         ]
         for snapshot_id in analytics_ids:
             conn.execute(
-                "DELETE FROM match_analytics_map_handicap "
-                "WHERE analytics_snapshot_id=?",
+                "DELETE FROM match_analytics_map_handicap WHERE analytics_snapshot_id=?",
                 (snapshot_id,),
             )
             conn.execute(
-                "DELETE FROM match_analytics_map_stats "
-                "WHERE analytics_snapshot_id=?",
+                "DELETE FROM match_analytics_map_stats WHERE analytics_snapshot_id=?",
                 (snapshot_id,),
             )
         for table, column in (
@@ -770,29 +740,20 @@ def run_repair(
         report["event_metadata_repaired"] = repair_event_metadata(conn, master)
         report.update(repair_time_precision_and_prematch(conn))
         report.update(repair_closing_odds(conn))
-        report["impossible_series_formats_repaired"] = (
-            repair_impossible_series_formats(conn)
-        )
+        report["impossible_series_formats_repaired"] = repair_impossible_series_formats(conn)
         report.update(merge_unambiguous_team_identities(conn))
         report.update(backfill_historical_match_ids(conn, raw_path, master_path))
         report.update(repair_prediction_references(conn))
         provisional_purge = purge_provisional_matches(conn)
         unconfirmed_purge = purge_unconfirmed_live_matches(conn)
         report["provisional_matches_purged"] = provisional_purge["purged"]
-        report["provisional_matches_protected_skipped"] = provisional_purge[
-            "protected_skipped"
-        ]
+        report["provisional_matches_protected_skipped"] = provisional_purge["protected_skipped"]
         report["unconfirmed_live_matches_purged"] = unconfirmed_purge["purged"]
-        report["unconfirmed_live_matches_protected_skipped"] = unconfirmed_purge[
-            "protected_skipped"
-        ]
+        report["unconfirmed_live_matches_protected_skipped"] = unconfirmed_purge["protected_skipped"]
         protected_match_ids = sorted(
-            set(provisional_purge["protected_match_ids"])
-            | set(unconfirmed_purge["protected_match_ids"])
+            set(provisional_purge["protected_match_ids"]) | set(unconfirmed_purge["protected_match_ids"])
         )
-        report["prediction_ledger_protected_matches_skipped"] = len(
-            protected_match_ids
-        )
+        report["prediction_ledger_protected_matches_skipped"] = len(protected_match_ids)
         report["prediction_ledger_protected_match_ids"] = protected_match_ids
         report["provisional_teams_deleted"] = delete_unreferenced_provisional_teams(conn)
         foreign_key_errors = conn.execute("PRAGMA foreign_key_check").fetchall()
@@ -803,9 +764,7 @@ def run_repair(
         duplicate_pairs = deduplicate_matches.duplicate_pairs(conn)
         report["physical_duplicate_pairs_found"] = len(duplicate_pairs)
         if duplicate_pairs:
-            for key, value in deduplicate_matches.consolidate(
-                conn, duplicate_pairs
-            ).items():
+            for key, value in deduplicate_matches.consolidate(conn, duplicate_pairs).items():
                 report[f"deduplicate_{key}"] = value
 
         if rebuild_mart:
@@ -824,35 +783,23 @@ def run_repair(
             """
         ).fetchall()
         report["completed_provisional_remaining"] = sum(
-            1 for row in completed_names
-            if is_provisional_team_name(row[0]) or is_provisional_team_name(row[1])
+            1 for row in completed_names if is_provisional_team_name(row[0]) or is_provisional_team_name(row[1])
         )
-        report["unconfirmed_live_matches_remaining"] = len(
-            unconfirmed_live_match_ids(conn)
-        )
+        report["unconfirmed_live_matches_remaining"] = len(unconfirmed_live_match_ids(conn))
         report["provisional_matches_remaining"] = len(provisional_match_ids(conn))
         report["provisional_teams_remaining"] = sum(
-            1
-            for row in conn.execute("SELECT name FROM teams")
-            if is_provisional_team_name(row[0])
+            1 for row in conn.execute("SELECT name FROM teams") if is_provisional_team_name(row[0])
         )
         report["orphan_predictions_remaining"] = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM predictions WHERE match_id IS NULL"
-            ).fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM predictions WHERE match_id IS NULL").fetchone()[0]
         )
         report["matches_without_hltv_id_remaining"] = int(
-            conn.execute(
-                "SELECT COUNT(*) FROM matches WHERE hltv_match_id IS NULL"
-            ).fetchone()[0]
+            conn.execute("SELECT COUNT(*) FROM matches WHERE hltv_match_id IS NULL").fetchone()[0]
         )
-        report["physical_duplicate_pairs_remaining"] = len(
-            deduplicate_matches.duplicate_pairs(conn)
-        )
+        report["physical_duplicate_pairs_remaining"] = len(deduplicate_matches.duplicate_pairs(conn))
         report["historical_hltv_ids_missing"] = int(
             conn.execute(
-                "SELECT COUNT(*) FROM matches "
-                "WHERE data_tier='historical_seed' AND hltv_match_id IS NULL"
+                "SELECT COUNT(*) FROM matches WHERE data_tier='historical_seed' AND hltv_match_id IS NULL"
             ).fetchone()[0]
         )
         report["foreign_key_errors"] = len(conn.execute("PRAGMA foreign_key_check").fetchall())
@@ -893,9 +840,7 @@ def main() -> int:
         rebuild_mart=not args.no_rebuild_mart,
         backup=not args.no_backup,
     )
-    Path(args.report).write_text(
-        json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    Path(args.report).write_text(json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(report, indent=2, ensure_ascii=False))
     return 0 if report["status"] == "ok" else 2
 

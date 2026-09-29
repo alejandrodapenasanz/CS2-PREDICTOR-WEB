@@ -36,6 +36,7 @@ def _make_synthetic_db(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     try:
         conn.executescript(SCHEMA_SQL.read_text(encoding="utf-8"))
+        conn.executescript(bb.RESULT_SCHEMA)
         conn.execute("INSERT INTO teams(team_id,name,country,hltv_id) VALUES (1,'Alpha','SE',101),(2,'Beta','DK',102)")
         conn.execute("INSERT INTO players(player_id,nick,hltv_id) VALUES (1,'p1',201),(2,'p2',202)")
         conn.execute("INSERT INTO events(event_id,name,hltv_event_id,is_lan,tier) VALUES (1,'Major 2025','E1',1,'S')")
@@ -87,7 +88,19 @@ def _make_synthetic_db(db_path: Path) -> None:
             "INSERT INTO raw_snapshots(raw_snapshot_id,kind,run_id,source_file,payload_json) "
             "VALUES (1,'match_snapshot','R1','runs/R1/x.json','{\"a\":1}')"
         )
+        conn.execute(
+            "INSERT INTO match_team_ranking_observations(match_id,team_id,hltv_match_id,"
+            "hltv_team_id,ranking_type,position,ranking_date,captured_at_utc,ranking_url,"
+            "match_url,source_file,source_sha256) VALUES (1,1,'1000001','101','hltv',40,"
+            "'2025-05-26','2025-05-31T10:00:00+00:00',"
+            "'https://www.hltv.org/ranking/teams/2025/may/26/101',"
+            "'https://www.hltv.org/matches/1000001/a-vs-b','fixture.html.gz','fixture-sha')"
+        )
         # DERIVADA: debe quedar FUERA de la caja negra.
+        conn.execute("INSERT INTO result_evidence VALUES ('recovered',1,'2025-06-01T10:00:00Z',"
+                     "'2025-06-02T12:00:00Z','https://www.hltv.org/matches/1000001/a-b','{}')")
+        conn.execute("INSERT INTO result_status VALUES (1,'finished',2,1,1,3,'partial',0,'recovered')")
+        conn.execute("INSERT INTO result_maps VALUES (1,1,'Mirage',13,7,1,NULL,'recovered')")
         conn.execute(
             "INSERT INTO ratings_history(rating_row_id,entity_type,entity_id,before_match_id,as_of_date,rating,rd) "
             "VALUES (1,'team',1,1,'2025-06-01T10:00:00Z',1500.0,60.0)"
@@ -151,6 +164,7 @@ class BlackboxDisasterTests(unittest.TestCase):
         for t in bb.SOURCE_OF_TRUTH_TABLES:
             self.assertEqual(before[t], after[t], f"la tabla fuente '{t}' difiere tras restaurar")
         self.assertEqual(_count(self.db, "prediction_ledger"), 1)
+        self.assertEqual(_count(self.db, "match_team_ranking_observations"), 1)
 
         # 6) la tabla DERIVADA no se guardo y queda vacia.
         self.assertGreater(_count(aside, "ratings_history"), 0, "el original tenia una fila derivada")

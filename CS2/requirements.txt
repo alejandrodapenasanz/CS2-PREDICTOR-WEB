@@ -7,7 +7,9 @@ pandas>=2.2,<3
 scikit-learn==1.8.0
 scipy>=1.13
 matplotlib>=3.8
-lightgbm>=4.5,<5
+# 4.7.0's Windows DLL is denied by Smart App Control on the production host.
+# Official 4.6.0 loads with protection enabled and matches the live CS2 model.
+lightgbm==4.6.0
 xgboost>=2.1
 shap>=0.46
 # Numba 0.66.0 es rechazado por Windows Application Control en CPython 3.13;

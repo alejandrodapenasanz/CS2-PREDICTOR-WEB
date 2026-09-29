@@ -29,6 +29,7 @@ from ..artifact_integrity import (
     canonicalise_code_inventory,
 )
 from ..config import (
+    STATE_ROOT,
     FEATURES_PROCESSED_DIR,
     PROJECT_ROOT,
     RAW_DATA_DIR,
@@ -116,9 +117,7 @@ _MATCH_CATEGORIES: Final[frozenset[str]] = frozenset(
         "wta_qual_itf",
     }
 )
-_AUXILIARY_CATEGORY_BY_GENDER: Final[
-    Mapping[Gender, frozenset[str]]
-] = {
+_AUXILIARY_CATEGORY_BY_GENDER: Final[Mapping[Gender, frozenset[str]]] = {
     "M": frozenset({"atp_rankings"}),
     "F": frozenset({"wta_rankings"}),
 }
@@ -254,10 +253,8 @@ def _ensure_project_path(path: Path, field_name: str) -> Path:
     """Restringe entradas y salidas al árbol TENNIS del proyecto."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
-        raise FeatureDatasetError(
-            f"{field_name} debe permanecer dentro de TENNIS/: {resolved}."
-        )
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
+        raise FeatureDatasetError(f"{field_name} debe permanecer dentro de TENNIS/: {resolved}.")
     return resolved
 
 
@@ -270,9 +267,7 @@ def _sha256_file(path: Path) -> str:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
-        raise FeatureDatasetSourceError(
-            f"No se pudo hashear {path}."
-        ) from exc
+        raise FeatureDatasetSourceError(f"No se pudo hashear {path}.") from exc
     return digest.hexdigest()
 
 
@@ -286,9 +281,7 @@ def _git_blob_sha(path: Path, expected_size: int) -> str:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
     except OSError as exc:
-        raise FeatureDatasetSourceError(
-            f"No se pudo verificar el blob auxiliar {path}."
-        ) from exc
+        raise FeatureDatasetSourceError(f"No se pudo verificar el blob auxiliar {path}.") from exc
     return digest.hexdigest()
 
 
@@ -296,19 +289,11 @@ def _safe_manifest_local_path(raw_dir: Path, relative_path: str) -> Path:
     """Resuelve una ruta POSIX del manifiesto sin permitir traversal."""
 
     pure = PurePosixPath(relative_path)
-    if (
-        pure.is_absolute()
-        or not pure.parts
-        or any(part in {"", ".", ".."} for part in pure.parts)
-    ):
-        raise FeatureDatasetSourceError(
-            f"Ruta auxiliar insegura: {relative_path!r}."
-        )
+    if pure.is_absolute() or not pure.parts or any(part in {"", ".", ".."} for part in pure.parts):
+        raise FeatureDatasetSourceError(f"Ruta auxiliar insegura: {relative_path!r}.")
     resolved = (raw_dir / Path(*pure.parts)).resolve()
     if not resolved.is_relative_to(raw_dir.resolve()):
-        raise FeatureDatasetSourceError(
-            f"La ruta auxiliar sale de data/raw: {relative_path!r}."
-        )
+        raise FeatureDatasetSourceError(f"La ruta auxiliar sale de data/raw: {relative_path!r}.")
     return resolved
 
 
@@ -324,22 +309,16 @@ def _load_stable_source_inventory(
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise FeatureDatasetSourceError(
-            f"No se pudo leer el manifiesto {manifest_path}."
-        ) from exc
+        raise FeatureDatasetSourceError(f"No se pudo leer el manifiesto {manifest_path}.") from exc
     files = payload.get("files") if isinstance(payload, Mapping) else None
     if not isinstance(files, list):
-        raise FeatureDatasetSourceError(
-            "El manifiesto no contiene una lista files."
-        )
+        raise FeatureDatasetSourceError("El manifiesto no contiene una lista files.")
     selected_match_paths = {
         match_file.source_path
         for match_file in verified_manifest.match_files
         if match_file.gender in genders
     }
-    required_player_paths = {
-        _PLAYER_PATH_BY_GENDER[gender] for gender in genders
-    }
+    required_player_paths = {_PLAYER_PATH_BY_GENDER[gender] for gender in genders}
     selected_auxiliary_categories = set().union(
         *(_AUXILIARY_CATEGORY_BY_GENDER[gender] for gender in genders)
     )
@@ -350,9 +329,7 @@ def _load_stable_source_inventory(
     ranking_counts: Counter[Gender] = Counter()
     for item in files:
         if not isinstance(item, Mapping):
-            raise FeatureDatasetSourceError(
-                "Una entrada files no es un objeto."
-            )
+            raise FeatureDatasetSourceError("Una entrada files no es un objeto.")
         relative_path = item.get("local_path")
         category = item.get("category")
         if not isinstance(relative_path, str) or not isinstance(category, str):
@@ -367,9 +344,7 @@ def _load_stable_source_inventory(
         if not selected:
             continue
         if relative_path in seen_paths:
-            raise FeatureDatasetSourceError(
-                f"Ruta duplicada en manifiesto: {relative_path!r}."
-            )
+            raise FeatureDatasetSourceError(f"Ruta duplicada en manifiesto: {relative_path!r}.")
         seen_paths.add(relative_path)
         expected_size = item.get("size")
         expected_blob = item.get("git_blob_sha")
@@ -380,9 +355,7 @@ def _load_stable_source_inventory(
             or not isinstance(expected_blob, str)
             or _SHA1_PATTERN.fullmatch(expected_blob) is None
         ):
-            raise FeatureDatasetSourceError(
-                f"Metadatos de blob inválidos para {relative_path!r}."
-            )
+            raise FeatureDatasetSourceError(f"Metadatos de blob inválidos para {relative_path!r}.")
         local_path = _safe_manifest_local_path(raw_dir, relative_path)
         if not local_path.is_file() or local_path.stat().st_size != expected_size:
             raise FeatureDatasetSourceError(
@@ -391,9 +364,7 @@ def _load_stable_source_inventory(
         if relative_path not in selected_match_paths:
             observed_blob = _git_blob_sha(local_path, expected_size)
             if observed_blob != expected_blob:
-                raise FeatureDatasetSourceError(
-                    f"El blob auxiliar {relative_path!r} no coincide."
-                )
+                raise FeatureDatasetSourceError(f"El blob auxiliar {relative_path!r} no coincide.")
         if relative_path in required_player_paths:
             seen_players.add(relative_path)
         if category == "atp_rankings":
@@ -414,17 +385,13 @@ def _load_stable_source_inventory(
             "Faltan maestros de jugadores en el manifiesto: "
             f"{sorted(required_player_paths.difference(seen_players))}."
         )
-    missing_rankings = [
-        gender for gender in genders if ranking_counts[gender] == 0
-    ]
+    missing_rankings = [gender for gender in genders if ranking_counts[gender] == 0]
     if missing_rankings:
         raise FeatureDatasetSourceError(
             f"Faltan rankings en el manifiesto para {missing_rankings}."
         )
     if selected_match_paths.difference(seen_paths):
-        raise FeatureDatasetSourceError(
-            "El inventario estable omitió CSV de partidos verificados."
-        )
+        raise FeatureDatasetSourceError("El inventario estable omitió CSV de partidos verificados.")
     return tuple(
         sorted(
             inventory,
@@ -453,9 +420,7 @@ def verify_stable_source_inventory(
         or len(selected) != len(set(selected))
         or any(gender not in {"M", "F"} for gender in selected)
     ):
-        raise ValueError(
-            "genders debe contener una selección única de 'M' y/o 'F'."
-        )
+        raise ValueError("genders debe contener una selección única de 'M' y/o 'F'.")
     resolved_manifest = Path(manifest_path).resolve()
     resolved_raw = Path(raw_dir).resolve()
     verified = (
@@ -467,9 +432,7 @@ def verify_stable_source_inventory(
         verified.manifest_path.resolve() != resolved_manifest
         or verified.raw_dir.resolve() != resolved_raw
     ):
-        raise FeatureDatasetSourceError(
-            "verified_manifest no corresponde a manifest_path/raw_dir."
-        )
+        raise FeatureDatasetSourceError("verified_manifest no corresponde a manifest_path/raw_dir.")
     return _load_stable_source_inventory(
         resolved_manifest,
         resolved_raw,
@@ -498,9 +461,7 @@ def verify_auxiliary_source_inventory(
         or len(selected) != len(set(selected))
         or any(gender not in {"M", "F"} for gender in selected)
     ):
-        raise ValueError(
-            "genders debe contener una selección única de 'M' y/o 'F'."
-        )
+        raise ValueError("genders debe contener una selección única de 'M' y/o 'F'.")
     resolved_manifest = Path(manifest_path).resolve()
     resolved_raw = Path(raw_dir).resolve()
     try:
@@ -510,30 +471,17 @@ def verify_auxiliary_source_inventory(
             f"No se pudo leer el manifiesto {resolved_manifest}."
         ) from exc
     if not isinstance(payload, Mapping):
-        raise FeatureDatasetSourceError(
-            "El manifiesto Sackmann no es un objeto JSON."
-        )
+        raise FeatureDatasetSourceError("El manifiesto Sackmann no es un objeto JSON.")
     if payload.get("source_repository") != EXPECTED_SOURCE_REPOSITORY:
-        raise FeatureDatasetSourceError(
-            "El manifiesto no pertenece al mirror Sackmann autorizado."
-        )
+        raise FeatureDatasetSourceError("El manifiesto no pertenece al mirror Sackmann autorizado.")
     commit = payload.get("source_commit")
-    if (
-        not isinstance(commit, str)
-        or _SHA1_PATTERN.fullmatch(commit) is None
-    ):
-        raise FeatureDatasetSourceError(
-            "El manifiesto Sackmann carece de un commit válido."
-        )
+    if not isinstance(commit, str) or _SHA1_PATTERN.fullmatch(commit) is None:
+        raise FeatureDatasetSourceError("El manifiesto Sackmann carece de un commit válido.")
     entries = payload.get("files")
     if not isinstance(entries, list):
-        raise FeatureDatasetSourceError(
-            "El manifiesto Sackmann no contiene una lista files."
-        )
+        raise FeatureDatasetSourceError("El manifiesto Sackmann no contiene una lista files.")
 
-    required_players = {
-        _PLAYER_PATH_BY_GENDER[gender] for gender in selected
-    }
+    required_players = {_PLAYER_PATH_BY_GENDER[gender] for gender in selected}
     ranking_categories = set().union(
         *(_AUXILIARY_CATEGORY_BY_GENDER[gender] for gender in selected)
     )
@@ -543,24 +491,17 @@ def verify_auxiliary_source_inventory(
     inventory: list[Mapping[str, object]] = []
     for item in entries:
         if not isinstance(item, Mapping):
-            raise FeatureDatasetSourceError(
-                "Una entrada files no es un objeto."
-            )
+            raise FeatureDatasetSourceError("Una entrada files no es un objeto.")
         relative_path = item.get("local_path")
         category = item.get("category")
         if not isinstance(relative_path, str) or not isinstance(category, str):
             raise FeatureDatasetSourceError(
                 "Una entrada files carece de local_path/category textual."
             )
-        if (
-            relative_path not in required_players
-            and category not in ranking_categories
-        ):
+        if relative_path not in required_players and category not in ranking_categories:
             continue
         if relative_path in seen_paths:
-            raise FeatureDatasetSourceError(
-                f"Ruta auxiliar duplicada: {relative_path!r}."
-            )
+            raise FeatureDatasetSourceError(f"Ruta auxiliar duplicada: {relative_path!r}.")
         seen_paths.add(relative_path)
         expected_size = item.get("size")
         expected_blob = item.get("git_blob_sha")
@@ -571,9 +512,7 @@ def verify_auxiliary_source_inventory(
             or not isinstance(expected_blob, str)
             or _SHA1_PATTERN.fullmatch(expected_blob) is None
         ):
-            raise FeatureDatasetSourceError(
-                f"Metadatos de blob inválidos para {relative_path!r}."
-            )
+            raise FeatureDatasetSourceError(f"Metadatos de blob inválidos para {relative_path!r}.")
         local_path = _safe_manifest_local_path(
             resolved_raw,
             relative_path,
@@ -583,9 +522,7 @@ def verify_auxiliary_source_inventory(
                 f"El auxiliar {relative_path!r} falta o cambió de tamaño."
             )
         if _git_blob_sha(local_path, expected_size) != expected_blob:
-            raise FeatureDatasetSourceError(
-                f"El blob auxiliar {relative_path!r} no coincide."
-            )
+            raise FeatureDatasetSourceError(f"El blob auxiliar {relative_path!r} no coincide.")
         if relative_path in required_players:
             seen_players.add(relative_path)
         if category == "atp_rankings":
@@ -605,9 +542,7 @@ def verify_auxiliary_source_inventory(
             "Faltan maestros de jugadores en el manifiesto: "
             f"{sorted(required_players.difference(seen_players))}."
         )
-    missing_rankings = [
-        gender for gender in selected if ranking_counts[gender] == 0
-    ]
+    missing_rankings = [gender for gender in selected if ranking_counts[gender] == 0]
     if missing_rankings:
         raise FeatureDatasetSourceError(
             f"Faltan rankings en el manifiesto para {missing_rankings}."
@@ -740,9 +675,7 @@ def _source_context_by_provenance(
         best_of = None if pd.isna(values[4]) else int(values[4])
         key = (source_path, source_row)
         if key in contexts:
-            raise FeatureDatasetSourceError(
-                f"Procedencia duplicada dentro de la fecha: {key}."
-            )
+            raise FeatureDatasetSourceError(f"Procedencia duplicada dentro de la fecha: {key}.")
         contexts[key] = _SourceContext(
             source_family=str(values[2]),
             tourney_name=_optional_text(values[3]),
@@ -757,19 +690,13 @@ def _elo_sides(
 ) -> tuple[EloFeatureSnapshot, EloFeatureSnapshot]:
     """Orienta los ratings prepartido del ganador/perdedor como A/B."""
 
-    winner = EloFeatureSnapshot.from_pre_match_rating(
-        rated.winner_before
-    )
-    loser = EloFeatureSnapshot.from_pre_match_rating(
-        rated.loser_before
-    )
+    winner = EloFeatureSnapshot.from_pre_match_rating(rated.winner_before)
+    loser = EloFeatureSnapshot.from_pre_match_rating(rated.loser_before)
     if player_a_id == rated.event.winner_id:
         return winner, loser
     if player_a_id == rated.event.loser_id:
         return loser, winner
-    raise FeatureDatasetError(
-        "La orientación produjo un jugador A ajeno al evento."
-    )
+    raise FeatureDatasetError("La orientación produjo un jugador A ajeno al evento.")
 
 
 def _training_row(
@@ -839,9 +766,7 @@ def _training_row(
         "tourney_id": event.tourney_id,
         "tourney_name": context.tourney_name,
         "match_num": event.match_num,
-        "result_available_date": source_date_policy.availability_date(
-            event.result_source_date
-        ),
+        "result_available_date": source_date_policy.availability_date(event.result_source_date),
     }
     if tuple(row) != AUDIT_COLUMNS:
         raise RuntimeError("La metadata diverge de AUDIT_COLUMNS.")
@@ -863,9 +788,7 @@ def _write_rows(
     try:
         import pyarrow as pa
     except ImportError as exc:
-        raise FeatureDatasetError(
-            "Falta pyarrow; instale TENNIS/requirements.txt."
-        ) from exc
+        raise FeatureDatasetError("Falta pyarrow; instale TENNIS/requirements.txt.") from exc
     table = pa.Table.from_pylist(rows, schema=schema)
     writer.write_table(table, row_group_size=len(rows))
     rows.clear()
@@ -892,9 +815,7 @@ def _build_gender_parquet(
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
-        raise FeatureDatasetError(
-            "Falta pyarrow; instale TENNIS/requirements.txt."
-        ) from exc
+        raise FeatureDatasetError("Falta pyarrow; instale TENNIS/requirements.txt.") from exc
 
     source_rows = spool_manifest_feature_rows(
         manifest,
@@ -952,9 +873,7 @@ def _build_gender_parquet(
         """Aplica resultados con disponibilidad estrictamente anterior."""
 
         available_dates = sorted(
-            available_date
-            for available_date in pending_by_availability
-            if available_date < cutoff
+            available_date for available_date in pending_by_availability if available_date < cutoff
         )
         for available_date in available_dates:
             pending_events = pending_by_availability.pop(available_date)
@@ -973,13 +892,10 @@ def _build_gender_parquet(
             if not available_block.rated_matches:
                 continue
             source_dates = {
-                rated.event.result_source_date
-                for rated in available_block.rated_matches
+                rated.event.result_source_date for rated in available_block.rated_matches
             }
             if len(source_dates) != 1:
-                raise FeatureDatasetError(
-                    "Un bloque disponible mezcla tourney_date incompatibles."
-                )
+                raise FeatureDatasetError("Un bloque disponible mezcla tourney_date incompatibles.")
             source_match_date = next(iter(source_dates))
             history.apply_date_block(
                 source_match_date,
@@ -995,6 +911,7 @@ def _build_gender_parquet(
                 ),
                 availability_date=available_date,
             )
+
     try:
         for date_frame in iter_spooled_feature_date_frames(
             spool_path,
@@ -1013,9 +930,7 @@ def _build_gender_parquet(
             contexts = _source_context_by_provenance(date_frame)
             block = engine.preview_date_block(match_date, events)
             date_blocks += 1
-            exclusions.update(
-                dict(block.audit.excluded_by_reason)
-            )
+            exclusions.update(dict(block.audit.excluded_by_reason))
             for rated in block.rated_matches:
                 event = rated.event
                 if first_date is None:
@@ -1029,8 +944,7 @@ def _build_gender_parquet(
                     context = contexts[context_key]
                 except KeyError as exc:
                     raise FeatureDatasetSourceError(
-                        "No existe contexto para el evento "
-                        f"{context_key!r}."
+                        f"No existe contexto para el evento {context_key!r}."
                     ) from exc
                 row = _training_row(
                     rated=rated,
@@ -1049,9 +963,7 @@ def _build_gender_parquet(
                 missing_rank_sides += int(row["ranking_missing_b"])
                 missing_age_sides += int(row["age_missing_a"])
                 missing_age_sides += int(row["age_missing_b"])
-                available_date = source_date_policy.availability_date(
-                    event.result_source_date
-                )
+                available_date = source_date_policy.availability_date(event.result_source_date)
                 pending_by_availability.setdefault(
                     available_date,
                     [],
@@ -1069,14 +981,8 @@ def _build_gender_parquet(
     finally:
         writer.close()
 
-    if (
-        training_rows == 0
-        or first_date is None
-        or last_date is None
-    ):
-        raise FeatureDatasetError(
-            f"No se produjo ninguna fila de entrenamiento para {gender}."
-        )
+    if training_rows == 0 or first_date is None or last_date is None:
+        raise FeatureDatasetError(f"No se produjo ninguna fila de entrenamiento para {gender}.")
     excluded_rows = source_rows - training_rows
     if excluded_rows != sum(exclusions.values()):
         raise FeatureDatasetError(
@@ -1151,23 +1057,15 @@ def _combine_conflict_inventories(
             ) as source:
                 reader = csv.DictReader(source)
                 if tuple(reader.fieldnames or ()) != fieldnames:
-                    raise FeatureDatasetError(
-                        f"Cabecera de conflictos inesperada: {source_path}."
-                    )
+                    raise FeatureDatasetError(f"Cabecera de conflictos inesperada: {source_path}.")
                 for row in reader:
                     local_source = Path(row["source_file"]).resolve()
                     if not local_source.is_relative_to(raw_dir.resolve()):
-                        raise FeatureDatasetError(
-                            "Una ruta de conflicto sale de data/raw."
-                        )
-                    row["source_file"] = local_source.relative_to(
-                        raw_dir.resolve()
-                    ).as_posix()
+                        raise FeatureDatasetError("Una ruta de conflicto sale de data/raw.")
+                    row["source_file"] = local_source.relative_to(raw_dir.resolve()).as_posix()
                     rows.append(dict(row))
         except OSError as exc:
-            raise FeatureDatasetError(
-                f"No se pudo combinar {source_path}."
-            ) from exc
+            raise FeatureDatasetError(f"No se pudo combinar {source_path}.") from exc
     rows.sort(
         key=lambda row: (
             row["gender"],
@@ -1187,9 +1085,7 @@ def _combine_conflict_inventories(
             writer.writeheader()
             writer.writerows(rows)
     except OSError as exc:
-        raise FeatureDatasetError(
-            f"No se pudo escribir {destination}."
-        ) from exc
+        raise FeatureDatasetError(f"No se pudo escribir {destination}.") from exc
     return len(rows)
 
 
@@ -1242,9 +1138,7 @@ def _parse_dataset_audit(
             missing_age_sides=int(payload["missing_age_sides"]),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise FeatureDatasetError(
-            "Dataset inválido en el manifiesto activo."
-        ) from exc
+        raise FeatureDatasetError("Dataset inválido en el manifiesto activo.") from exc
 
 
 def _parse_ranking_audit(
@@ -1266,9 +1160,7 @@ def _parse_ranking_audit(
             max_date=date.fromisoformat(str(payload["max_date"])),
         )
     except (KeyError, TypeError, ValueError) as exc:
-        raise FeatureDatasetError(
-            "Ranking inválido en el manifiesto activo."
-        ) from exc
+        raise FeatureDatasetError("Ranking inválido en el manifiesto activo.") from exc
 
 
 def _load_current_report(
@@ -1292,10 +1184,7 @@ def _load_current_report(
         or payload.get("schema_version") != FEATURE_SCHEMA_VERSION
         or payload.get("fingerprint") != fingerprint
         or not isinstance(payload.get("source_commit"), str)
-        or _SHA1_PATTERN.fullmatch(
-            cast(str, payload.get("source_commit"))
-        )
-        is None
+        or _SHA1_PATTERN.fullmatch(cast(str, payload.get("source_commit"))) is None
     ):
         return None
     raw_datasets = payload.get("datasets")
@@ -1309,16 +1198,13 @@ def _load_current_report(
             if isinstance(item, Mapping)
         )
         rankings = tuple(
-            _parse_ranking_audit(item)
-            for item in raw_rankings
-            if isinstance(item, Mapping)
+            _parse_ranking_audit(item) for item in raw_rankings if isinstance(item, Mapping)
         )
     except FeatureDatasetError:
         return None
-    if (
-        tuple(audit.gender for audit in datasets) != tuple(genders)
-        or tuple(audit.gender for audit in rankings) != tuple(genders)
-    ):
+    if tuple(audit.gender for audit in datasets) != tuple(genders) or tuple(
+        audit.gender for audit in rankings
+    ) != tuple(genders):
         return None
     for audit in datasets:
         if (
@@ -1359,13 +1245,8 @@ def _safe_cleanup_staging(path: Path, output_dir: Path) -> None:
 
     resolved = path.resolve()
     parent = output_dir.resolve()
-    if (
-        resolved.parent != parent
-        or not resolved.name.startswith(".feature-build-")
-    ):
-        raise FeatureDatasetError(
-            f"Se rechazó limpiar una ruta de staging insegura: {resolved}."
-        )
+    if resolved.parent != parent or not resolved.name.startswith(".feature-build-"):
+        raise FeatureDatasetError(f"Se rechazó limpiar una ruta de staging insegura: {resolved}.")
     if resolved.exists():
         shutil.rmtree(resolved)
 
@@ -1392,9 +1273,7 @@ def _create_build_workspace(output_dir: Path) -> Path:
                 "No se pudo crear el workspace heredable de features."
             ) from exc
         return candidate
-    raise FeatureDatasetError(
-        "No se pudo reservar un nombre unico para el workspace de features."
-    )
+    raise FeatureDatasetError("No se pudo reservar un nombre unico para el workspace de features.")
 
 
 def build_training_datasets(
@@ -1408,9 +1287,7 @@ def build_training_datasets(
     force: bool = False,
     feature_parameters: FeatureParameters = DEFAULT_FEATURE_PARAMETERS,
     elo_parameters: EloParameters = DEFAULT_ELO_PARAMETERS,
-    identity_exclusion_after_dates: (
-        Mapping[tuple[Gender, int], date] | None
-    ) = None,
+    identity_exclusion_after_dates: (Mapping[tuple[Gender, int], date] | None) = None,
     source_date_policy: SourceDatePolicy = DEFAULT_SOURCE_DATE_POLICY,
 ) -> FeatureDatasetBuildReport:
     """Construye y publica datasets separados por género sin información futura.
@@ -1451,9 +1328,7 @@ def build_training_datasets(
         raise TypeError("elo_parameters debe ser EloParameters.")
     if not isinstance(source_date_policy, SourceDatePolicy):
         raise TypeError("source_date_policy debe ser SourceDatePolicy.")
-    quarantine = normalise_identity_exclusion_after_dates(
-        identity_exclusion_after_dates
-    )
+    quarantine = normalise_identity_exclusion_after_dates(identity_exclusion_after_dates)
 
     resolved_manifest = _ensure_project_path(
         Path(manifest_path),
@@ -1461,10 +1336,7 @@ def build_training_datasets(
     )
     resolved_raw = _ensure_project_path(Path(raw_dir), "raw_dir")
     resolved_output = _ensure_project_path(Path(output_dir), "output_dir")
-    if (
-        genders != ("M", "F")
-        and resolved_output == FEATURES_PROCESSED_DIR.resolve()
-    ):
+    if genders != ("M", "F") and resolved_output == FEATURES_PROCESSED_DIR.resolve():
         raise FeatureDatasetError(
             "Una construcción parcial no puede reemplazar el manifiesto "
             "canónico de ambos géneros. Use gender='all' o un --output-dir "
@@ -1523,9 +1395,7 @@ def build_training_datasets(
                 genders=genders,
             )
             if current is None:
-                raise FeatureDatasetError(
-                    "El run verificado no pudo reconstruir su informe."
-                )
+                raise FeatureDatasetError("El run verificado no pudo reconstruir su informe.")
             return current
 
     staging = _create_build_workspace(resolved_output)
@@ -1538,8 +1408,7 @@ def build_training_datasets(
     conflict_parts: list[Path] = []
     try:
         player_frames = [
-            load_players(gender_value, raw_dir=resolved_raw)
-            for gender_value in genders
+            load_players(gender_value, raw_dir=resolved_raw) for gender_value in genders
         ]
         age_index = PlayerAgeIndex.from_dataframe(
             pd.concat(player_frames, ignore_index=True),
@@ -1556,15 +1425,11 @@ def build_training_datasets(
                 raw_dir=resolved_raw,
             )
             ranking_audits.append(_ranking_audit(ranking_index))
-            conflict_part = work_dir / (
-                f"ranking_conflicts_{selected_gender}.csv"
-            )
+            conflict_part = work_dir / (f"ranking_conflicts_{selected_gender}.csv")
             ranking_index.write_conflict_inventory(conflict_part)
             conflict_parts.append(conflict_part)
             spool_path = work_dir / f"source_{selected_gender}.sqlite3"
-            parquet_path = publish_dir / (
-                f"training_{selected_gender}.parquet"
-            )
+            parquet_path = publish_dir / (f"training_{selected_gender}.parquet")
             LOGGER.info(
                 "Construyendo features históricas del género %s.",
                 selected_gender,
@@ -1632,12 +1497,8 @@ def build_training_datasets(
                 "usage_contract": "current_inference_block_only",
                 "rows": len(quarantine),
             },
-            "datasets": [
-                _audit_to_manifest(audit) for audit in dataset_audits
-            ],
-            "rankings": [
-                _ranking_to_manifest(audit) for audit in ranking_audits
-            ],
+            "datasets": [_audit_to_manifest(audit) for audit in dataset_audits],
+            "rankings": [_ranking_to_manifest(audit) for audit in ranking_audits],
             "conflict_inventory": {
                 "path": CONFLICTS_FILENAME,
                 "rows": conflict_rows,
@@ -1664,9 +1525,7 @@ def build_training_datasets(
         )
         raw_published_datasets = published.manifest.get("datasets")
         if not isinstance(raw_published_datasets, list):
-            raise FeatureDatasetError(
-                "El run publicado perdió su inventario de datasets."
-            )
+            raise FeatureDatasetError("El run publicado perdió su inventario de datasets.")
         published_audits = [
             _parse_dataset_audit(item, published.run_dir)
             for item in raw_published_datasets

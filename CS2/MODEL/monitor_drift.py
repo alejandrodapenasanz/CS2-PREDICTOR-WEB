@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -21,8 +22,8 @@ from cs2model.drift import build_drift_report
 from cs2model.features import build_training_frame
 
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_OUTPUT = ROOT / "MODEL" / "results" / "drift_live.json"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_OUTPUT = STATE_ROOT / "MODEL" / "results" / "drift_live.json"
 
 
 def load_closed_predictions(db_path: Path) -> list[dict]:

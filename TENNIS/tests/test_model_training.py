@@ -62,9 +62,7 @@ def _gender_frame(gender: str) -> pd.DataFrame:
                 "gender": gender,
                 "match_date": date(year, 1, index + 1),
                 "result_available_date": (
-                    DEFAULT_SOURCE_DATE_POLICY.availability_date(
-                        date(year, 1, index + 1)
-                    )
+                    DEFAULT_SOURCE_DATE_POLICY.availability_date(date(year, 1, index + 1))
                 ),
                 "rank_a": rank_a,
                 "rank_b": rank_b,
@@ -85,9 +83,7 @@ def _gender_frame(gender: str) -> pd.DataFrame:
                     value = np.nan
                 elif column in CATEGORICAL_FEATURE_COLUMNS:
                     value = "known"
-                elif column.startswith(
-                    ("elo_cold_start", "ranking_missing", "age_missing")
-                ):
+                elif column.startswith(("elo_cold_start", "ranking_missing", "age_missing")):
                     value = False
                 else:
                     value = float((2 * target - 1) * (1 + index % 4))
@@ -121,9 +117,7 @@ def _write_feature_snapshot(root: Path) -> Path:
         "source_commit": "c" * 40,
         "historical_odds_available": False,
         "source_date_policy": DEFAULT_SOURCE_DATE_POLICY.as_dict(),
-        "code_inventory": list(
-            build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)
-        ),
+        "code_inventory": list(build_code_inventory(PROJECT_ROOT, FEATURE_CODE_PATHS)),
         "model_feature_columns": list(MODEL_FEATURE_COLUMNS),
         "training_columns": [
             "record_id",
@@ -138,21 +132,47 @@ def _write_feature_snapshot(root: Path) -> Path:
         "datasets": datasets,
     }
     manifest_path = root / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(manifest), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     return manifest_path
 
 
 class ModelTrainingTest(unittest.TestCase):
     """Comprueba el flujo canónico sin tocar los artefactos reales."""
 
+    def test_training_from_vault_has_a_portable_manifest_identity(self) -> None:
+        """Exercise the real training route with state outside the source tree."""
+        from src.config import STATE_ROOT
+
+        STATE_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix=".test-model-vault-", dir=STATE_ROOT) as temporary:
+            root = Path(temporary)
+            manifest = _write_feature_snapshot(root)
+            run = retrain_models(
+                manifest_path=manifest,
+                output_dir=root / "models",
+                profile="sports_only",
+                logistic_parameters=LogisticParameters(max_iter=300),
+                lightgbm_parameters=LightGBMParameters(
+                    n_estimators=5, min_child_samples=4, n_jobs=1
+                ),
+                evaluation_parameters=TemporalEvaluationParameters(
+                    first_test_season=2020,
+                    last_test_season=2020,
+                    small_segment_threshold=20,
+                ),
+                training_as_of_date=date(2021, 3, 1),
+            )
+            self.assertEqual(run.promotion.action, "bootstrapped")
+            payload = run.published.manifest["identity"]
+            self.assertEqual(
+                payload["feature_source"]["manifest_path"],
+                manifest.relative_to(STATE_ROOT).as_posix(),
+            )
+
     def test_small_run_is_complete_versioned_and_idempotent(self) -> None:
         """Publica ambos géneros y reutiliza exactamente el mismo run."""
 
-        with tempfile.TemporaryDirectory(
-            dir=PROJECT_ROOT / "tests"
-        ) as temporary:
+        with tempfile.TemporaryDirectory(dir=PROJECT_ROOT / "tests") as temporary:
             root = Path(temporary)
             manifest = _write_feature_snapshot(root)
             output = root / "models"
@@ -183,56 +203,29 @@ class ModelTrainingTest(unittest.TestCase):
             self.assertEqual(second.promotion.action, "active_reused")
             self.assertFalse(first.retention.applied)
             self.assertEqual(
-                [
-                    item["path"]
-                    for item in first.published.manifest["code_inventory"]
-                ],
+                [item["path"] for item in first.published.manifest["code_inventory"]],
                 sorted(MODEL_CODE_PATHS),
             )
             self.assertEqual(
                 first.published.fingerprint,
                 second.published.fingerprint,
             )
-            self.assertEqual(
-                {item["gender"] for item in first.summaries}, {"M", "F"}
+            self.assertEqual({item["gender"] for item in first.summaries}, {"M", "F"})
+            self.assertTrue(
+                (first.published.run_dir / "models" / "M" / "deployment_bundle.joblib").is_file()
             )
             self.assertTrue(
-                (
-                    first.published.run_dir
-                    / "models"
-                    / "M"
-                    / "deployment_bundle.joblib"
-                ).is_file()
+                (first.published.run_dir / "models" / "F" / "deployment_bundle.joblib").is_file()
             )
-            self.assertTrue(
-                (
-                    first.published.run_dir
-                    / "models"
-                    / "F"
-                    / "deployment_bundle.joblib"
-                ).is_file()
-            )
-            self.assertTrue(
-                (
-                    first.published.run_dir
-                    / "report"
-                    / "model_report.md"
-                ).is_file()
-            )
+            self.assertTrue((first.published.run_dir / "report" / "model_report.md").is_file())
             self.assertEqual(len(first.market_audits), 2)
-            self.assertTrue(
-                (first.market_audits["market_rows"] == 0).all()
-            )
-            active = load_active_deployment_model(
-                "M", manifest_path=output / "manifest.json"
-            )
+            self.assertTrue((first.market_audits["market_rows"] == 0).all())
+            active = load_active_deployment_model("M", manifest_path=output / "manifest.json")
             prediction = active.predict(
                 _gender_frame("M").tail(2),
                 as_of_date=date(2025, 1, 1),
             )
-            self.assertTrue(
-                prediction["model_probability_a"].between(0.0, 1.0).all()
-            )
+            self.assertTrue(prediction["model_probability_a"].between(0.0, 1.0).all())
             self.assertTrue(prediction["edge"].isna().all())
             with self.assertRaisesRegex(ModelServiceError, "no es causal"):
                 active.predict(
@@ -242,31 +235,23 @@ class ModelTrainingTest(unittest.TestCase):
             unverified_market = _gender_frame("M").tail(1).copy()
             unverified_market["market_probability_a"] = 0.55
             unverified_market["market_probability_b"] = 0.45
-            with self.assertRaisesRegex(
-                ModelServiceError, "market_retrieved_at_utc"
-            ):
+            with self.assertRaisesRegex(ModelServiceError, "market_retrieved_at_utc"):
                 active.predict(
                     unverified_market,
                     as_of_date=date(2025, 1, 1),
                 )
 
             published_manifest = first.published.run_dir / "manifest.json"
-            payload = json.loads(
-                published_manifest.read_text(encoding="utf-8")
-            )
+            payload = json.loads(published_manifest.read_text(encoding="utf-8"))
             inference_entry = next(
                 item
                 for item in payload["code_inventory"]
                 if item["path"] == "src/modeling/calibration.py"
             )
             inference_entry["sha256"] = "0" * 64
-            published_manifest.write_text(
-                json.dumps(payload), encoding="utf-8"
-            )
+            published_manifest.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaisesRegex(ModelServiceError, "código distinto"):
-                load_active_deployment_model(
-                    "M", manifest_path=output / "manifest.json"
-                )
+                load_active_deployment_model("M", manifest_path=output / "manifest.json")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Final, Mapping
 
 from .config import (
+    STATE_ROOT,
     FEATURE_DATASET_MANIFEST_PATH,
     PROJECT_ROOT,
     SACKMANN_ACTIVE_MANIFEST_PATH,
@@ -21,9 +22,9 @@ from .config import (
 
 
 CONFIG_PATH: Final[Path] = PROJECT_ROOT / "freshness.config.json"
-OUTPUT_PATH: Final[Path] = PROJECT_ROOT / "freshness.json"
+OUTPUT_PATH: Final[Path] = STATE_ROOT / "freshness.json"
 TENNISRATIO_LAST_GOOD_PATH: Final[Path] = (
-    PROJECT_ROOT / "data" / "raw" / "tennisratio" / "last_good.json"
+    STATE_ROOT / "data" / "raw" / "tennisratio" / "last_good.json"
 )
 SCHEMA_VERSION: Final[str] = "data-freshness-v1"
 

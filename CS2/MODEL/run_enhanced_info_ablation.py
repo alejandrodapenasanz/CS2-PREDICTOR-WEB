@@ -20,6 +20,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 MODEL_DIR = ROOT / "MODEL"
 if str(MODEL_DIR) not in sys.path:
     sys.path.insert(0, str(MODEL_DIR))
@@ -262,11 +263,11 @@ def _write_predictions(path: Path, model: str, rows: list[dict[str, Any]]) -> No
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", default=str(ROOT / "BBDD" / "cs2.db"))
+    parser.add_argument("--db", default=str(STATE_ROOT / "BBDD" / "cs2.db"))
     parser.add_argument("--config", default=str(ROOT / "MODEL" / "config.yaml"))
     parser.add_argument(
         "--output-dir",
-        default=str(ROOT / "MODEL" / "results" / "enhanced_info_ablation"),
+        default=str(STATE_ROOT / "MODEL" / "results" / "enhanced_info_ablation"),
     )
     parser.add_argument("--half-life-days", type=float, default=None)
     parser.add_argument("--promote", action="store_true")
@@ -289,7 +290,7 @@ def main() -> int:
 
     rows = train.dataio.load_training_rows(
         None,
-        ROOT / "PIPELINE" / "master" / "matches.json",
+        STATE_ROOT / "PIPELINE" / "master" / "matches.json",
         cs2_only=True,
         db_path=args.db,
     )

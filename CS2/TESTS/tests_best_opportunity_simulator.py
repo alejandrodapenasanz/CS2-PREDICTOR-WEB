@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -29,9 +30,9 @@ from PIPELINE.opportunity import (  # noqa: E402
     opportunity_score,
 )
 
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_JSON = ROOT / "MODEL" / "results" / "BEST_OPPORTUNITY_BACKTEST.json"
-DEFAULT_MD = ROOT / "MODEL" / "results" / "BEST_OPPORTUNITY_BACKTEST.md"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_JSON = STATE_ROOT / "MODEL" / "results" / "BEST_OPPORTUNITY_BACKTEST.json"
+DEFAULT_MD = STATE_ROOT / "MODEL" / "results" / "BEST_OPPORTUNITY_BACKTEST.md"
 
 
 @dataclass(frozen=True)

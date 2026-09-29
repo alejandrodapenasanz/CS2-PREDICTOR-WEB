@@ -30,7 +30,7 @@ from cs2model.features import ChronologicalState, build_training_frame
 
 
 ROOT = Path(__file__).resolve().parents[1]
-LIVE_DB = ROOT / "BBDD" / "cs2.db"
+LIVE_DB = ROOT.parent / "VAULT" / "CS2" / "BBDD" / "cs2.db"
 
 
 def _synthetic_rows(n: int = 600, seed: int = 11):
@@ -99,6 +99,7 @@ class RealDatabaseLeakageAuditTests(unittest.TestCase):
             "announced_lineup_available",
             "player_snapshot_available",
             "ranking_available",
+            "match_ranking_available",
             "roster_available",
             "asset_available",
             "event_history_available",

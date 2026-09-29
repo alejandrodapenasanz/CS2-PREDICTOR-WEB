@@ -19,6 +19,26 @@ from tempfile import TemporaryDirectory
 CS2_ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = CS2_ROOT.parent
 FORMAT_BASELINE = (
+    "BBDD/result_store.py",
+    "PIPELINE/result_recovery.py",
+    "TESTS/test_result_recovery.py",
+    "../main.py",
+    "../scripts/soluciona_errores.py",
+    "BBDD/fetch_recovery.py",
+    "BBDD/recovery_references.py",
+    "PIPELINE/operation_lock.py",
+    "PIPELINE/fetch_recovery_worker.py",
+    "PIPELINE/repair_fetch_errors.py",
+    "TESTS/test_fetch_recovery.py",
+    "PIPELINE/agenda_contract.py",
+    "TESTS/test_agenda_contract.py",
+    "TESTS/test_web_unavailable_agenda.py",
+    "TESTS/test_launcher_logging.py",
+    "MODEL/cs2model/match_rankings.py",
+    "TESTS/test_match_rankings.py",
+    "BBDD/ranking_store.py",
+    "PIPELINE/ranking_badges.py",
+    "TESTS/test_ranking_badges.py",
     "MODEL/cs2model/pistol_opponents.py",
     "TESTS/test_pistol_opponents.py",
     "BBDD/round_history_store.py",
@@ -67,6 +87,7 @@ FORMAT_BASELINE = (
     "TESTS/test_segment_calibration.py",
     "TESTS/test_training_promotion_wiring.py",
     "TESTS/test_web_uncertainty_display.py",
+    "TESTS/test_web_publication_recovery.py",
 )
 
 
@@ -112,6 +133,10 @@ def main() -> int:
         cwd=REPOSITORY_ROOT,
     )
     for entrypoint in (
+        "../scripts/soluciona_errores.py",
+        "PIPELINE/repair_fetch_errors.py",
+        "PIPELINE/fetch_recovery_worker.py",
+        "BBDD/ranking_store.py",
         "BBDD/round_history_store.py",
         "MODEL/run_pistol_ablation.py",
         "MODEL/train.py",
@@ -126,9 +151,11 @@ def main() -> int:
         "PIPELINE/enrich_predictions.py",
     ):
         run([python, entrypoint, "--help"])
+    test_cache_root = REPOSITORY_ROOT / "VAULT" / "CS2" / "TESTS" / ".cache" / "gates"
+    test_cache_root.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(
         prefix=".pytest-quality-gate-",
-        dir=CS2_ROOT,
+        dir=test_cache_root,
         ignore_cleanup_errors=True,
     ) as temporary:
         run(
@@ -141,6 +168,8 @@ def main() -> int:
                 "--ignore=TESTS/test_hltv_parsers.py",
                 "--ignore=TESTS/test_bbdd_live_pipeline.py",
                 f"--basetemp={Path(temporary) / 'pytest'}",
+                "-o",
+                f"cache_dir={Path(temporary) / 'pytest-cache'}",
             ]
         )
     run([python, "MODEL/smoke_pipeline.py"])

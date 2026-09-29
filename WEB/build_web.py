@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
 import sqlite3
+import tempfile
 from bisect import bisect_left
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
@@ -31,14 +33,14 @@ from zoneinfo import ZoneInfo
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ROOT = REPO_ROOT / "CS2"
+ROOT = REPO_ROOT / "VAULT" / "CS2"
 DAILY_ROOT = ROOT / "PIPELINE"
 MODEL_ROOT = ROOT / "MODEL"
-WEB_ROOT = REPO_ROOT / "WEB"
+WEB_ROOT = REPO_ROOT / "VAULT" / "WEB"
 BBDD_ROOT = ROOT / "BBDD"
 DB_PATH = BBDD_ROOT / "cs2.db"
-TENNIS_DB_PATH = REPO_ROOT / "TENNIS" / "BBDD" / "tennis.sqlite3"
-TENNIS_FRESHNESS_PATH = REPO_ROOT / "TENNIS" / "freshness.json"
+TENNIS_DB_PATH = REPO_ROOT / "VAULT" / "TENNIS" / "BBDD" / "tennis.sqlite3"
+TENNIS_FRESHNESS_PATH = REPO_ROOT / "VAULT" / "TENNIS" / "freshness.json"
 CS2_CALIBRATION_BIN_COUNT = 10
 CS2_ROLLING_WINDOW_SIZE = 50
 TENNIS_CALIBRATION_BIN_COUNT = 10
@@ -56,7 +58,8 @@ TENNIS_PROBABILITY_FILTERS = (
 def configure_sport_root(sport_root: Path) -> None:
     """Select the sport domain while keeping the web output repository-wide."""
     global ROOT, DAILY_ROOT, MODEL_ROOT, BBDD_ROOT, DB_PATH
-    ROOT = sport_root.resolve()
+    supplied = sport_root.resolve()
+    ROOT = REPO_ROOT / "VAULT" / "CS2" if supplied == REPO_ROOT / "CS2" else supplied
     DAILY_ROOT = ROOT / "PIPELINE"
     MODEL_ROOT = ROOT / "MODEL"
     BBDD_ROOT = ROOT / "BBDD"
@@ -77,6 +80,124 @@ def latest_run() -> Path:
     if not runs:
         raise FileNotFoundError("No PIPELINE runs found.")
     return runs[-1]
+
+
+def cs2_publication_data(run_dir: Path) -> list[dict]:
+    """Validate a completed public handoff; a failed acquisition is not an empty agenda."""
+
+    manifest = read_json(run_dir / "manifest.json", {})
+    upcoming = manifest.get("steps", {}).get("upcoming", {})
+    if manifest.get("failure") or upcoming.get("status") == "failed":
+        raise ValueError("Falló la adquisición de la cartelera HLTV.")
+    # Compatibility with runs published before acquisition failures were fatal.
+    if (run_dir / "logs" / "upcoming_error.log.json").exists():
+        raise ValueError("Fallaron la descarga de la cartelera HLTV y su fallback.")
+    if not manifest.get("finished_at"):
+        raise ValueError("El run de adquisición aún no está completo.")
+    path = run_dir / "predictions_enriched.json"
+    if not path.is_file():
+        raise ValueError("Falta el artefacto de predicciones del run.")
+    matches = read_json(path, None)
+    if not isinstance(matches, list) or any(not isinstance(row, dict) for row in matches):
+        raise ValueError("El artefacto de predicciones no contiene una lista de partidos.")
+    coverage_path = run_dir / "publication_coverage.json"
+    if coverage_path.exists():
+        coverage = read_json(coverage_path, {})
+        unavailable_path = run_dir / "agenda_unavailable.json"
+        unavailable = read_json(unavailable_path, None)
+        if (
+            coverage.get("schema_version") != "cs2-agenda-coverage-v1"
+            or not coverage.get("complete")
+            or not isinstance(unavailable, list)
+            or any(not isinstance(row, dict) for row in unavailable)
+            or hashlib.sha256(path.read_bytes()).hexdigest() != coverage.get("prediction_sha256")
+            or not unavailable_path.exists()
+            or hashlib.sha256(unavailable_path.read_bytes()).hexdigest() != coverage.get("unavailable_sha256")
+        ):
+            raise ValueError("El contrato de cobertura CS2 está incompleto o no coincide con los artefactos.")
+        predicted_ids = [str(row.get("id") or "") for row in matches]
+        unavailable_ids = [str(row.get("id") or "") for row in unavailable]
+        accounted = predicted_ids + unavailable_ids + list(coverage.get("excluded", {}))
+        if (
+            sorted(predicted_ids) != coverage.get("predicted_ids")
+            or sorted(unavailable_ids) != coverage.get("unavailable_ids")
+            or len(set(accounted)) != len(accounted)
+            or sorted(accounted) != coverage.get("source_ids")
+        ):
+            raise ValueError("Faltan partidos de la cartelera en la salida CS2.")
+        return matches + unavailable
+    if not matches and (upcoming.get("count") or 0) > 0:
+        raise ValueError("La cartelera tenía partidos pero el artefacto de predicciones está vacío.")
+    skipped = read_json(run_dir / "predictions_skipped_unpublishable.json", {}).get("skipped", {})
+    if skipped.get("participants_unconfirmed"):
+        raise ValueError("El lote antiguo descartó partidos por identidad sin una salida visible ni cobertura verificada.")
+    return matches
+
+
+def select_cs2_publication(requested: Path) -> tuple[Path, list[dict], dict]:
+    """Reuse only a prior completed handoff, without consulting Telegram's dedup state."""
+
+    try:
+        matches = cs2_publication_data(requested)
+        return requested, matches, {"status": "current", "requestedRunDir": str(requested)}
+    except (OSError, ValueError) as exc:
+        reason = str(exc)
+    for candidate in sorted(requested.parent.iterdir(), reverse=True):
+        if not candidate.is_dir() or candidate.name >= requested.name:
+            continue
+        try:
+            matches = cs2_publication_data(candidate)
+        except (OSError, ValueError):
+            continue
+        return candidate, matches, {
+            "status": "fallback",
+            "requestedRunDir": str(requested),
+            "sourceRunDir": str(candidate),
+            "reason": reason,
+        }
+    raise RuntimeError(f"Sin cartelera CS2 válida: {reason} Se conserva el data.js anterior.")
+
+
+def publication_freshness(run_dir: Path, publication: dict) -> dict:
+    """Label reused public evidence as fallback, retaining its actual capture time."""
+
+    report = read_json(run_dir / "freshness.json", {})
+    if publication["status"] != "fallback":
+        return report
+    manifest = read_json(run_dir / "manifest.json", {})
+    attempted = read_json(Path(publication["requestedRunDir"]) / "manifest.json", {})
+    sources = report.setdefault("sources", [])
+    source = next((row for row in sources if row.get("source_id") == "hltv"), None)
+    if source is None:
+        source = {"source_id": "hltv", "label": "HLTV", "threshold_hours": 24.0}
+        sources.append(source)
+    source.update({
+        "last_success_at_utc": manifest.get("finished_at"),
+        "last_attempt_at_utc": attempted.get("failed_at") or attempted.get("started_at"),
+        "last_attempt_status": "failed",
+        "attempt_error": publication["reason"],
+        "fallback_used": True,
+        "cause": "source_update_failed",
+        "run_id": run_dir.name,
+    })
+    report["has_warning"] = True
+    return report
+
+
+def write_dashboard_payload(payload: dict, output: Path) -> None:
+    """Atomically replace the public file; serialization/write failures preserve the old one."""
+
+    content = "window.__CS2_PREDICTOR_DATA__ = " + json.dumps(payload, ensure_ascii=False) + ";\n"
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent, suffix=".tmp", delete=False) as handle:
+            temporary = Path(handle.name)
+            handle.write(content)
+        temporary.replace(output)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def pending_cleanup_payload() -> dict:
@@ -1848,19 +1969,22 @@ def main() -> int:
     parser.add_argument("--run-dir", default="")
     args = parser.parse_args()
     configure_sport_root(args.sport_root)
-    run_dir = Path(args.run_dir) if args.run_dir else latest_run()
-    raw_data = read_json(run_dir / "predictions_enriched.json", [])
+    requested_run = Path(args.run_dir) if args.run_dir else latest_run()
+    run_dir, raw_data, publication = select_cs2_publication(requested_run)
+    if publication["status"] == "fallback":
+        print(f"ADVERTENCIA CS2: {publication['reason']} Uso del último lote válido: {run_dir.name}.")
     data, skipped_web = publishable_matches(raw_data)
     manifest = read_json(run_dir / "manifest.json", {})
     master_manifest = read_json(DAILY_ROOT / "master" / "manifest.json", {})
     calibration = read_json(run_dir / "calibration.json", {})
 
     tennis = tennis_payload()
-    cs2_freshness = read_json(run_dir / "freshness.json", {})
+    cs2_freshness = publication_freshness(run_dir, publication)
     payload = {
         "sport": ROOT.name,
         "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "runDir": str(run_dir),
+        "publication": publication,
         "manifest": manifest,
         "masterManifest": master_manifest,
         "calibration": calibration,
@@ -1885,11 +2009,7 @@ def main() -> int:
         },
         "matches": data,
     }
-    WEB_ROOT.mkdir(parents=True, exist_ok=True)
-    (WEB_ROOT / "data.js").write_text(
-        "window.__CS2_PREDICTOR_DATA__ = " + json.dumps(payload, ensure_ascii=False) + ";\n",
-        encoding="utf-8",
-    )
+    write_dashboard_payload(payload, WEB_ROOT / "data.js")
     model_label = str(payload["model"].get("production_model") or "").encode("ascii", "replace").decode("ascii")
     print(f"Built {WEB_ROOT / 'data.js'} with {len(data)} matches - model={model_label}")
     return 0

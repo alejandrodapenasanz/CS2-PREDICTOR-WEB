@@ -997,7 +997,7 @@ class OperationalDailyTests(unittest.TestCase):
             "scripts\\retrain_models.py",
         )
         positions = [launcher.index(item) for item in retrain_order]
-        positions.append(launcher.index("& $PythonExecutable $DailyScript"))
+        positions.append(launcher.index("$DailyExitCode = Invoke-TennisPython"))
         self.assertEqual(positions, sorted(positions))
         self.assertIn("((-not [bool]$Date) -or $Retrain)", launcher)
         training_block = launcher.split("$TrainingScripts = @(", 1)[1].split(
@@ -1007,8 +1007,8 @@ class OperationalDailyTests(unittest.TestCase):
         self.assertIn("$DailyArguments += '--retrained'", launcher)
         self.assertIn("'WEB\\build_web.py'", launcher)
         self.assertGreater(
-            launcher.index("& $PythonExecutable $WebBuildScript"),
-            launcher.index("& $PythonExecutable $DailyScript"),
+            launcher.index("$WebExitCode = Invoke-TennisPython"),
+            launcher.index("$DailyExitCode = Invoke-TennisPython"),
         )
         self.assertIn("if ($DailyExitCode -ne 0)", launcher)
         self.assertNotIn("start.ps1", launcher)

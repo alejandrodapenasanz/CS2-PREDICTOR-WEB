@@ -19,7 +19,7 @@ from typing import Final, Literal, Mapping, Sequence, cast
 import pandas as pd
 
 from ..artifact_integrity import CodeInventoryError, verify_code_inventory
-from ..config import FEATURE_DATASET_MANIFEST_PATH, PROJECT_ROOT
+from ..config import FEATURE_DATASET_MANIFEST_PATH, PROJECT_ROOT, STATE_ROOT
 from ..features import MODEL_FEATURE_COLUMNS
 from ..features.dataset import FEATURE_CODE_PATHS
 from ..features.artifacts import (
@@ -91,10 +91,8 @@ def _ensure_project_path(path: Path, field_name: str) -> Path:
     """Resuelve una ruta y exige que permanezca dentro de ``TENNIS/``."""
 
     resolved = Path(path).resolve()
-    if not resolved.is_relative_to(PROJECT_ROOT.resolve()):
-        raise ModelDataError(
-            f"{field_name} debe permanecer dentro de TENNIS/: {resolved}."
-        )
+    if not any(resolved.is_relative_to(base.resolve()) for base in (PROJECT_ROOT, STATE_ROOT)):
+        raise ModelDataError(f"{field_name} debe permanecer dentro de TENNIS/: {resolved}.")
     return resolved
 
 
@@ -158,15 +156,11 @@ def load_feature_source_manifest(
     try:
         resolved = resolve_feature_manifest_path(requested)
     except FeatureArtifactError as exc:
-        raise ModelDataError(
-            f"No se pudo resolver el manifiesto activo {requested}."
-        ) from exc
+        raise ModelDataError(f"No se pudo resolver el manifiesto activo {requested}.") from exc
     try:
         payload = json.loads(resolved.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise ModelDataError(
-            f"No se pudo cargar el manifiesto de features {resolved}."
-        ) from exc
+        raise ModelDataError(f"No se pudo cargar el manifiesto de features {resolved}.") from exc
     if not isinstance(payload, Mapping):
         raise ModelDataError("El manifiesto de features debe ser un objeto JSON.")
     try:
@@ -182,13 +176,8 @@ def load_feature_source_manifest(
         ) from exc
 
     columns = payload.get("model_feature_columns")
-    if (
-        not isinstance(columns, list)
-        or not all(isinstance(column, str) for column in columns)
-    ):
-        raise ModelDataError(
-            "model_feature_columns debe ser una lista íntegra de cadenas."
-        )
+    if not isinstance(columns, list) or not all(isinstance(column, str) for column in columns):
+        raise ModelDataError("model_feature_columns debe ser una lista íntegra de cadenas.")
     typed_columns = tuple(cast(list[str], columns))
     if typed_columns != tuple(MODEL_FEATURE_COLUMNS):
         raise ModelDataError(
@@ -198,32 +187,20 @@ def load_feature_source_manifest(
 
     historical_odds = payload.get("historical_odds_available")
     if not isinstance(historical_odds, bool):
-        raise ModelDataError(
-            "historical_odds_available debe ser booleano en el manifiesto."
-        )
+        raise ModelDataError("historical_odds_available debe ser booleano en el manifiesto.")
     raw_date_policy = payload.get("source_date_policy")
     if not isinstance(raw_date_policy, Mapping):
-        raise ModelDataError(
-            "El manifiesto no declara source_date_policy; reconstruya features."
-        )
+        raise ModelDataError("El manifiesto no declara source_date_policy; reconstruya features.")
     try:
         source_date_policy = SourceDatePolicy.from_mapping(raw_date_policy)
     except SourceDatePolicyError as exc:
-        raise ModelDataError(
-            "source_date_policy del manifiesto no es compatible."
-        ) from exc
+        raise ModelDataError("source_date_policy del manifiesto no es compatible.") from exc
 
     return FeatureSourceManifest(
         path=resolved,
-        fingerprint=_required_string(
-            payload, "fingerprint", context="manifest"
-        ),
-        schema_version=_required_string(
-            payload, "schema_version", context="manifest"
-        ),
-        source_commit=_required_string(
-            payload, "source_commit", context="manifest"
-        ),
+        fingerprint=_required_string(payload, "fingerprint", context="manifest"),
+        schema_version=_required_string(payload, "schema_version", context="manifest"),
+        source_commit=_required_string(payload, "source_commit", context="manifest"),
         historical_odds_available=historical_odds,
         model_feature_columns=typed_columns,
         source_date_policy=source_date_policy,
@@ -241,14 +218,11 @@ def _dataset_entry(
     if not isinstance(datasets, list):
         raise ModelDataError("manifest.datasets debe ser una lista.")
     matches = [
-        item
-        for item in datasets
-        if isinstance(item, Mapping) and item.get("gender") == gender
+        item for item in datasets if isinstance(item, Mapping) and item.get("gender") == gender
     ]
     if len(matches) != 1:
         raise ModelDataError(
-            f"Se esperaba un único dataset para {gender}; encontrados "
-            f"{len(matches)}."
+            f"Se esperaba un único dataset para {gender}; encontrados {len(matches)}."
         )
     return cast(Mapping[str, object], matches[0])
 
@@ -262,43 +236,33 @@ def verify_training_dataset(
     if gender not in {"M", "F"}:
         raise ValueError("gender debe ser exactamente 'M' o 'F'.")
     entry = _dataset_entry(source_manifest, gender)
-    relative_path = _required_string(
-        entry, "output_path", context=f"datasets[{gender}]"
-    )
+    relative_path = _required_string(entry, "output_path", context=f"datasets[{gender}]")
     candidate = (source_manifest.path.parent / relative_path).resolve()
     candidate = _ensure_project_path(candidate, "dataset_path")
     if not candidate.is_relative_to(source_manifest.path.parent.resolve()):
-        raise ModelDataError(
-            f"El Parquet {relative_path!r} sale del directorio del manifiesto."
-        )
+        raise ModelDataError(f"El Parquet {relative_path!r} sale del directorio del manifiesto.")
     expected_size = _required_nonnegative_integer(
         entry, "output_size", context=f"datasets[{gender}]"
     )
     expected_rows = _required_nonnegative_integer(
         entry, "training_rows", context=f"datasets[{gender}]"
     )
-    expected_sha = _required_string(
-        entry, "output_sha256", context=f"datasets[{gender}]"
-    )
+    expected_sha = _required_string(entry, "output_sha256", context=f"datasets[{gender}]")
     if len(expected_sha) != 64 or any(
         character not in "0123456789abcdef" for character in expected_sha
     ):
-        raise ModelDataError(
-            f"datasets[{gender}].output_sha256 no es SHA-256 hexadecimal."
-        )
+        raise ModelDataError(f"datasets[{gender}].output_sha256 no es SHA-256 hexadecimal.")
     if not candidate.is_file():
         raise ModelDataError(f"No existe el dataset declarado: {candidate}.")
     actual_size = candidate.stat().st_size
     if actual_size != expected_size:
         raise ModelDataError(
-            f"Tamaño divergente para {candidate}: "
-            f"{actual_size} != {expected_size}."
+            f"Tamaño divergente para {candidate}: {actual_size} != {expected_size}."
         )
     actual_sha = sha256_file(candidate)
     if actual_sha != expected_sha:
         raise ModelDataError(
-            f"SHA-256 divergente para {candidate}: "
-            f"{actual_sha} != {expected_sha}."
+            f"SHA-256 divergente para {candidate}: {actual_sha} != {expected_sha}."
         )
     try:
         min_date = date.fromisoformat(
@@ -308,9 +272,7 @@ def verify_training_dataset(
             _required_string(entry, "max_date", context=f"datasets[{gender}]")
         )
     except ValueError as exc:
-        raise ModelDataError(
-            f"Rango de fechas inválido para el dataset {gender}."
-        ) from exc
+        raise ModelDataError(f"Rango de fechas inválido para el dataset {gender}.") from exc
 
     return TrainingDatasetMetadata(
         gender=gender,
@@ -349,33 +311,21 @@ def load_training_dataset(
     requested_features = tuple(feature_columns)
     if len(set(requested_features)) != len(requested_features):
         raise ModelDataError("feature_columns contiene nombres duplicados.")
-    unsupported = sorted(
-        set(requested_features).difference(
-            source_manifest.model_feature_columns
-        )
-    )
+    unsupported = sorted(set(requested_features).difference(source_manifest.model_feature_columns))
     if unsupported:
-        raise ModelDataError(
-            f"Features fuera de la allowlist publicada: {unsupported}."
-        )
+        raise ModelDataError(f"Features fuera de la allowlist publicada: {unsupported}.")
     columns = tuple(dict.fromkeys((*REFERENCE_COLUMNS, *requested_features)))
     try:
         frame = pd.read_parquet(metadata.path, columns=list(columns))
     except Exception as exc:
-        raise ModelDataError(
-            f"No se pudo leer el Parquet verificado {metadata.path}."
-        ) from exc
+        raise ModelDataError(f"No se pudo leer el Parquet verificado {metadata.path}.") from exc
     missing = sorted(set(columns).difference(frame.columns))
     if missing:
         raise ModelDataError(f"El Parquet carece de columnas: {missing}.")
     if len(frame) != metadata.rows:
-        raise ModelDataError(
-            f"Filas divergentes para {gender}: {len(frame)} != {metadata.rows}."
-        )
+        raise ModelDataError(f"Filas divergentes para {gender}: {len(frame)} != {metadata.rows}.")
 
-    frame["match_date"] = pd.to_datetime(
-        frame["match_date"], errors="raise"
-    ).dt.normalize()
+    frame["match_date"] = pd.to_datetime(frame["match_date"], errors="raise").dt.normalize()
     if frame["match_date"].isna().any():
         raise ModelDataError("match_date contiene valores nulos.")
     frame["result_available_date"] = pd.to_datetime(
@@ -389,14 +339,10 @@ def load_training_dataset(
         )
     )
     if not frame["result_available_date"].equals(expected_available):
-        raise ModelDataError(
-            "result_available_date no coincide con source_date_policy."
-        )
+        raise ModelDataError("result_available_date no coincide con source_date_policy.")
     observed_genders = set(frame["gender"].dropna().unique())
     if observed_genders != {gender}:
-        raise ModelDataError(
-            f"El dataset {gender} contiene géneros {observed_genders}."
-        )
+        raise ModelDataError(f"El dataset {gender} contiene géneros {observed_genders}.")
     if frame["record_id"].isna().any() or frame["record_id"].duplicated().any():
         raise ModelDataError("record_id debe ser no nulo y único.")
     observed_targets = set(frame["y"].dropna().unique())
@@ -413,9 +359,7 @@ def load_training_dataset(
             f"{observed_min}..{observed_max} != "
             f"{metadata.min_date}..{metadata.max_date}."
         )
-    frame = frame.sort_values(
-        ["match_date", "record_id"], kind="stable"
-    ).reset_index(drop=True)
+    frame = frame.sort_values(["match_date", "record_id"], kind="stable").reset_index(drop=True)
     return LoadedTrainingDataset(
         frame=frame,
         metadata=metadata,

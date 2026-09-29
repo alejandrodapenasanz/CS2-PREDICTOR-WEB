@@ -90,6 +90,7 @@ feature_thresholds:
   event_metadata: 300
   player_snapshots: 200
   rankings: 200
+  match_rankings: 200  # Dated match badges, causal closed matches (not captures).
   roster: 200
   mov_rating: 800
   team_trueskill: 800

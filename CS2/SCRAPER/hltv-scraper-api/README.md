@@ -85,6 +85,22 @@ Run the optional API from the component directory:
 
 ## Offline tests
 
+The upcoming-team parser preserves positive team IDs from the exact match
+wrapper's `team1`/`team2` attributes. Missing/provisional IDs remain null; names
+alone are not converted into identities. This keeps the listing usable when a
+match-detail request fails. `tests/test_agenda_parser.py` covers real IDs and
+empty/zero/negative/TBD attributes without network access. The owning CS2
+pipeline additionally validates listing coverage and its public handoff.
+
+The visible `grab_cf.py` helper supports `--url` (HLTV HTTPS only) and an
+optional `--capture-output` private JSON handoff. A cookie is not sufficient:
+the exact requested page must have loaded and contain no challenge markers.
+The handoff includes HTML, URL, capture time and SHA-256, never cookies. The
+pipeline validates and consumes it once, then removes the temporary file.
+This avoids discarding a successful browser response when another HTTP
+transport still receives 403. One browser renewal per run and rate limits
+remain in force; an unresolved challenge remains a failure, not fresh data.
+
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\test_dependency_contract.py tests\test_routes.py -q
 ```

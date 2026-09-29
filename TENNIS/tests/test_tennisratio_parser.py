@@ -66,6 +66,51 @@ def test_agenda_fails_if_structured_utc_evidence_disappears() -> None:
         )
 
 
+def test_national_team_keeps_source_evidence_without_inventing_model_level(caplog) -> None:
+    """A known team-event label cannot abort acquisition or imply ATP/BO3/BO5."""
+
+    from datetime import date
+
+    from src.features.match_format import resolve_match_format
+
+    html = (FIXTURES / "atp-matches.html").read_text(encoding="utf-8")
+    frame = parse_agenda_html(
+        html.replace('data-level="ATP"', 'data-level="National Team"'),
+        gender="M",
+        source_url="https://www.tennisratio.com/atp-matches.html",
+        retrieved_at_utc=OBSERVED,
+    )
+    assert len(frame) == 2
+    assert frame["tour_level"].isna().all()
+    assert frame["tournament_level_source"].tolist() == ["National Team"] * 2
+    assert frame["surface"].tolist() == ["Hard"] * 2
+    assert "tour_level ausente" in caplog.text
+    resolved = resolve_match_format(
+        match_date=date(2026, 8, 23),
+        captured_at_utc=OBSERVED,
+        gender="M",
+        source_family="tennisratio",
+        tournament_level="National Team",
+        tournament="Test Open",
+        round_raw="F",
+        round_evidence="match",
+    )
+    assert resolved.best_of is None
+
+
+def test_uninspected_level_still_fails_closed() -> None:
+    """Recognizing National Team does not relax validation of arbitrary source drift."""
+
+    html = (FIXTURES / "atp-matches.html").read_text(encoding="utf-8")
+    with pytest.raises(TennisRatioSchemaError, match="Unsupported tournament level"):
+        parse_agenda_html(
+            html.replace('data-level="ATP"', 'data-level="Unknown New Format"'),
+            gender="M",
+            source_url="https://www.tennisratio.com/atp-matches.html",
+            retrieved_at_utc=OBSERVED,
+        )
+
+
 def test_agenda_preserves_tbd_time_without_inventing_intraday_order() -> None:
     """A source ``data-utc=None`` keeps the real date and a nullable time."""
 

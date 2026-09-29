@@ -27,7 +27,15 @@ QUARANTINE_MANIFEST_VERSION = 2
 QUARANTINE_DIRECTORY = ".retention-quarantine"
 DEFAULT_REGISTRY_KEEP = 0
 DEFAULT_RUNS_KEEP = 2
-DEFAULT_APPROVAL_MARKER = Path(__file__).resolve().parents[1] / "artifacts" / "registry" / ".retention-approved.json"
+DEFAULT_APPROVAL_MARKER = (
+    Path(__file__).resolve().parents[3]
+    / "VAULT"
+    / "CS2"
+    / "MODEL"
+    / "artifacts"
+    / "registry"
+    / ".retention-approved.json"
+)
 
 RetentionKind = Literal["registry", "runs"]
 

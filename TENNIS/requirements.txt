@@ -4,7 +4,9 @@
 beautifulsoup4>=4.15,<4.16
 curl-cffi>=0.15,<0.16
 joblib>=1.5,<1.6
-lightgbm>=4.6,<5
+# Official 4.6.0 passes the Windows binary smoke with Smart App Control enabled;
+# 4.7.0 is blocked on this host. Existing model artifacts are never rewritten.
+lightgbm==4.6.0
 lxml>=6.1,<7
 matplotlib>=3.11,<3.12
 # Las wheels mypyc para CPython 3.13 son rechazadas por Application Control

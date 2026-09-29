@@ -38,11 +38,12 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 MODEL_DIR = ROOT / "MODEL"
 sys.path.insert(0, str(MODEL_DIR))
-DAILY_ROOT = ROOT / "PIPELINE"
+DAILY_ROOT = STATE_ROOT / "PIPELINE"
 
 from cs2model import dataio
 from cs2model.features import ChronologicalState, _period_index
@@ -53,6 +54,7 @@ from PIPELINE.opportunity import (
     POLICY_VERSION as OPPORTUNITY_POLICY_VERSION,
 )
 from BBDD.backup_retention import (
+    DEFAULT_CONFIG as BACKUP_RETENTION_CONFIG,
     BackupAutomaticResult,
     FileState,
     backup_operation_lock,
@@ -62,7 +64,7 @@ from BBDD.backup_retention import (
 
 SCHEMA = ROOT / "BBDD" / "cs2_prediction_schema.sql"
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -71,10 +73,10 @@ DEFAULT_RAW = (
     / "history_10000_2026-06-28"
     / "results_all.json"
 )
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_MASTER = ROOT / "PIPELINE" / "master" / "matches.json"
-DEFAULT_ROSTER_HISTORY = ROOT / "PIPELINE" / "master" / "roster_history.json"
-DEFAULT_BACKUP_DIR = ROOT / "BBDD" / "backups"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_MASTER = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
+DEFAULT_ROSTER_HISTORY = STATE_ROOT / "PIPELINE" / "master" / "roster_history.json"
+DEFAULT_BACKUP_DIR = STATE_ROOT / "BBDD" / "backups"
 _MIRROR_BACKUP_ENV = os.environ.get("CS2_BACKUP_MIRROR_DIR", "").strip()
 DEFAULT_MIRROR_BACKUP_DIR: Path | None = Path(_MIRROR_BACKUP_ENV).expanduser() if _MIRROR_BACKUP_ENV else None
 
@@ -123,9 +125,7 @@ ODDS_LIVE_COLUMNS: dict[str, str] = {
 PREDICTION_LIVE_COLUMNS: dict[str, str] = {
     "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
     "prediction_architecture": "TEXT",
-    "opening_odds_recovered": (
-        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
-    ),
+    "opening_odds_recovered": ("INTEGER CHECK (opening_odds_recovered IN (0,1))"),
     "opening_odds_captured_at_utc": "TEXT",
     "ensemble_disagreement": (
         "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
@@ -152,9 +152,7 @@ PREDICTION_LIVE_COLUMNS: dict[str, str] = {
 PREDICTION_LEDGER_LIVE_COLUMNS: dict[str, str] = {
     "prediction_regime": "TEXT CHECK (prediction_regime IN ('odds','no_odds'))",
     "prediction_architecture": "TEXT",
-    "opening_odds_recovered": (
-        "INTEGER CHECK (opening_odds_recovered IN (0,1))"
-    ),
+    "opening_odds_recovered": ("INTEGER CHECK (opening_odds_recovered IN (0,1))"),
     "opening_odds_captured_at_utc": "TEXT",
     "ensemble_disagreement": (
         "REAL CHECK (ensemble_disagreement IS NULL OR (ensemble_disagreement >= 0 AND ensemble_disagreement <= 0.5))"
@@ -737,7 +735,7 @@ def insert_roster_history(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int])
     roster_history = json.loads(DEFAULT_ROSTER_HISTORY.read_text(encoding="utf-8"))
     player_cache: dict[str, int] = {}
     inserted = 0
-    source_file = str(DEFAULT_ROSTER_HISTORY.relative_to(ROOT))
+    source_file = source_name(DEFAULT_ROSTER_HISTORY)
 
     for team_hltv_id, entry in roster_history.items():
         team_hltv_id = str(entry.get("team_id") or team_hltv_id or "").strip()
@@ -1158,6 +1156,8 @@ def insert_match_analytics_snapshots(
     match_id_map: dict[str, int],
     team_ids: dict[str, int],
     team_ids_by_hltv: dict[str, int],
+    *,
+    update_events: bool = True,
 ) -> dict[str, int]:
     counts = {"analytics_snapshot_rows": 0, "analytics_map_stats_rows": 0, "analytics_map_handicap_rows": 0}
     for path in sorted((run_dir / "analytics").glob("*.json")):
@@ -1174,7 +1174,7 @@ def insert_match_analytics_snapshots(
         team2 = (series.get("team2") or {}).get("team")
         source_file = payload.get("source_file") or source_name(path)
         event_row = cur.execute("SELECT event_id FROM matches WHERE match_id=?", (match_id,)).fetchone()
-        if event_row:
+        if event_row and update_events:
             cur.execute(
                 """
                 UPDATE events
@@ -1272,12 +1272,17 @@ def insert_match_analytics_snapshots(
     return counts
 
 
-def insert_team_rankings(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int]) -> int:
+def insert_team_rankings(
+    cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int], *, run_dirs: list[Path] | None = None
+) -> int:
     runs_dir = DAILY_ROOT / "runs"
-    if not runs_dir.exists():
+    if run_dirs is None and not runs_dir.exists():
         return 0
     inserted = 0
-    for path in sorted(runs_dir.glob("*/rankings/*.json")):
+    paths = runs_dir.glob("*/rankings/*.json") if run_dirs is None else (
+        path for run in run_dirs for path in (run / "rankings").glob("*.json")
+    )
+    for path in sorted(paths):
         payload = json.loads(path.read_text(encoding="utf-8"))
         run_id = path.parents[1].name
         ranking_type = payload.get("ranking_type") or path.stem
@@ -1305,6 +1310,8 @@ def insert_team_rankings(cur: sqlite3.Cursor, team_ids_by_hltv: dict[str, int]) 
 
 
 def source_name(path: Path) -> str:
+    if path.is_relative_to(STATE_ROOT):
+        return str(path.relative_to(STATE_ROOT))
     try:
         return str(path.relative_to(ROOT))
     except ValueError:
@@ -1341,14 +1348,15 @@ def insert_raw_snapshot(
     return cur.rowcount
 
 
-def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
-    runs_dir = ROOT / "PIPELINE" / "runs"
-    if not runs_dir.exists():
+def insert_daily_archives(cur: sqlite3.Cursor, *, run_dirs: list[Path] | None = None) -> dict[str, int]:
+    runs_dir = STATE_ROOT / "PIPELINE" / "runs"
+    if run_dirs is None and not runs_dir.exists():
         return {"raw_snapshots_rows": 0, "player_stat_snapshots_rows": 0}
 
     raw_count = 0
     player_count = 0
-    for run_dir in sorted(path for path in runs_dir.iterdir() if path.is_dir()):
+    selected_runs = run_dirs if run_dirs is not None else [path for path in runs_dir.iterdir() if path.is_dir()]
+    for run_dir in sorted(selected_runs):
         run_id = run_dir.name
         manifest_path = run_dir / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.exists() else {}
@@ -1473,7 +1481,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 run_id=run_id,
                 path=team_profiles_path,
                 payload=item,
-                captured_at=run_captured_at,
+                captured_at=item.get("captured_at") or run_captured_at,
                 hltv_team_id=team_id,
                 source_file=f"{source_name(team_profiles_path)}#{team_id}",
             )
@@ -1486,7 +1494,7 @@ def insert_daily_archives(cur: sqlite3.Cursor) -> dict[str, int]:
                 run_id=run_id,
                 path=path,
                 payload=payload,
-                captured_at=run_captured_at,
+                captured_at=payload.get("captured_at") or run_captured_at,
             )
             year = parse_int(payload.get("year"))
             for comparison in payload.get("results") or []:
@@ -1640,8 +1648,8 @@ def _backup_database_once(
         shutil.copy2(target, mirror_target)
         for source in [
             DEFAULT_MASTER,
-            ROOT / "PIPELINE" / "master" / "manifest.json",
-            ROOT / "PIPELINE" / "master" / "roster_history.json",
+            STATE_ROOT / "PIPELINE" / "master" / "manifest.json",
+            STATE_ROOT / "PIPELINE" / "master" / "roster_history.json",
         ]:
             if source.exists():
                 shutil.copy2(source, mirror_dir / source.name)
@@ -1651,7 +1659,11 @@ def _backup_database_once(
         decision = run_automatic_backup_retention(
             bbdd_dir,
             required_keep=target,
-            config_path=bbdd_dir / "backup_retention.json",
+            config_path=(
+                BACKUP_RETENTION_CONFIG
+                if bbdd_dir.resolve() == (STATE_ROOT / "BBDD").resolve()
+                else bbdd_dir / "backup_retention.json"
+            ),
             _held_lock=held_lock,
         )
         result["backup_retention"] = _automatic_retention_summary(decision)

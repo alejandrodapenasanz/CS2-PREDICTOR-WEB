@@ -18,6 +18,7 @@ import sys
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -163,8 +164,8 @@ def ingest_archives(connection: sqlite3.Connection, runs: Path, *, apply: bool =
 def main() -> int:
     """Ingest archived captures via the dedicated BBDD API."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, default=ROOT / "BBDD/cs2.db")
-    parser.add_argument("--runs", type=Path, default=ROOT / "PIPELINE/runs")
+    parser.add_argument("--db", type=Path, default=STATE_ROOT / "BBDD/cs2.db")
+    parser.add_argument("--runs", type=Path, default=STATE_ROOT / "PIPELINE/runs")
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()

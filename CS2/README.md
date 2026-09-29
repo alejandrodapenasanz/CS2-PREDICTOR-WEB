@@ -1,5 +1,13 @@
 # CS2 Predictor
 
+Recuperación automática de resultados y mapas, sin reentrenar ni reescribir
+predicciones: [contrato, presupuestos y auditoría](../DOCS/recuperacion_resultados.md).
+
+Estado privado portable: BBDD, modelos, runs, sesiones y entornos viven en
+`../VAULT/CS2/`. El código sigue aquí. `start.ps1` prepara las rutas y entornos
+automáticamente; las instrucciones antiguas de rutas de datos se interpretan
+bajo VAULT. Véase [contexto técnico y contrato VAULT](../DOCS/contexto.md).
+
 Sistema de **predicción pre-partido** de Counter-Strike 2 a partir de datos de
 HLTV, orientado a **probabilidades bien calibradas** (no solo "quién gana"):
 cuando el modelo dice 70%, el favorito debe ganar ~70% de las veces. Proyecto
@@ -269,6 +277,36 @@ exclusivamente el lock con hashes y valida tanto los pins como `pip check`.
 Las reparaciones se preparan primero en `.venv.build`; solo tras validarlas se
 intercambian por el entorno activo, conservando el anterior en `.venv.previous`
 para restaurarlo automáticamente si el swap falla.
+
+Los probes de imports conservan el traceback completo en consola y JSONL,
+también bajo Windows PowerShell 5 con `ErrorActionPreference=Stop`: escribir
+en stderr no equivale a un fallo; decide el código de salida del proceso.
+Una dependencia ausente permite la reparación habitual desde el lock. Un
+bloqueo explícito de Windows Application Control (`WinError 4551/577`) detiene
+el arranque **antes** de reconstruir o intercambiar entornos: reinstalar el
+mismo binario no autoriza su carga. Requiere revisión de la política por el
+operador/administrador, sin desactivar protecciones desde el proyecto.
+El registro `Microsoft-Windows-CodeIntegrity/Operational` identifica el archivo
+denegado. El 26/09/2026 fue
+`VAULT/CS2/.venv/Lib/site-packages/lightgbm/bin/lib_lightgbm.dll`, también
+bloqueado en el entorno independiente de TENNIS. No se omiten imports ni se
+sustituyen modelos para aparentar un arranque correcto; BBDD y producción se
+conservan intactas.
+En ese equipo el bloqueo procede de **Smart App Control**, no de una
+cuarentena de Defender ni de permisos NTFS. Microsoft indica que Smart App
+Control [no permite excepciones por aplicación](https://support.microsoft.com/en-us/windows/security/threat-malware-protection/smart-app-control-frequently-asked-questions).
+Por tanto, no se promete arreglarlo con `Unblock-File`, permisos de administrador
+o una reinstalación. Obtener un binario de proveedor aceptado/firmado, trasladar
+la ejecución a otro entorno o cambiar la configuración de seguridad son
+decisiones separadas del arreglo del launcher; no se realizan automáticamente.
+
+Reparación validada el 26/09/2026: se fija **LightGBM 4.6.0 oficial de PyPI**
+en requirements y lock, sin cambiar el resto de versiones. Su DLL carga con
+Smart App Control **activado**; es además la versión declarada en el modelo
+vivo de CS2. Los artefactos entrenados no se convierten ni se sustituyen.
+El mismo pin se mantiene en TENNIS, con su lock y validación independientes.
+Una prueba de contrato impide volver a instalar 4.7.0 sin revisar este pin.
+
 Para aprovisionarlo manualmente desde `CS2/`:
 
 ```powershell
@@ -323,8 +361,9 @@ SQLite va incluido en Python.
 
 **Scraper por tiers (anti-bloqueo Cloudflare).** El scraper usa
 [Scrapling](https://scrapling.readthedocs.io): Tier 1 HTTP con impersonation TLS/JA3
-(`curl_cffi`) y Tier 2 navegador stealth que resuelve el challenge, con
-`requests`/`cloudscraper` como transporte HTTP incluido en el lock. `start.ps1`
+(`curl_cffi`) y, ante challenge/403, renovación visible directa con `grab_cf.py`,
+sin abrir primero la ventana Stealth. `requests`/`cloudscraper` permanecen como
+transporte HTTP incluido en el lock. `start.ps1`
 exige **CPython 3.13 exacto**, instala `scrapling[fetchers]` desde el lock y
 aprovisiona sus navegadores. Si el entorno no se puede validar, falla de forma
 explícita: no degrada a otra versión de Python ni instala dependencias sueltas.
@@ -362,9 +401,26 @@ producción. `-RollbackModel` restaura el
 Cada ejecución de `start.ps1` crea un transcript completo en `PIPELINE/logs/start_*.log`
 y muestra cada comando con hora, exit code y duración. Al cerrarse, rota como
 una unidad el transcript, JSONL, tiempos y decisiones, y conserva solo la
-ejecución actual y la anterior. Si Cloudflare bloquea el
-navegador stealth durante demasiado tiempo, el pipeline lanza automáticamente
-`grab_cf.py` para abrir una ventana visible y renovar `cf_clearance`.
+ejecución actual y la anterior. Ante un challenge/403, el pipeline lanza
+directamente `grab_cf.py` sobre la URL bloqueada, sin esperar a que se cierre o
+falle Stealth. Es la ventana visible de comprobación de Cloudflare; si el sitio
+pide intervención, debe completarla el operador. Se mantiene un solo intento de
+renovación por run; si no se consigue HTML válido, la URL queda pendiente.
+Desde el 26/09/2026, el helper espera la página real de la URL exacta, no solo
+la aparición de una cookie. Entrega su HTML con URL, fecha de captura y SHA-256
+por un fichero temporal privado que se elimina después de consumirlo. El
+pipeline reutiliza ese HTML sin repetir una petición HTTP que podría seguir
+bloqueada; las peticiones Scrapling con sesión conservan el User-Agent del
+navegador. La cartelera se adquiere antes de recuperar detalles históricos.
+Una URL suprimida o un presupuesto agotado no lanzan después el fallback
+Scrapy de 600 segundos: se registra el fallo y se conserva la publicación
+anterior, sin simular una cartelera actualizada ni vaciarla.
+Los 429 y errores de servidor sin challenge conservan su backoff, no abren esa
+ventana por defecto. `HLTV_USE_SCRAPLING=1` mantiene HTTP Scrapling y
+`HLTV_AUTO_REFRESH_CF_ON_BLOCK=1` la renovación. `HLTV_SOLVE_CLOUDFLARE=0` es
+ahora el default tanto en Python como en `pipeline.config.psd1`; ponerlo a `1`
+explícitamente vuelve al navegador Stealth legado. Un proceso que ya está en
+marcha conserva su configuración hasta el siguiente arranque.
 Con `-Retrain`, el trainer también recibe `--verbose` y muestra folds, estudios
 Optuna y pesos; `-Quiet` conserva la salida resumida.
 
@@ -720,3 +776,102 @@ La opción `--opponent-adjusted` contrasta el rendimiento de pistols por encima 
 lo esperado según el Elo del rival. Mantiene la puerta de promoción y exige
 además muestra nueva tras el periodo ya examinado. Ver
 [fórmula, prueba temporal y ejecución](DOCS/PISTOL_OPPONENTS.md).
+
+## Recuperación de cartelera web (25/09/2026)
+
+Un fallo de `/matches` y de su fallback ya no se devuelve como una lista vacía:
+`PIPELINE/start.py` registra `steps.upcoming.status=failed`, termina con error y
+no mueve el puntero al run publicado. Descargar resultados recientes no prueba
+que la cartelera se haya descargado correctamente. `--allow-empty-scrape` no
+oculta este fallo de adquisición; `-AllowOfflineFallback` conserva su significado
+explícito en el launcher.
+
+`WEB/build_web.py` valida el handoff antes de publicar. Si el run está incompleto,
+le faltan predicciones o consta un fallo de cartelera (incluidos los logs de runs
+anteriores a esta corrección), selecciona el último run anterior completo. La
+salida indica `publication.status=fallback`, conserva la fecha real de captura
+y muestra un aviso visible. El filtro temporal sigue excluyendo partidos ya
+pasados/finalizados. Una cartelera vacía obtenida correctamente no recupera
+partidos antiguos. Si no existe ningún handoff válido, la generación falla y
+conserva el `data.js` anterior; su reemplazo es atómico.
+
+No se consultan ni reinician los IDs ya enviados a Telegram: «0 nuevas Best
+Opportunities» solo describe el informe incremental, nunca la cartelera web.
+No se recalculan probabilidades históricas ni se modifica `prediction_ledger`.
+La frescura/fallback afecta a la fiabilidad mostrada conforme a la política
+existente del dashboard; las probabilidades almacenadas no se reescriben.
+El payload de tenis se genera independientemente, incluso si CS2 usa fallback.
+
+### Cobertura completa e identidades de la cartelera (27/09/2026)
+
+La descarga de la mañana contenía 71 partidos, pero el enriquecimiento solo
+publicaba 2: al fallar las páginas individuales, el fallback conservaba nombres
+sin extraer los IDs que ya estaban en el HTML de `/matches`. No fue un borrado
+del histórico ni la deduplicación de Telegram.
+
+- Ambos parsers conservan los IDs positivos de `team1`/`team2` del contenedor
+  exacto `data-match-id`. Se comprueba que el parser representa todos los
+  partidos identificados en el HTML; una respuesta parcial no se publica como
+  completa.
+- `PIPELINE/agenda_contract.py` también permite recuperar IDs de un run antiguo
+  **en memoria**, desde su HTML original con URL, SHA-256 y captura verificados.
+  Exige coincidencia exacta de partido, lado y nombre, y captura no posterior al
+  snapshot. No inventa equipos ni añade ratings/stats futuros; no reescribe los
+  snapshots originales ni `prediction_ledger`.
+- Si no se pudo descargar el detalle, se marca `MATCH_DETAIL_UNAVAILABLE`, se
+  limita la fiabilidad del input a 0,54 (baja) y el nivel de incertidumbre a
+  `low`. Esto no modifica la probabilidad pura del modelo. Un participante
+  genuinamente pendiente queda visible **sin predicción**, nunca con 50 % o un
+  favorito ficticio, y no entra en Best Opportunity.
+- El handoff `cs2-agenda-coverage-v1` registra cada ID adquirido en exactamente
+  una salida: `predictions_enriched.json`, `agenda_unavailable.json`, o exclusión
+  explícita por iniciado/finalizado. `publication_coverage.json` se escribe al
+  final, con los SHA-256 de ambos artefactos. Si falta una fila o no coincide un
+  hash, la publicación falla y la web conserva/recupera un lote válido con aviso.
+  Una cartelera solo con participantes pendientes, o ya completamente iniciada,
+  sigue siendo válida si todos los IDs están justificados.
+
+Pruebas: `test_agenda_contract.py`, `test_web_publication_recovery.py` y
+`test_web_unavailable_agenda.py` (ejecuta el renderer JS real si hay Node).
+La comprobación de cobertura detecta pérdidas internas respecto al HTML
+descargado; no demuestra que HLTV haya publicado todos los partidos existentes.
+
+### Recuperación de incidencias HLTV (27/09/2026)
+
+Desde la raíz: `python main.py`, opción **1**, o
+`python scripts/soluciona_errores.py`. `--solo-diagnostico` no descarga ni escribe
+en SQLite; `--limite N` limita voluntariamente el lote (por defecto `0`: todas
+las incidencias elegibles, sin el antiguo límite de 50).
+
+El entrypoint de dominio `PIPELINE/repair_fetch_errors.py` trata los estados
+`partial`, `blocked` y `error` de las siete entidades: `match_detail`,
+`match_assets`, `match_analytics`, `player_stats`, `team_profile`, `ranking_hltv`
+y `ranking_valve`. Comprueba integridad SQLite y las pausas de cada entidad.
+`not_found` (HLTV sin muestra) y datos caducados sin error no se convierten en
+incidencias artificiales. No restaura BBDD ni borra estados para ocultarlos.
+
+Las referencias de jugadores/equipos se recuperan por ID exacto y URL HLTV
+verificada desde snapshots previos, perfiles, alineaciones y estadísticas de
+mapas (`match_assets.player_link`). Esto permite recuperar una primera descarga
+fallida aunque todavía no haya `player_stat_snapshots`. La procedencia queda en
+el plan; no se inventan URLs a partir de apodos. Se usa el cliente y los parsers
+de producción, conservando límites, sesión y protección ante WAF. Un fallo de
+parseo individual no impide tratar las demás entidades. Un bloqueo persistente,
+cancelación o presupuesto agotado detiene el lote y enumera lo no intentado;
+no se reinicia un cliente para eludir sus límites. El presupuesto global es de
+150 peticiones como máximo por ejecución (la variable
+`HLTV_MAX_HTTP_REQUESTS_PER_RUN` puede reducirlo).
+
+La ingesta es aditiva mediante `BBDD`, con la **captura real actual**, nunca la
+fecha del partido antiguo. Una defensa SQL impide escribir en el ledger,
+actualizar tablas históricas o borrar filas. No se reentrena ni se recalculan
+predicciones. Un lock común con `CS2/start.ps1` evita ejecuciones concurrentes.
+Al terminar se regenera la web; resultados, motivos de aplazamiento y pendientes
+se guardan en `VAULT/CS2/PIPELINE/maintenance/` (`latest.json` apunta al resumen).
+Salida `0`: sin incidencias; `2`: quedan pendientes explícitos; `1`: fallo
+operativo; `130`: cancelación. Que el script cubra todas las categorías no
+garantiza que HLTV publique todos los campos o permita cada petición.
+
+Pruebas offline: `TESTS/test_fetch_recovery.py` cubre las siete entidades,
+referencias sin descarga previa, IDs ajenos, lotes de más de 50, pausas,
+presupuesto, WAF, disponibilidad real, idempotencia y protección del ledger.

@@ -199,6 +199,8 @@ def _terminal_explorer_row(row: dict[str, object]) -> bool:
 def _load_pending_official_matches(
     store: OperationsStore,
     pending_date: date,
+    *,
+    include_settled: bool = False,
 ) -> tuple[_OfficialMatch, ...] | None:
     """Carga partidos oficiales sin liquidar o marca el lote incompleto."""
 
@@ -219,10 +221,10 @@ def _load_pending_official_matches(
         LEFT JOIN settlements AS s
             ON s.source_match_id = m.source_match_id
         WHERE m.match_date = ?
-          AND s.source_match_id IS NULL
+          AND (s.source_match_id IS NULL OR ?)
         ORDER BY m.source_match_id
         """,
-        (pending_date.isoformat(),),
+        (pending_date.isoformat(), int(include_settled)),
     ).fetchall()
     if not rows:
         return None
@@ -248,6 +250,8 @@ def _load_pending_official_matches(
             or not player_b_slug
             or player_a_slug == player_b_slug
         ):
+            if include_settled:
+                continue
             return None
         matches.append(
             _OfficialMatch(
@@ -431,6 +435,10 @@ def _mapped_explorer_observation(
             "player_2_slug": official.player_b_slug,
             "player_1_sets_won": official_first_sets,
             "player_2_sets_won": official_second_sets,
+            "score_orientation": "subject",
+            "score_subject_slug": official.player_a_slug
+            if player_a_is_source_first
+            else official.player_b_slug,
             "winner_side": official_winner_side,
             "winner_slug": official_winner_slug,
             "result_evidence": "tennis_explorer_identity_mapped_terminal_result",
@@ -455,6 +463,7 @@ def build_tennis_explorer_mapped_result_snapshot(
     snapshot: TennisExplorerResultSnapshot,
     *,
     mapping_database_path: Path = PLAYER_MAPPING_DATABASE_PATH,
+    include_settled: bool = False,
 ) -> TennisExplorerMappedResultSnapshot:
     """Cruza el fallback con partidos oficiales sin usar nombres aproximados.
 
@@ -465,7 +474,10 @@ def build_tennis_explorer_mapped_result_snapshot(
     considera ambigua y no produce observaciÃ³n ni settlement.
     """
 
-    official_matches = _load_pending_official_matches(store, snapshot.match_date) or ()
+    official_matches = (
+        _load_pending_official_matches(store, snapshot.match_date, include_settled=include_settled)
+        or ()
+    )
     raw_rows = [dict(row) for row in snapshot.matches.to_dict(orient="records")]
     terminal_rows = [row for row in raw_rows if _terminal_explorer_row(row)]
     raw_by_id: dict[str, list[dict[str, object]]] = defaultdict(list)
@@ -694,6 +706,7 @@ def build_tennisratio_result_snapshot(
     pending_date: date,
     as_of_date: date,
     loader: MappedResultLoader = load_mapped_results,
+    include_settled: bool = False,
 ) -> TennisRatioResultSnapshot | None:
     """Construye un lote causal e inequívoco para conciliación.
 
@@ -710,8 +723,10 @@ def build_tennisratio_result_snapshot(
         raise ValueError("pending_date debe ser estrictamente anterior a as_of_date.")
     if pending_date == date.min:
         return None
-    official_matches = _load_pending_official_matches(store, pending_date)
-    if official_matches is None:
+    official_matches = _load_pending_official_matches(
+        store, pending_date, include_settled=include_settled
+    )
+    if not official_matches:
         return None
 
     cutoff = pending_date - timedelta(days=1)
@@ -801,7 +816,7 @@ def build_tennisratio_result_snapshot(
     tennisratio_owned_agenda = all(
         official.source_match_id.startswith("tennisratio:") for official in official_matches
     )
-    if not complete and not tennisratio_owned_agenda:
+    if not complete and not tennisratio_owned_agenda and not include_settled:
         return None
     observations.sort(key=lambda row: str(row["source_match_id"]))
     retrieved_candidates = [

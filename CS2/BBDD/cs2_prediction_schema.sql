@@ -422,6 +422,27 @@ CREATE TABLE player_stat_snapshots (
     UNIQUE (hltv_player_id, run_id, source_file, time_filter)
 );
 
+-- BEGIN MATCH RANKINGS V1
+CREATE TABLE IF NOT EXISTS match_team_ranking_observations (
+    observation_id INTEGER PRIMARY KEY,
+    match_id INTEGER REFERENCES matches(match_id),
+    team_id INTEGER REFERENCES teams(team_id),
+    hltv_match_id TEXT NOT NULL,
+    hltv_team_id TEXT NOT NULL,
+    ranking_type TEXT NOT NULL CHECK (ranking_type IN ('hltv','valve')),
+    position INTEGER NOT NULL CHECK (position > 0),
+    ranking_date TEXT NOT NULL,
+    captured_at_utc TEXT NOT NULL,
+    ranking_url TEXT NOT NULL,
+    match_url TEXT NOT NULL,
+    source_file TEXT NOT NULL,
+    source_sha256 TEXT NOT NULL,
+    UNIQUE (hltv_match_id,hltv_team_id,ranking_type,source_sha256,captured_at_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_match_ranking_asof
+    ON match_team_ranking_observations(hltv_team_id, ranking_type, ranking_date, captured_at_utc);
+-- END MATCH RANKINGS V1
+
 CREATE TABLE team_ranking_snapshots (
     team_ranking_snapshot_id INTEGER PRIMARY KEY,
     team_id         INTEGER REFERENCES teams(team_id),

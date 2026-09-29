@@ -584,6 +584,30 @@ def read_model_pointer(registry_dir: str | Path, pointer_name: Literal["latest",
     artifact_value = payload.get("artifact")
     if artifact_value:
         artifact_path = Path(str(artifact_value))
+        # Legacy absolute pointers remain byte-identical in VAULT. Accept only
+        # the exact recorded origin + canonical version, with migration hash proof.
+        if root.parent.parent.parent.name == "CS2" and root.parent.parent.parent.parent.name == "VAULT":
+            vault = root.parent.parent.parent.parent
+            journal = vault / "migration.json"
+            if journal.is_file():
+                migration = json.loads(journal.read_text(encoding="utf-8"))
+                relative = Path("CS2/MODEL/artifacts/registry") / reference.version / "model.pkl"
+                legacy = Path(migration["origin_root"]) / relative
+                legacy_vault = Path(migration["origin_root"]) / "VAULT" / relative
+                if artifact_path in (legacy, legacy_vault):
+                    evidence = next(
+                        (
+                            entry
+                            for entry in migration.get("entries", [])
+                            if entry.get("status") == "moved_verified"
+                            and relative.is_relative_to(Path(entry["destination"]))
+                        ),
+                        None,
+                    )
+                    key = relative.relative_to(Path(evidence["destination"])).as_posix() if evidence else ""
+                    if evidence is None or evidence["sha256"].get(key) != reference.sha256:
+                        raise PromotionValidationError("relocated pointer lacks matching migration hash evidence")
+                    artifact_path = reference.artifact
         if not artifact_path.is_absolute():
             artifact_path = root / artifact_path
         try:

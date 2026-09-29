@@ -17,6 +17,7 @@ import errno
 import gzip
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -29,6 +30,7 @@ import pandas as pd
 import requests
 from unidecode import unidecode
 
+from ..config import STATE_ROOT, relocated_data_path
 from .client import TennisRatioClient
 from .parser import (
     parse_agenda_html,
@@ -63,9 +65,9 @@ from .types import (
 
 
 PROJECT_ROOT: Final[Path] = Path(__file__).resolve().parents[2]
-DEFAULT_RAW_DIR: Final[Path] = PROJECT_ROOT / "data" / "raw" / "tennisratio"
-DEFAULT_DB_PATH: Final[Path] = PROJECT_ROOT / "data" / "processed" / "tennisratio.sqlite3"
-DEFAULT_SACKMANN_RAW_DIR: Final[Path] = PROJECT_ROOT / "data" / "raw"
+DEFAULT_RAW_DIR: Final[Path] = STATE_ROOT / "data" / "raw" / "tennisratio"
+DEFAULT_DB_PATH: Final[Path] = STATE_ROOT / "data" / "processed" / "tennisratio.sqlite3"
+DEFAULT_SACKMANN_RAW_DIR: Final[Path] = STATE_ROOT / "data" / "raw"
 LAST_GOOD_FILENAME: Final[str] = "last_good.json"
 RAW_RETENTION: Final[int] = 2
 
@@ -228,6 +230,17 @@ def refresh_tennisratio(
             delta_entries,
             visible_entries=visible_entries,
             max_profiles=max_profiles,
+            attempted_at=store.profile_attempt_times(),
+        )
+        logging.getLogger(__name__).info(
+            "Seleccion: %s perfiles de cartelera primero + %s adicionales; "
+            "%s deltas aplazados (no se borra historico).",
+            len(visible_entries),
+            len(selected) - len(visible_entries),
+            len(
+                {entry.source_url for entry in delta_entries}
+                - {entry.source_url for entry in selected}
+            ),
         )
         mapper = _SackmannMapper(sackmann_root)
         identity_remaps = _stage_identity_remaps(
@@ -243,6 +256,9 @@ def refresh_tennisratio(
         unchanged = 0
         profile_manifest: list[dict[str, object]] = []
         for index, entry in enumerate(selected):
+            logging.getLogger(__name__).info(
+                "Perfil %s/%s: %s", index + 1, len(selected), entry.profile_slug
+            )
             attempted += 1
             previous_good = store.latest_good_profile_snapshot(entry.source_player_key)
             profile_payload = None
@@ -729,20 +745,24 @@ def _select_profiles(
     *,
     visible_entries: Mapping[str, SitemapPlayer],
     max_profiles: int | None,
+    attempted_at: Mapping[str, str] | None = None,
 ) -> list[SitemapPlayer]:
     """Keep every visible player, then fill deterministic sitemap delta slots."""
 
-    selected = dict(visible_entries)
+    attempts = attempted_at or {}
+    selected = dict(sorted(visible_entries.items()))
     extras = [
         entry
-        for entry in sorted(delta_entries, key=lambda item: item.source_url)
+        for entry in sorted(
+            delta_entries, key=lambda item: (attempts.get(item.source_url, ""), item.source_url)
+        )
         if entry.source_url not in selected
     ]
     if max_profiles is not None:
         extras = extras[:max_profiles]
     for entry in extras:
         selected[entry.source_url] = entry
-    return sorted(selected.values(), key=lambda item: item.source_url)
+    return list(selected.values())
 
 
 def _visible_profile_urls(agenda: pd.DataFrame) -> set[str]:
@@ -893,7 +913,7 @@ def _last_good_protected_paths(raw_dir: Path, resource_dir: Path) -> set[Path]:
             continue
         if not isinstance(raw_path, str):
             raise TennisRatioStoreError("last_good compressed_path must be text or null.")
-        resolved = Path(raw_path).resolve()
+        resolved = relocated_data_path(raw_path)
         if snapshot_root not in resolved.parents:
             raise TennisRatioStoreError("last_good compressed_path escaped the snapshot root.")
         if resolved.parent == target_directory:
@@ -1144,7 +1164,7 @@ def _reconcile_last_good(store: TennisRatioStore, raw_dir: Path) -> None:
     row = store.latest_published_manifest_row()
     if row is None:
         return
-    immutable = Path(str(row["manifest_path"])).resolve()
+    immutable = relocated_data_path(str(row["manifest_path"]))
     manifests_dir = (raw_dir / "manifests").resolve()
     if immutable.parent != manifests_dir or not immutable.is_file():
         raise TennisRatioStoreError(

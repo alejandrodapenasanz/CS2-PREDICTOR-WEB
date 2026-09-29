@@ -31,6 +31,7 @@ from src.config import (  # noqa: E402
     PLAYER_MAPPING_DATABASE_PATH,
 )
 from src.operations import reconcile_stored_tennis_explorer_results  # noqa: E402
+from src.operations.result_recovery import recover_results  # noqa: E402
 
 
 def _parse_date(value: str) -> date:
@@ -69,6 +70,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=PLAYER_MAPPING_DATABASE_PATH,
         help="SQLite auditable de identidades Tennis Explorer.",
     )
+    parser.add_argument(
+        "--recover-details",
+        action="store_true",
+        help="Recuperación acotada de resultados y sets pendientes, también ya liquidados.",
+    )
+    parser.add_argument("--max-result-dates", type=int, default=3)
+    parser.add_argument("--max-result-profiles", type=int, default=10)
     return parser
 
 
@@ -78,6 +86,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     cutoff = args.before_date or date.today()
     try:
+        if args.recover_details:
+            if args.before_date is not None:
+                raise ValueError(
+                    "--before-date solo aplica al replay local; recovery usa la captura real actual."
+                )
+            recover_results(
+                database_path=args.database,
+                mapping_database_path=args.mapping_database,
+                max_dates=args.max_result_dates,
+                max_profiles=args.max_result_profiles,
+            )
+            return 0
         reports = reconcile_stored_tennis_explorer_results(
             cutoff,
             database_path=args.database,

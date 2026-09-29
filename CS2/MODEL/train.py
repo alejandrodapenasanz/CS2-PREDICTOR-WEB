@@ -80,6 +80,7 @@ from cs2model.features import (
     _period_index,
 )
 from cs2model.metrics import metric_dict, calibration_bins
+from cs2model.match_rankings import MATCH_RANKING_COLUMNS, MATCH_RANKING_VERSION
 from cs2model.segment_calibration import (
     segment_calibration as _segment_calibration,
     segment_calibration_suite as _segment_calibration_suite,
@@ -133,9 +134,10 @@ from cs2model.promotion import (
 )
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 DEFAULT_CONFIG = load_config()
 DEFAULT_RAW = (
-    ROOT
+    STATE_ROOT
     / "SCRAPER"
     / "hltv-scraper-api"
     / "hltv_scraper"
@@ -144,9 +146,9 @@ DEFAULT_RAW = (
     / "history_10000_2026-06-28"
     / "results_all.json"
 )
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-OUTPUT_DIR = ROOT / "MODEL" / "results"
-MODEL_REGISTRY_DIR = ROOT / "MODEL" / "artifacts" / "registry"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+OUTPUT_DIR = STATE_ROOT / "MODEL" / "results"
+MODEL_REGISTRY_DIR = STATE_ROOT / "MODEL" / "artifacts" / "registry"
 ODDS_FEATURE_COLUMNS = list(ODDS_FEATURE_COLUMN_NAMES)
 EXTRA_DIFF_COLUMNS = {
     "opening_odds_prob_centered",
@@ -168,6 +170,7 @@ PLAYER_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("player_snapshots"
 MAP_ASSET_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("map_box_scores", 200)
 EVENT_HISTORY_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("event_history", 200)
 RANKING_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("rankings", 200)
+MATCH_RANKING_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("match_rankings", 200)
 ROSTER_MIN_TRAIN_ROWS = DEFAULT_CONFIG.feature_thresholds.get("roster", 200)
 # Ratings adicionales auto-gated. MOV y TrueSkill son reconstruibles de todo el
 # histórico (umbral alto = entran con historia suficiente); el rating por jugador
@@ -249,6 +252,7 @@ AUTO_FEATURE_FAMILIES = (
     ("event_metadata", EVENT_METADATA_FEATURE_COLUMNS, "event_metadata_available", EVENT_METADATA_MIN_TRAIN_ROWS),
     ("player_snapshots", PLAYER_FEATURE_COLUMNS, "player_snapshot_available", PLAYER_MIN_TRAIN_ROWS),
     ("rankings", RANKING_FEATURE_COLUMNS, "ranking_available", RANKING_MIN_TRAIN_ROWS),
+    ("match_rankings", MATCH_RANKING_COLUMNS, "match_ranking_available", MATCH_RANKING_MIN_TRAIN_ROWS),
     ("roster", ROSTER_FEATURE_COLUMNS, "roster_available", ROSTER_MIN_TRAIN_ROWS),
     ("mov_rating", MOV_FEATURE_COLUMNS, "mov_available", MOV_MIN_TRAIN_ROWS),
     ("team_trueskill", TRUESKILL_FEATURE_COLUMNS, "trueskill_available", TRUESKILL_MIN_TRAIN_ROWS),
@@ -417,9 +421,7 @@ def candidate_feature_columns(
 ) -> list[str]:
     """Target-free feature universe; activation is decided inside each fold."""
     columns = list(FEATURE_COLUMNS if feature_profile == "error-aware" else BASE_FEATURE_COLUMNS)
-    for _, family_columns, _, _ in fold_local_family_specs(
-        feature_thresholds, include_segment_interactions
-    ):
+    for _, family_columns, _, _ in fold_local_family_specs(feature_thresholds, include_segment_interactions):
         columns.extend(family_columns)
     # Standalone causal-rating candidates need their columns in the matrix even
     # though they do not enter the generic learner.
@@ -1292,11 +1294,7 @@ def walk_forward(
 
     elo_idx = cols.index("elo_prob_centered")
     glicko_idx = cols.index("glicko_prob_centered")
-    roster_glicko_idx = (
-        cols.index("roster_glicko_prob_centered")
-        if "roster_glicko_prob_centered" in cols
-        else None
-    )
+    roster_glicko_idx = cols.index("roster_glicko_prob_centered") if "roster_glicko_prob_centered" in cols else None
     learner_cols = list(learner_cols or cols)
     base_learner_cols = list(base_learner_cols or learner_cols)
     current_learner_cols = list(learner_cols)
@@ -1308,9 +1306,7 @@ def walk_forward(
         name: cols.index(column) for name, column in RATING_CANDIDATE_COLUMNS.items() if column in cols
     }
     rating_diagnostics = {
-        name: cols.index(column)
-        for name, column in RATING_DIAGNOSTIC_COLUMNS.items()
-        if column in cols
+        name: cols.index(column) for name, column in RATING_DIAGNOSTIC_COLUMNS.items() if column in cols
     }
     current_logistic_c = 0.5
     tuning_events: list[dict[str, Any]] = []
@@ -1404,9 +1400,7 @@ def walk_forward(
         elo_p = np.clip(X_te_full[:, elo_idx] + 0.5, 1e-4, 1 - 1e-4)
         glicko_p = np.clip(X_te_full[:, glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
         roster_glicko_p = (
-            np.clip(X_te_full[:, roster_glicko_idx] + 0.5, 1e-4, 1 - 1e-4)
-            if roster_glicko_idx is not None
-            else None
+            np.clip(X_te_full[:, roster_glicko_idx] + 0.5, 1e-4, 1 - 1e-4) if roster_glicko_idx is not None else None
         )
 
         # Ajusta cada tipo de base una vez (con sus calibradores) y reusa.
@@ -1438,11 +1432,7 @@ def walk_forward(
         }.items():
             try:
                 rating_estimator = fit_probability_column_estimator(X_tr_full, y_tr, column_index, sample_weight=sw_tr)
-                target = (
-                    rating_arrays
-                    if rating_name in rating_candidates
-                    else diagnostic_rating_arrays
-                )
+                target = rating_arrays if rating_name in rating_candidates else diagnostic_rating_arrays
                 target[rating_name] = _proba(rating_estimator, X_te_full)
             except Exception:
                 if verbose:
@@ -1512,9 +1502,7 @@ def walk_forward(
             preds["elo"].append({**common, "prob_team1": float(elo_p[i])})
             preds["glicko"].append({**common, "prob_team1": float(glicko_p[i])})
             if roster_glicko_p is not None:
-                preds["roster_glicko"].append(
-                    {**common, "prob_team1": float(roster_glicko_p[i])}
-                )
+                preds["roster_glicko"].append({**common, "prob_team1": float(roster_glicko_p[i])})
             for name, arr in cand.items():
                 preds[name].append({**common, "prob_team1": float(arr[i])})
     selection_candidates = [name for name in [*specs, *rating_candidates] if preds.get(name)]
@@ -1670,13 +1658,8 @@ def roster_rating_challenger_report(
 
     current_rows = {str(row["match_id"]): row for row in preds.get("glicko", [])}
     roster_rows = preds.get("roster_glicko", [])
-    calibrated_rows = {
-        str(row["match_id"]): row for row in preds.get("roster_glicko_cal", [])
-    }
-    calibrated_current_rows = {
-        str(row["match_id"]): row
-        for row in preds.get("glicko_cal_diagnostic", [])
-    }
+    calibrated_rows = {str(row["match_id"]): row for row in preds.get("roster_glicko_cal", [])}
+    calibrated_current_rows = {str(row["match_id"]): row for row in preds.get("glicko_cal_diagnostic", [])}
     examples: list[dict[str, Any]] = []
     for row in roster_rows:
         if not (
@@ -1706,12 +1689,8 @@ def roster_rating_challenger_report(
                 "probability_delta": roster_probability - current_probability,
                 "team1_retained": int(row.get("roster_retained_players_team1", 0) or 0),
                 "team2_retained": int(row.get("roster_retained_players_team2", 0) or 0),
-                "team1_credit_fraction": float(
-                    row.get("roster_credit_fraction_team1", 1.0) or 1.0
-                ),
-                "team2_credit_fraction": float(
-                    row.get("roster_credit_fraction_team2", 1.0) or 1.0
-                ),
+                "team1_credit_fraction": float(row.get("roster_credit_fraction_team1", 1.0) or 1.0),
+                "team2_credit_fraction": float(row.get("roster_credit_fraction_team2", 1.0) or 1.0),
             }
         )
     examples.sort(key=lambda row: abs(float(row["probability_delta"])), reverse=True)
@@ -1739,9 +1718,7 @@ def roster_rating_challenger_report(
         "core_change_subset": {
             "current_raw": subset_metrics(current_rows),
             "current_calibrated_control": subset_metrics(calibrated_current_rows),
-            "roster_raw": subset_metrics(
-                {str(row["match_id"]): row for row in roster_rows}
-            ),
+            "roster_raw": subset_metrics({str(row["match_id"]): row for row in roster_rows}),
             "roster_calibrated": subset_metrics(calibrated_rows),
             "interpretation": "descriptive_only_small_n",
         },
@@ -2162,28 +2139,16 @@ def _architecture_report(
     for name, rows_for_architecture in prediction_rows.items():
         regimes[name] = {}
         for regime in ("odds", "no_odds"):
-            selected = [
-                row
-                for row in rows_for_architecture
-                if row.get("prediction_regime") == regime
-            ]
+            selected = [row for row in rows_for_architecture if row.get("prediction_regime") == regime]
             regime_metrics = summarize({name: selected}).get(name, {})
             y_true = np.asarray([int(row["actual"]) for row in selected], dtype=int)
-            probabilities = np.asarray(
-                [float(row["prob_team1"]) for row in selected], dtype=float
-            )
+            probabilities = np.asarray([float(row["prob_team1"]) for row in selected], dtype=float)
             regimes[name][regime] = {
                 **regime_metrics,
-                "calibration": (
-                    calibration_bins(y_true, probabilities, 10) if selected else []
-                ),
+                "calibration": (calibration_bins(y_true, probabilities, 10) if selected else []),
             }
     total = len(next(iter(prediction_rows.values()), []))
-    no_odds = sum(
-        1
-        for row in next(iter(prediction_rows.values()), [])
-        if row.get("prediction_regime") == "no_odds"
-    )
+    no_odds = sum(1 for row in next(iter(prediction_rows.values()), []) if row.get("prediction_regime") == "no_odds")
     return {
         "available": bool(ranking),
         "ranking": ranking,
@@ -2225,11 +2190,7 @@ def evaluate_odds_architectures(
         train_odds_mask = train_mask & odds_mask
         candidate_test_indices = np.where(periods == period)[0]
         test_indices = np.asarray(
-            [
-                index
-                for index in candidate_test_indices
-                if str(meta[index]["id"]) in reserve_by_id
-            ],
+            [index for index in candidate_test_indices if str(meta[index]["id"]) in reserve_by_id],
             dtype=int,
         )
         if int(train_odds_mask.sum()) < min_train_odds or len(test_indices) == 0:
@@ -2247,9 +2208,7 @@ def evaluate_odds_architectures(
                 mixed_columns,
                 cal_frac=calibration_fraction,
                 random_state=random_seed + 20_000 + fold_index,
-                sample_weight=_recency_weights(
-                    periods[train_odds_mask], recency_half_life
-                ),
+                sample_weight=_recency_weights(periods[train_odds_mask], recency_half_life),
             )
             _mixed_base, mixed_model = fit_calibrated(
                 "gbm",
@@ -2258,9 +2217,7 @@ def evaluate_odds_architectures(
                 mixed_columns,
                 cal_frac=calibration_fraction,
                 random_state=random_seed + 30_000 + fold_index,
-                sample_weight=_recency_weights(
-                    periods[train_mask], recency_half_life
-                ),
+                sample_weight=_recency_weights(periods[train_mask], recency_half_life),
             )
         except (RuntimeError, ValueError):
             # A chronological calibration tail can legitimately contain one
@@ -2289,12 +2246,8 @@ def evaluate_odds_architectures(
                 if regime == "odds"
                 else float(reserve_by_id[match_id]["prob_team1"])
             )
-            predictions["router_two_models"].append(
-                {**common, "prob_team1": router_probability}
-            )
-            predictions["single_mixed_lgbm"].append(
-                {**common, "prob_team1": float(mixed_predictions[local_index])}
-            )
+            predictions["router_two_models"].append({**common, "prob_team1": router_probability})
+            predictions["single_mixed_lgbm"].append({**common, "prob_team1": float(mixed_predictions[local_index])})
         fold_rows.append(
             {
                 "period": int(period),
@@ -2314,10 +2267,7 @@ def evaluate_odds_architectures(
                 "router: dedicated calibrated LightGBM with opening odds + "
                 "independently tuned/calibrated no-odds reserve"
             ),
-            "candidate_b": (
-                "single calibrated LightGBM with native NaN opening odds and "
-                "odds_available indicator"
-            ),
+            "candidate_b": ("single calibrated LightGBM with native NaN opening odds and odds_available indicator"),
             "evaluation_contract": {
                 "kind": "prequential_refit_per_period",
                 "reserve_model": reserve_model,
@@ -2395,7 +2345,7 @@ def main() -> int:
     parser.add_argument("--db", default=str(DEFAULT_DB), help="BBDD viva usada como fuente por defecto.")
     parser.add_argument(
         "--master",
-        default=str(ROOT / "PIPELINE" / "master" / "matches.json"),
+        default=str(STATE_ROOT / "PIPELINE" / "master" / "matches.json"),
         help="Master diario opcional que se combina con --raw; usa un JSON vacio para aislar un experimento.",
     )
     parser.add_argument("--output-dir", default=str(OUTPUT_DIR))
@@ -2545,9 +2495,7 @@ def main() -> int:
     if ENHANCED_AVAILABLE_COLUMN not in model_columns:
         model_columns.append(ENHANCED_AVAILABLE_COLUMN)
     candidate_only_columns = (
-        set(BAYES_BT_FEATURE_COLUMNS)
-        | set(KALMAN_FEATURE_COLUMNS)
-        | set(ROSTER_RATING_CANDIDATE_FEATURE_COLUMNS)
+        set(BAYES_BT_FEATURE_COLUMNS) | set(KALMAN_FEATURE_COLUMNS) | set(ROSTER_RATING_CANDIDATE_FEATURE_COLUMNS)
     )
     base_learner_columns = list(FEATURE_COLUMNS if args.feature_profile == "error-aware" else BASE_FEATURE_COLUMNS)
     if ENHANCED_AVAILABLE_COLUMN not in base_learner_columns:
@@ -2559,9 +2507,7 @@ def main() -> int:
         )
     feature_policies["roster_sensitive_rating"] = {
         "available_rows": sum(
-            1
-            for features in X_dicts
-            if float(features.get("roster_rating_comparable", 0.0) or 0.0) >= 0.5
+            1 for features in X_dicts if float(features.get("roster_rating_comparable", 0.0) or 0.0) >= 0.5
         ),
         "core_change_rows": sum(
             1
@@ -2905,9 +2851,7 @@ def main() -> int:
         model_b_columns,
         random_seed=args.seed,
     )
-    opening_odds_min_rows = int(
-        runtime_config.feature_thresholds.get("opening_odds", 120)
-    )
+    opening_odds_min_rows = int(runtime_config.feature_thresholds.get("opening_odds", 120))
     architecture_report, architecture_predictions = evaluate_odds_architectures(
         X_model_b,
         y_all,
@@ -2924,34 +2868,22 @@ def main() -> int:
     architecture_recipe_predictions = architecture_predictions
     if recipe_cutoff is not None:
         architecture_recipe_predictions = {
-            name: [
-                row
-                for row in candidate_rows
-                if str(row.get("date") or "")[:10] <= recipe_cutoff
-            ]
+            name: [row for row in candidate_rows if str(row.get("date") or "")[:10] <= recipe_cutoff]
             for name, candidate_rows in architecture_predictions.items()
         }
-    architecture_recipe_report = _architecture_report(
-        architecture_recipe_predictions
-    )
+    architecture_recipe_report = _architecture_report(architecture_recipe_predictions)
     architecture_report["frozen_recipe"] = architecture_recipe_report
     if recipe_cutoff is not None:
         # The full-history ranking remains diagnostic only.  Falling back to it
         # here would let post-cutoff results choose the recipe being promoted.
-        winning_architecture = str(
-            architecture_recipe_report.get("winner") or "model_a_no_odds"
-        )
+        winning_architecture = str(architecture_recipe_report.get("winner") or "model_a_no_odds")
     else:
-        winning_architecture = str(
-            architecture_report.get("winner") or "model_a_no_odds"
-        )
+        winning_architecture = str(architecture_report.get("winner") or "model_a_no_odds")
     architecture_report["production_candidate"] = winning_architecture
     architecture_report["recipe_cutoff"] = recipe_cutoff
     architecture_report["realistic_accuracy_ceiling"] = {
         "with_opening_odds": "approximately 70%; not a guarantee",
-        "without_odds": (
-            "structurally lower; objective is the closest robust result, not parity"
-        ),
+        "without_odds": ("structurally lower; objective is the closest robust result, not parity"),
     }
     feature_policies["opening_odds_model_b"] = {
         "available_rows": int(model_b.get("n_odds_rows", n_daily)),
@@ -3061,9 +2993,7 @@ def main() -> int:
         "recency_half_life_days": args.recency_half_life,
         "seed": int(args.seed),
     }
-    roster_rating_report["artifact_uses_roster_rating"] = (
-        "roster_glicko_cal" in final_component_names
-    )
+    roster_rating_report["artifact_uses_roster_rating"] = "roster_glicko_cal" in final_component_names
     recipe_sha256 = hashlib.sha256(
         json.dumps(recipe_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
@@ -3116,16 +3046,12 @@ def main() -> int:
                 cal_frac=training_defaults.final_calibration_fraction,
                 random_state=args.seed,
                 verbose=args.verbose,
-                sample_weight=_recency_weights(
-                    periods[primary_mask], args.recency_half_life
-                ),
+                sample_weight=_recency_weights(periods[primary_mask], args.recency_half_life),
             )
             calibrated = calibrators.get("sigmoid")
             if calibrated is None:
                 raise SystemExit("No se pudo calibrar el primario con opening odds.")
-            odds_components.append(
-                Component("opening_odds_lightgbm_cal", calibrated, None, 1.0)
-            )
+            odds_components.append(Component("opening_odds_lightgbm_cal", calibrated, None, 1.0))
         elif winning_architecture == "single_mixed_lgbm":
             _base, calibrators = fit_calibrated_multi(
                 "gbm",
@@ -3136,16 +3062,12 @@ def main() -> int:
                 cal_frac=training_defaults.final_calibration_fraction,
                 random_state=args.seed,
                 verbose=args.verbose,
-                sample_weight=_recency_weights(
-                    periods[fit_mask], args.recency_half_life
-                ),
+                sample_weight=_recency_weights(periods[fit_mask], args.recency_half_life),
             )
             calibrated = calibrators.get("sigmoid")
             if calibrated is None:
                 raise SystemExit("No se pudo calibrar el modelo mixto con odds NaN.")
-            mixed_components.append(
-                Component("mixed_opening_odds_lightgbm_cal", calibrated, None, 1.0)
-            )
+            mixed_components.append(Component("mixed_opening_odds_lightgbm_cal", calibrated, None, 1.0))
         return odds_components, mixed_components
 
     promotion_challenger_oos: list[dict[str, Any]] = []
@@ -3166,9 +3088,7 @@ def main() -> int:
                 sample_weight=_recency_weights(periods[recipe_mask], args.recency_half_life),
                 estimator_params={"C": final_logistic_c} if kind == "logistic" else None,
             )
-        shadow_odds_components, shadow_mixed_components = fit_architecture_route(
-            recipe_mask
-        )
+        shadow_odds_components, shadow_mixed_components = fit_architecture_route(recipe_mask)
         shadow = ModelArtifact(
             feature_columns=list(model_columns),
             components=fit_recipe_components(recipe_mask, fitted_shadow),
@@ -3195,9 +3115,7 @@ def main() -> int:
                 "date": meta[index]["date"],
                 "actual": int(y_list[index]),
                 "prob_team1": float(probability),
-                "prediction_regime": shadow.prediction_regime(
-                    X_model_b_dicts[index]
-                ),
+                "prediction_regime": shadow.prediction_regime(X_model_b_dicts[index]),
             }
             for index, probability in zip(holdout_indices, holdout_probabilities, strict=True)
         ]
@@ -3219,9 +3137,7 @@ def main() -> int:
             estimator_params={"C": final_logistic_c} if kind == "logistic" else None,
         )
     components = fit_recipe_components(np.ones(len(y_all), dtype=bool), fitted_full)
-    final_odds_components, final_mixed_components = fit_architecture_route(
-        np.ones(len(y_all), dtype=bool)
-    )
+    final_odds_components, final_mixed_components = fit_architecture_route(np.ones(len(y_all), dtype=bool))
 
     print("[5/6] Importancia SHAP…", flush=True)
     gbm_base = fitted_full.get("gbm", (None,))[0]
@@ -3270,6 +3186,8 @@ def main() -> int:
             "player_snapshot_features": player_policy,
             "map_box_score_features": feature_policies["map_box_scores"],
             "ranking_features": feature_policies["rankings"],
+            "match_ranking_features": feature_policies["match_rankings"],
+            "match_ranking_contract": MATCH_RANKING_VERSION,
             "roster_features": feature_policies["roster"],
             "feature_policies": feature_policies,
             "enhanced_info": {
@@ -3526,9 +3444,7 @@ def main() -> int:
                     "actual": int(label),
                     "features": features,
                 }
-                for features, label, match_meta in zip(
-                    X_model_b_dicts, y_list, meta, strict=True
-                )
+                for features, label, match_meta in zip(X_model_b_dicts, y_list, meta, strict=True)
             ]
             decision = compare_candidate_to_incumbent(
                 incumbent,
@@ -3557,10 +3473,7 @@ def main() -> int:
                     "challenger": "one frozen shadow fitted through recipe_cutoff",
                     "incumbent": "live artifact scored on the same point-in-time feature rows",
                     "router": "selected row-by-row by validated odds_available",
-                    "odds": (
-                        "training_opening_odds: first stored opening, "
-                        "captured_at_utc < kickoff_utc, de-vigged"
-                    ),
+                    "odds": ("training_opening_odds: first stored opening, captured_at_utc < kickoff_utc, de-vigged"),
                 },
             }
         )
@@ -3917,9 +3830,7 @@ def _write_report(
 
     segment_calibration_result = artifact.metadata.get("segment_calibration") or {}
     lines.append("\n## Calibracion por segmento (A3)\n\n")
-    lines.append(
-        "| Dimension | Segmento | N | Prob. media | Tasa real | Gap | ECE | Estado |\n"
-    )
+    lines.append("| Dimension | Segmento | N | Prob. media | Tasa real | Gap | ECE | Estado |\n")
     lines.append("|---|---|---:|---:|---:|---:|---:|---|\n")
     for dimension in (
         "by_elo_gap",

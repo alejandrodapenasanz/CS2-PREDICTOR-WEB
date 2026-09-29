@@ -8,7 +8,6 @@ scripts/retrain_models.py
 scripts/scrape_tennis_explorer.py
 scripts/update_sources.py
 src/artifact_integrity.py
-src/config.py
 src/daily_pipeline/confidence.py
 src/daily_pipeline/context.py
 src/data_loaders.py
@@ -19,7 +18,6 @@ src/elo/parameters.py
 src/elo/service.py
 src/elo/store.py
 src/elo/types.py
-src/features/dataset.py
 src/features/levels.py
 src/features/market.py
 src/features/orientation.py
@@ -34,20 +32,15 @@ src/identity_integrity.py
 src/modeling/backtest.py
 src/modeling/baselines.py
 src/modeling/calibration.py
-src/modeling/data.py
 src/modeling/estimators.py
 src/modeling/evaluation.py
 src/modeling/metrics.py
 src/modeling/orientation.py
 src/modeling/parameters.py
-src/modeling/plots.py
 src/modeling/preprocessing.py
 src/modeling/reporting.py
-src/modeling/service.py
 src/modeling/splits.py
-src/modeling/training.py
 src/operations/identifiers.py
-src/operations/store.py
 src/operations/types.py
 src/operations/validation.py
 src/player_mapping/candidates.py
@@ -79,7 +72,6 @@ tests/test_model_estimators.py
 tests/test_model_orientation.py
 tests/test_model_parameters.py
 tests/test_model_preprocessing.py
-tests/test_model_training.py
 tests/test_modeling_calibration.py
 tests/test_modeling_metrics.py
 tests/test_modeling_splits.py

@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
 if str(ROOT / "MODEL") not in sys.path:
     sys.path.insert(0, str(ROOT / "MODEL"))
 
@@ -45,8 +46,8 @@ from cs2model.metrics import metric_dict  # noqa: E402
 from train import DEFAULT_RAW, ODDS_FEATURE_COLUMNS, add_odds_features  # noqa: E402
 
 
-OUTPUT_JSON = ROOT / "MODEL" / "results" / "all_available_backtest.json"
-OUTPUT_MD = ROOT / "MODEL" / "results" / "ALL_AVAILABLE_BACKTEST.md"
+OUTPUT_JSON = STATE_ROOT / "MODEL" / "results" / "all_available_backtest.json"
+OUTPUT_MD = STATE_ROOT / "MODEL" / "results" / "ALL_AVAILABLE_BACKTEST.md"
 
 POSTVETO_DIFF_COLUMNS = [
     "postveto_played_map_edge_diff",
@@ -61,7 +62,12 @@ POSTVETO_SYM_COLUMNS = [
     "postveto_min_map_samples",
 ]
 POSTVETO_COLUMNS = POSTVETO_DIFF_COLUMNS + POSTVETO_SYM_COLUMNS
-EXTRA_DIFF_COLUMNS = set(MAP_ASSET_DIFF_COLUMNS) | set(ANALYTICS_DIFF_COLUMNS) | set(POSTVETO_DIFF_COLUMNS) | {"opening_odds_prob_centered"}
+EXTRA_DIFF_COLUMNS = (
+    set(MAP_ASSET_DIFF_COLUMNS)
+    | set(ANALYTICS_DIFF_COLUMNS)
+    | set(POSTVETO_DIFF_COLUMNS)
+    | {"opening_odds_prob_centered"}
+)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -268,7 +274,9 @@ def coverage_summary(rows: list[dict[str, Any]], X: list[dict[str, float]]) -> d
     out: dict[str, Any] = {
         "rows_total": len(rows),
         "asset_payload_same_match": sum(1 for row in rows if isinstance(row.get("asset"), dict)),
-        "analytics_point_in_time": sum(1 for row in rows if isinstance(row.get("analytics"), dict) and row["analytics"].get("available")),
+        "analytics_point_in_time": sum(
+            1 for row in rows if isinstance(row.get("analytics"), dict) and row["analytics"].get("available")
+        ),
         "opening_odds": sum(1 for row in rows if row.get("opening_odds_t1") is not None),
         "prior_asset_both_teams": sum(1 for feats in X if (feats.get("asset_maps_played_min") or 0) > 0),
         "prior_asset_any_team": sum(1 for feats in X if (feats.get("asset_maps_played_total") or 0) > 0),
@@ -333,7 +341,7 @@ def write_report(payload: dict[str, Any], path: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Backtest experimental con stats/mapstats/veto/analytics disponibles.")
     parser.add_argument("--raw", default=str(DEFAULT_RAW))
-    parser.add_argument("--master", default=str(ROOT / "PIPELINE" / "master" / "matches.json"))
+    parser.add_argument("--master", default=str(STATE_ROOT / "PIPELINE" / "master" / "matches.json"))
     parser.add_argument("--warmup-weeks", type=int, default=10)
     parser.add_argument("--min-train", type=int, default=800)
     args = parser.parse_args()
@@ -360,9 +368,24 @@ def main() -> int:
 
     for name, source, cols, note in [
         ("pre_match_sin_assets", X_dicts, no_asset_cols, "Modelo logistico walk-forward sin stats/mapstats."),
-        ("pre_match_con_assets_rolling", X_dicts, asset_cols, "Incluye historiales previos de mapstats/player stats; no usa boxscore del mismo partido."),
-        ("pre_match_assets_analytics_forzado", X_dicts, analytics_cols, "Analytics forzado aunque no llega al umbral productivo de 120 filas."),
-        ("pre_match_assets_analytics_odds_forzado", X_with_odds, odds_cols, "Incluye odds point-in-time; diagnostico, no modelo estadistico puro."),
+        (
+            "pre_match_con_assets_rolling",
+            X_dicts,
+            asset_cols,
+            "Incluye historiales previos de mapstats/player stats; no usa boxscore del mismo partido.",
+        ),
+        (
+            "pre_match_assets_analytics_forzado",
+            X_dicts,
+            analytics_cols,
+            "Analytics forzado aunque no llega al umbral productivo de 120 filas.",
+        ),
+        (
+            "pre_match_assets_analytics_odds_forzado",
+            X_with_odds,
+            odds_cols,
+            "Incluye odds point-in-time; diagnostico, no modelo estadistico puro.",
+        ),
     ]:
         preds = walk_forward_logistic(
             matrix(source, cols),
@@ -431,8 +454,7 @@ def main() -> int:
         "esta por debajo del umbral minimo razonable (120 filas cerradas por bloque) y el modo post-veto "
         "solo sirve como senal exploratoria. El modelo productivo queda como estaba."
         if not enough
-        else
-        "Hay muestra suficiente para plantear una promocion, pero debe revisarse manualmente antes de tocar produccion."
+        else "Hay muestra suficiente para plantear una promocion, pero debe revisarse manualmente antes de tocar produccion."
     )
 
     payload = {

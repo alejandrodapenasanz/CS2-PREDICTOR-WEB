@@ -44,7 +44,15 @@ class CloudflareSessionMiddleware:
     """Aplica cf_clearance guardado por grab_cf.py a las peticiones HLTV."""
 
     def __init__(self):
-        self.session_file = Path(__file__).resolve().parents[1] / "cf_session.json"
+        self.session_file = (
+            Path(__file__).resolve().parents[5]
+            / "VAULT"
+            / "CS2"
+            / "SCRAPER"
+            / "hltv-scraper-api"
+            / "hltv_scraper"
+            / "cf_session.json"
+        )
         self.cf_clearance = None
         self.user_agent = None
         self._load_session()

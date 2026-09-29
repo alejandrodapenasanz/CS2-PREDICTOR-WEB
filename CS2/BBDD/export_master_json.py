@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DB = ROOT / "BBDD" / "cs2.db"
-DEFAULT_OUT = ROOT / "PIPELINE" / "master" / "matches.json"
+STATE_ROOT = ROOT.parent / "VAULT" / "CS2"
+DEFAULT_DB = STATE_ROOT / "BBDD" / "cs2.db"
+DEFAULT_OUT = STATE_ROOT / "PIPELINE" / "master" / "matches.json"
 
 
 def read_json(path: Path, default: Any) -> Any:
